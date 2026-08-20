@@ -1,0 +1,13 @@
+#pragma once
+// Generated from the CMake project() version by configure_file — do not edit.
+// Single source of truth: the VERSION in the top-level CMakeLists.txt.
+
+#define RCDL_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define RCDL_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define RCDL_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define RCDL_VERSION_STRING "@PROJECT_VERSION@"
+
+// Numeric form for comparisons, e.g. RCDL_VERSION >= RCDL_VERSION_CHECK(0, 2, 0).
+#define RCDL_VERSION_CHECK(major, minor, patch) ((major) * 10000 + (minor) * 100 + (patch))
+#define RCDL_VERSION \
+  RCDL_VERSION_CHECK(RCDL_VERSION_MAJOR, RCDL_VERSION_MINOR, RCDL_VERSION_PATCH)

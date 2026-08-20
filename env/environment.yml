@@ -1,0 +1,20 @@
+# Board-side conda env for building & testing RCDL (linux-aarch64).
+# Created by scripts/bootstrap_board.sh:  conda env create -f env/environment.yml
+#
+# The Rockchip runtime libs (librknnrt / librga / librockchip_mpp) are NOT in
+# here: the build links them from the board image (/usr/lib, /usr/include/rga,
+# /usr/include/rockchip) or from the rcdl conda channel's packages once those
+# are published. Kernel drivers always come from the board image.
+name: rcdl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - cmake>=3.22
+  - ninja
+  - nanobind
+  - numpy
+  - pytest
+  - pip
+  - libopencv      # cv::resize / findContours / minAreaRect for the task layer (optional in CMake)
+  - py-opencv      # cv2 for tests and the Python helpers

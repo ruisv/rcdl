@@ -1,0 +1,37 @@
+# Build the nanobind Python module as a pip-installable wheel via scikit-build-core.
+# NOTE: building requires the Rockchip RKNPU2 runtime (librknnrt + rknn_api.h)
+# and runs on an aarch64 Rockchip board only (the CMake build guards on aarch64 +
+# find_package(Rknn)). So `pip install .` is a board-side operation. Keep
+# `version` in sync with the project() VERSION in CMakeLists.txt.
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "rcdl"
+version = "0.1.0"
+description = "RKNPU inference & media library for Rockchip RK3588 / RK3576 / RK356x, with Python bindings"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "RCDL contributors" }]
+keywords = ["Rockchip", "RK3588", "RKNN", "RKNPU", "NPU", "inference", "YOLO", "nanobind"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+opencv = ["opencv-python"]
+test = ["pytest"]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.18"
+cmake.args = ["-DRCDL_BUILD_EXAMPLES=OFF"]
+build-dir = "build/skbuild"
+wheel.packages = ["python/rcdl"]

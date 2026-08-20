@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+# rcdl's exported targets reference the Rockchip imported targets (rknn::rt,
+# and rockchip::rga / rockchip::mpp when they were enabled at build), so
+# consumers re-find them via the bundled Find modules.
+include(CMakeFindDependencyMacro)
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+find_dependency(Rknn)
+find_dependency(Threads)
+@RCDL_PACKAGE_OPTIONAL_DEPS@
+
+include("${CMAKE_CURRENT_LIST_DIR}/rcdlTargets.cmake")
+
+check_required_components(rcdl)

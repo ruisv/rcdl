@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# RCDL .gitignore — this repository is public. Anything local, private or
+# generated is ignored here so it can never be committed by accident.
+# ---------------------------------------------------------------------------
+
+# build artifacts
+build/
+build-*/
+*.so
+*.o
+*.a
+compile_commands.json
+dist/
+wheelhouse/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# vendor SDK mirrors (pulled from the board / upstream for building and for
+# IntelliSense; redistribution is governed by their own licenses, so they are
+# never committed): scripts/fetch_sdk.sh + scripts/fetch_sysroot.sh
+third_party/
+
+# models / data — model binaries live in models/ (populated by
+# scripts/fetch_models.sh); too large and not ours to redistribute
+*.rknn
+*.onnx
+*.torchscript
+*.tflite
+*.bin
+models/*
+!models/README.md
+tests/data/
+benchmarks/raw/
+
+# local machine config (ssh aliases, paths) — never commit
+scripts/local.env
+local/
+.env
+.env.*
+
+# private notes: infra topology, engineering log, anything with hostnames,
+# IPs, customer context. docs/ is public; docs/private/ is not.
+docs/private/
+*.local.md
+
+# Root-level notes files are local (working notes, tool instructions); only the
+# project's own documents are tracked.
+/[A-Z]*.md
+!/README*.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+
+# Hidden files/dirs at the root are editor / tool state, except the few the
+# project owns.
+/.*
+!/.gitignore
+!/.gitattributes
+!/.editorconfig
+!/.clang-format
+!/.github/
+
+# OS / editor droppings anywhere
+.DS_Store
+*.swp
