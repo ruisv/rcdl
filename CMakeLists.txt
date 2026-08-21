@@ -66,6 +66,11 @@ add_library(rcdl SHARED
   src/preproc/letterbox_cpu.cc
   src/preproc/letterbox.cc
   src/tasks/detection.cc
+  src/media/mpp_common.cc
+  src/media/video_frame.cc
+  src/media/video_decoder.cc
+  src/media/video_encoder.cc
+  src/media/jpeg_codec.cc
   src/pipeline/detection_pipeline.cc)
 add_library(rcdl::rcdl ALIAS rcdl)
 
@@ -125,6 +130,10 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(npu_bench)
   rcdl_example(dma_buf_probe)
   rcdl_example(det_demo)
+  rcdl_example(video_decode)
+  rcdl_example(video_roundtrip)
+  rcdl_example(jpeg_roundtrip)
+  rcdl_example(video_det_demo)
 endif()
 
 # --- python module -----------------------------------------------------------

@@ -21,5 +21,8 @@
 #include "rcdl/preproc/rga.h"
 #include "rcdl/preproc/letterbox_cpu.h"
 #include "rcdl/preproc/letterbox.h"
+#include "rcdl/media/video_frame.h"
+#include "rcdl/media/video_codec.h"
+#include "rcdl/media/jpeg_codec.h"
 #include "rcdl/tasks/detection.h"
 #include "rcdl/pipeline/detection_pipeline.h"
