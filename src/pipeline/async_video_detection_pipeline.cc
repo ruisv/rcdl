@@ -1,5 +1,6 @@
 #include "rcdl/pipeline/async_video_detection_pipeline.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -25,6 +26,12 @@ inline double msBetween(std::chrono::steady_clock::time_point a,
 /// Granularity of an indefinite (`timeout_ms < 0`) feed: how long one attempt
 /// waits before looking again at whether the pipeline is shutting down.
 constexpr int kFeedSliceMs = 20;
+
+/// Consecutive empty flush attempts before the drain gives up on a decoder that
+/// has stopped producing frames without ever signalling end of stream. Each
+/// attempt carries VideoDecoder::flush's own wait, so this is seconds of silence
+/// rather than a spin.
+constexpr int kMaxEmptyFlushes = 20;
 
 /// Size the decoder's pool against what this pipeline holds at once: the frames
 /// parked in the queue, the one the drain thread is receiving into, and the one
@@ -114,7 +121,10 @@ struct AsyncVideoDetectionPipeline::Impl {
   Channel<VideoFrame> frames;
 
   std::thread drain_thr, lb_thr;
-  bool finished = false;  ///< caller side only (submit()/finish())
+  /// Set by finish() on the caller's thread and read by submit()/finished().
+  /// Atomic because finished() is the one accessor a second thread has a
+  /// reason to call — a driver that feeds on one thread and drains on another.
+  std::atomic<bool> finished{false};
 
   mutable std::mutex mu;            ///< guards the meta FIFO, the flags and the error
   std::deque<FrameMeta> meta;       ///< in flight, oldest first
@@ -189,6 +199,7 @@ struct AsyncVideoDetectionPipeline::Impl {
   }
 
   void drainStream() {
+    int empty_flushes = 0;
     for (;;) {
       VideoFrame frame;
       // Timed from here, across the empty polls too: the decode stage's service
@@ -204,10 +215,21 @@ struct AsyncVideoDetectionPipeline::Impl {
           std::lock_guard<std::mutex> lk(mu);
           done = input_done;
         }
-        if (done ? dec.flush(frame) : dec.receive(frame, poll_ms)) break;
-        // flush() returning false is the end of the stream; receive() timing out
-        // only means the decoder has nothing ready yet.
-        if (done) return;
+        if (done ? dec.flush(frame) : dec.receive(frame, poll_ms)) {
+          empty_flushes = 0;
+          break;
+        }
+        // receive() timing out only means the decoder has nothing ready yet.
+        //
+        // flush() returning false has TWO meanings and only one of them is the
+        // end: the decoder has signalled end of stream, or it simply had nothing
+        // ready inside its wait. Treating the second as the first truncates the
+        // tail of the stream whenever the board is busy enough for the decoder
+        // to fall behind that wait — and a truncated video looks exactly like a
+        // short one, with nothing to say frames went missing. So the decoder's
+        // own end-of-stream flag decides, and the attempt count is only a
+        // backstop for a stream whose EOS marker never arrives.
+        if (done && (dec.endOfStream() || ++empty_flushes >= kMaxEmptyFlushes)) return;
       }
       {
         std::lock_guard<std::mutex> lk(prof_mu);

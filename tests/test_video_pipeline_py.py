@@ -285,33 +285,50 @@ def test_back_pressure_is_a_return_value_not_a_deadlock(rcdl, stream):
     frames until a context frees, no context until results are drained, and the
     only thread that can drain is the one parked in submit(). Feeding without
     ever draining must therefore terminate — with submit() saying no.
+
+    The feed loop deliberately RE-FEEDS the stream rather than stopping at its
+    end: one 16-frame clip is swallowed whole without back-pressure ever being
+    reached, so a test that fed it once would pass without exercising the thing
+    it exists to check. It also runs on a worker thread with a join timeout,
+    because the failure being guarded against is a *hang*, and a hang inside the
+    test process reports nothing.
     """
     need(rcdl, "AsyncVideoDetectionPipeline")
+    import threading
     model = bm.require_model("yolov8n_rk3588.rknn")
     data, _, _ = stream
 
     engine = rcdl.Engine(model)
     pipe = engine.video_detector(codec="h264")
-    refused = False
-    fed = 0
-    # Bounded on purpose: with the bug this loop never gets here at all (it hangs
-    # inside submit()), and without it the refusal shows up within a few chunks.
-    for _ in range(4 * (len(data) // CHUNK + 2)):
-        if fed >= len(data):
-            break
-        n = min(CHUNK, len(data) - fed)
-        if pipe.submit(data[fed:fed + n], 50):
-            fed += n
-        else:
-            refused = True
-            break
-    assert refused or fed >= len(data), "submit() neither took the stream nor refused it"
-    if refused:
-        # And the refusal must be recoverable: drain, and it takes bytes again.
-        assert pipe.next() is not None, "nothing to drain, so that was not back-pressure"
-        while pipe.try_next() is not None:
-            pass
-        assert pipe.submit(data[fed:fed + CHUNK], 200), "still refusing after a drain"
+    outcome = {}
+
+    def feed_without_draining():
+        fed = refused = 0
+        for i in range(400):  # bounded WORK; the join below bounds the time
+            off = (i * CHUNK) % len(data)
+            if pipe.submit(data[off:off + CHUNK], 50):
+                fed += 1
+            else:
+                refused = i + 1
+                break
+        outcome["fed"] = fed
+        outcome["refused"] = refused
+
+    driver = threading.Thread(target=feed_without_draining, daemon=True)
+    driver.start()
+    driver.join(90)
+    assert not driver.is_alive(), (
+        "submit() has not returned in 90 s of feeding without draining — back-pressure is "
+        "blocking again, which is the deadlock this API shape exists to prevent")
+    assert outcome["refused"], (
+        f"the pipeline accepted {outcome['fed']} chunks without ever pushing back; either it "
+        "is buffering without bound or this test is no longer reaching the condition")
+
+    # And the refusal must be recoverable: drain, and it takes bytes again.
+    assert pipe.next() is not None, "nothing to drain, so that was not back-pressure"
+    while pipe.try_next() is not None:
+        pass
+    assert pipe.submit(data[:CHUNK], 500), "still refusing after a drain"
 
 
 def test_the_same_stream_detects_identically_on_every_run(rcdl, stream):
