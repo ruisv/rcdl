@@ -50,6 +50,8 @@ from rcdl_py import (
     PoseConfig,
     PoseDetection,
     PoseEstimator,
+    PromptMask,
+    PromptableSegmenter,
     RotatedBox,
     SegMask,
     SuperResConfig,
@@ -89,6 +91,9 @@ from rcdl_py import (
     decode_instance_seg,
     decode_obb,
     decode_pose,
+    encode_box_prompt,
+    encode_point_prompt,
+    mask_from_logits,
     decode_seg,
     decode_text_boxes,
     decode_text_orientation,
@@ -286,6 +291,13 @@ __all__ = [
     "decode_xfeat",
     "match_features",
     "extract_features",
+    # tasks: promptable segmentation
+    "PromptMask",
+    "PromptableSegmenter",
+    "encode_box_prompt",
+    "encode_point_prompt",
+    "mask_from_logits",
+    "prompt_mask",
     # tasks: optical flow
     "OpticalFlowEstimator",
     "decode_flow",
@@ -504,6 +516,15 @@ class Engine:
         than running if it was not.
         """
         return FeatureExtractor(self._e, **kwargs)
+
+    def prompt_segmenter(self, decoder: "Engine", **kwargs) -> PromptableSegmenter:
+        """A PromptableSegmenter over this Engine (the SAM encoder) and a decoder.
+
+        Keyword arguments: ``mask_thresh``, ``multimask``, ``pad``. The encoder
+        runs once per frame in ``set_image``; every ``box`` / ``point`` after it
+        is a decoder pass against the same embedding.
+        """
+        return PromptableSegmenter(self._e, decoder._e, **kwargs)
 
     def flow_estimator(self, **kwargs) -> OpticalFlowEstimator:
         """An OpticalFlowEstimator driving this Engine (two frames -> a field).
@@ -762,6 +783,23 @@ def extract_features(extractor: FeatureExtractor, img) -> FeatureSet:
     if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
         raise ValueError("extract_features: expected an HxWx3 uint8 image")
     return extractor.extract(a)
+
+
+def prompt_mask(segmenter: PromptableSegmenter, img, box=None, point=None,
+                positive: bool = True, fmt: str = "bgr888") -> PromptMask:
+    """Encode a numpy image and prompt it once — the convenience path.
+
+    Prompting the SAME image repeatedly should call ``set_image`` once and then
+    ``box``/``point`` directly: the encoder is most of the cost, and this helper
+    pays it every time by design.
+    """
+    flat, w, h = _as_buffer(img, fmt)
+    segmenter.set_image(flat, w, h, fmt)
+    if box is not None:
+        return segmenter.box(*box)
+    if point is None:
+        raise ValueError("prompt_mask: give either box=(x1,y1,x2,y2) or point=(x,y)")
+    return segmenter.point(point[0], point[1], positive)
 
 
 def estimate_flow(estimator: OpticalFlowEstimator, a, b) -> np.ndarray:

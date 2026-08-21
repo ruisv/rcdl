@@ -41,6 +41,7 @@
 #include "rcdl/tasks/face.h"
 #include "rcdl/tasks/features.h"
 #include "rcdl/tasks/optical_flow.h"
+#include "rcdl/tasks/promptable_seg.h"
 #include "rcdl/tasks/superres.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
@@ -3628,4 +3629,120 @@ NB_MODULE(rcdl_py, m) {
           "Flow from frame a to frame b as (H, W, 2), in the SOURCE image's pixels")
       .def_prop_ro("input_width", &rcdl::OpticalFlowEstimator::inputWidth)
       .def_prop_ro("input_height", &rcdl::OpticalFlowEstimator::inputHeight);
+  // ===========================================================================
+  // Promptable segmentation — tasks/promptable_seg.h
+  // ===========================================================================
+  //
+  // The encoder/decoder split is visible in the API on purpose: `set_image` is
+  // the expensive call and every prompt after it is cheap by comparison, so a
+  // caller that hides the difference will write the slow loop by accident.
+
+  nb::class_<rcdl::PromptMask>(m, "PromptMask")
+      .def_prop_ro(
+          "mask",
+          [](const rcdl::PromptMask& p) {
+            return ownedArray<std::uint8_t>(p.data.data(),
+                                            {static_cast<std::size_t>(p.height),
+                                             static_cast<std::size_t>(p.width)});
+          },
+          nb::rv_policy::move, "(H, W) uint8 0/1 in SOURCE-image pixels")
+      .def_ro("score", &rcdl::PromptMask::score,
+              "The decoder's own predicted IoU for this mask, not a class confidence")
+      .def_prop_ro("bbox",
+                   [](const rcdl::PromptMask& p) {
+                     return nb::make_tuple(p.x0, p.y0, p.x1, p.y1);
+                   },
+                   "Tight (x0, y0, x1, y1) of the set pixels; all zero when empty")
+      .def_prop_ro("area", &rcdl::PromptMask::area, "Fraction of the frame covered")
+      .def_prop_ro("empty", &rcdl::PromptMask::empty)
+      .def_ro("width", &rcdl::PromptMask::width)
+      .def_ro("height", &rcdl::PromptMask::height);
+
+  m.def(
+      "encode_box_prompt",
+      [](float x1, float y1, float x2, float y2, const LbTuple& lb) {
+        float coords[4], labels[2];
+        rcdl::encodeBoxPrompt(x1, y1, x2, y2, lbFromTuple(lb), coords, labels);
+        return nb::make_tuple(ownedArray<float>(coords, {1, 2, 2}),
+                              ownedArray<float>(labels, {1, 2}));
+      },
+      "x1"_a, "y1"_a, "x2"_a, "y2"_a, "letterbox"_a,
+      "A box in source pixels -> SAM's two labelled corners (labels 2 and 3), in the "
+      "model's canvas");
+
+  m.def(
+      "encode_point_prompt",
+      [](float x, float y, bool positive, const LbTuple& lb) {
+        float coords[4], labels[2];
+        rcdl::encodePointPrompt(x, y, positive, lbFromTuple(lb), coords, labels);
+        return nb::make_tuple(ownedArray<float>(coords, {1, 2, 2}),
+                              ownedArray<float>(labels, {1, 2}));
+      },
+      "x"_a, "y"_a, "positive"_a = true, "letterbox"_a = LbTuple{},
+      "A click -> one labelled point (1 foreground / 0 background) padded with the "
+      "(0,0) point labelled -1 that the fixed-size decoder ignores");
+
+  m.def(
+      "mask_from_logits",
+      [](const Contig& logits, const LbTuple& lb, float thresh, float score) {
+        if (logits.dtype() != nb::dtype<float>() || logits.ndim() != 2) {
+          throw std::invalid_argument("mask_from_logits: expected a float32 (H, W) logit map");
+        }
+        return rcdl::maskFromLogits(static_cast<const float*>(logits.data()),
+                                    static_cast<int>(logits.shape(1)),
+                                    static_cast<int>(logits.shape(0)), lbFromTuple(lb), thresh,
+                                    score);
+      },
+      "logits"_a, "letterbox"_a, "thresh"_a = 0.0f, "score"_a = 0.0f,
+      "Project one decoder logit map through the letterbox onto the source frame and "
+      "threshold it");
+
+  nb::class_<rcdl::PromptableSegmenter>(m, "PromptableSegmenter")
+      .def(
+          "__init__",
+          [](rcdl::PromptableSegmenter* self, nb::handle encoder, nb::handle decoder,
+             float mask_thresh, bool multimask, std::uint8_t pad) {
+            rcdl::PromptConfig cfg;
+            cfg.mask_thresh = mask_thresh;
+            cfg.multimask = multimask;
+            cfg.pad = pad;
+            new (self) rcdl::PromptableSegmenter(engineFrom(encoder), engineFrom(decoder), cfg);
+          },
+          "encoder"_a, "decoder"_a, "mask_thresh"_a = 0.0f, "multimask"_a = true,
+          "pad"_a = std::uint8_t(114), nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
+      .def(
+          "set_image",
+          [](rcdl::PromptableSegmenter& p, const Contig& img, int w, int h,
+             const std::string& fmt, int wstride, int hstride) {
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, wstride, hstride);
+            nb::gil_scoped_release nogil;  // letterbox + the ~300 ms encoder pass
+            p.setImage(v);
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a = "bgr888", "wstride"_a = 0, "hstride"_a = 0,
+          "Encode one frame. Every prompt after this reuses the embedding")
+      .def(
+          "box",
+          [](rcdl::PromptableSegmenter& p, float x1, float y1, float x2, float y2) {
+            nb::gil_scoped_release nogil;
+            return p.box(x1, y1, x2, y2);
+          },
+          "x1"_a, "y1"_a, "x2"_a, "y2"_a, "Mask of whatever the box contains")
+      .def(
+          "point",
+          [](rcdl::PromptableSegmenter& p, float x, float y, bool positive) {
+            nb::gil_scoped_release nogil;
+            return p.point(x, y, positive);
+          },
+          "x"_a, "y"_a, "positive"_a = true, "Mask of whatever is under the click")
+      .def(
+          "masks", [](const rcdl::PromptableSegmenter& p) { return p.masks(); },
+          "All four masks for the LAST prompt, best-scoring first")
+      .def_prop_ro("letterbox",
+                   [](const rcdl::PromptableSegmenter& p) { return lbToTuple(p.letterbox()); })
+      .def_prop_ro("backend",
+                   [](const rcdl::PromptableSegmenter& p) {
+                     return std::string(rcdl::backendName(p.lastBackend()));
+                   })
+      .def_prop_ro("input_width", &rcdl::PromptableSegmenter::inputWidth)
+      .def_prop_ro("input_height", &rcdl::PromptableSegmenter::inputHeight);
 }

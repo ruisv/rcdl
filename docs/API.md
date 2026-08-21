@@ -204,6 +204,35 @@ wants. `float_inputs=[0]` above is not optional: see the Inference section.
 
 ---
 
+## Promptable segmentation
+
+```python
+enc = rcdl.Engine("models/edge_sam_3x_encoder_fp16_rk3588.rknn")
+dec = rcdl.Engine("models/edge_sam_3x_decoder_fp16_rk3588.rknn")
+sam = enc.prompt_segmenter(dec)
+
+sam.set_image(frame.reshape(-1), w, h, "bgr888")   # ~350 ms, once per frame
+m = sam.box(x1, y1, x2, y2)                        # ~140 ms per prompt
+m = sam.point(cx, cy)                              # or a click
+m.mask, m.score, m.bbox, m.area                    # (H,W) uint8 0/1, in SOURCE pixels
+every = sam.masks()                                # all four nestings, best first
+```
+
+`rcdl.prompt_mask(sam, img, box=(...))` is the one-shot convenience form; it
+re-encodes every call, which is exactly what you do **not** want in a loop over
+prompts on one frame.
+
+The mask is a plain `(H, W)` uint8 array over the source frame, so it composes
+with anything: `img[m.mask.astype(bool)]`, `cv2.findContours`, a paste onto a new
+background. Prompts are in source pixels — a detector's box goes in unchanged,
+which is the usual way to turn boxes into silhouettes.
+
+Both models are float here on measurement, and the head refuses an int8 encoder
+rather than running one; `docs/MODELS.md` has the numbers, including what a
+click returns when the encoder is quantized (0.07% of the frame instead of 3.5%).
+
+---
+
 ## Optical flow
 
 ```python

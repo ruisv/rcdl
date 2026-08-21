@@ -1621,3 +1621,144 @@ def test_flow_is_reproducible(rcdl):
     first = rcdl.estimate_flow(est, a, b)
     second = rcdl.estimate_flow(est, a, b)
     np.testing.assert_array_equal(first, second)
+
+
+# --------------------------------------------------------------------------- #
+# Promptable segmentation — EdgeSAM                                            #
+# --------------------------------------------------------------------------- #
+SAM_ENCODER = "edge_sam_3x_encoder_fp16_rk3588.rknn"
+SAM_DECODER = "edge_sam_3x_decoder_fp16_rk3588.rknn"
+
+
+def _sam(rcdl, **kw):
+    enc = rcdl.Engine(bm.require_model(SAM_ENCODER))
+    dec = rcdl.Engine(bm.require_model(SAM_DECODER))
+    return enc, dec, enc.prompt_segmenter(dec, **kw)
+
+
+def _set_image(rcdl, sam, img):
+    flat = np.ascontiguousarray(img).reshape(-1)
+    sam.set_image(flat, img.shape[1], img.shape[0], "bgr888")
+
+
+def test_sam_box_prompt_agrees_with_the_instance_segmenter(rcdl):
+    """The control that makes this head's output mean something.
+
+    A mask that covers the prompt box is easy to produce and easy to fake — a
+    model returning the box itself would score well on every "is it in the right
+    place" check. So the mask is compared against a DIFFERENT model's mask for
+    the same object: yolov8n-seg's bus. Two unrelated networks agreeing on a
+    silhouette is evidence; either one agreeing with its own prompt is not.
+    """
+    need(rcdl, "PromptableSegmenter")
+    seg_model = bm.require_model("yolov8n-seg_rk3588.rknn")
+    img = bm.load_bgr("bus.jpg")
+
+    inst = rcdl.segment_instances(rcdl.Engine(seg_model).instance_segmenter(), img)
+    bus = max((d for d in inst if rcdl.coco_class_name(d.class_id) == "bus"),
+              key=lambda d: d.score, default=None)
+    if bus is None:
+        pytest.skip("the instance segmenter found no bus to compare against")
+    ref = np.asarray(bus.mask).astype(bool)
+
+    _, _, sam = _sam(rcdl)
+    _set_image(rcdl, sam, img)
+    got = sam.box(bus.x1, bus.y1, bus.x2, bus.y2)
+    m = np.asarray(got.mask).astype(bool)
+
+    inter = np.logical_and(m, ref).sum()
+    union = np.logical_or(m, ref).sum()
+    iou = float(inter) / float(union) if union else 0.0
+    box_area = (bus.x2 - bus.x1) * (bus.y2 - bus.y1)
+    print(f"\nSAM box prompt vs yolov8n-seg on the bus: IoU {iou:.3f}, "
+          f"SAM {100 * got.area:.1f}% of the frame, score {got.score:.3f}")
+
+    assert iou > 0.75, f"the two models disagree about the bus (IoU {iou:.3f})"
+    # And it is not simply returning the prompt: a filled box would cover the
+    # whole rectangle, and a bus does not.
+    filled = float(m.sum()) / box_area
+    assert filled < 0.92, f"the mask fills {filled:.0%} of the prompt box — that is the box"
+
+
+def test_sam_point_prompt_finds_the_thing_under_the_click(rcdl):
+    """A click inside a person must return that person: a mask containing the
+    click, no larger than a person, and centred near them."""
+    need(rcdl, "PromptableSegmenter")
+    det_model = bm.require_model("yolov8n_rk3588.rknn")
+    img = bm.load_bgr("bus.jpg")
+    dets = rcdl.detect(rcdl.Engine(det_model).detector(), img)
+    people = [d for d in dets if rcdl.coco_class_name(d.class_id) == "person"]
+    if not people:
+        pytest.skip("no person detected to click on")
+    p = max(people, key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1))
+    cx, cy = (p.x1 + p.x2) / 2.0, (p.y1 + p.y2) / 2.0
+
+    _, _, sam = _sam(rcdl)
+    _set_image(rcdl, sam, img)
+    got = sam.point(cx, cy)
+    m = np.asarray(got.mask).astype(bool)
+    print(f"\nclick at ({cx:.0f},{cy:.0f}) inside a person box "
+          f"[{p.x1:.0f} {p.y1:.0f} {p.x2:.0f} {p.y2:.0f}] -> {100 * got.area:.2f}% of the "
+          f"frame, score {got.score:.3f}, bbox {got.bbox}")
+
+    assert m[int(cy), int(cx)], "the mask does not contain the point that produced it"
+    inside = m[int(p.y1):int(p.y2), int(p.x1):int(p.x2)].sum()
+    assert inside / max(m.sum(), 1) > 0.8, "most of the mask is outside the person clicked"
+
+
+def test_sam_encodes_once_and_prompts_many_times(rcdl):
+    """The split is the reason this head is usable at all, so it is asserted:
+    a second prompt on the same image must cost a fraction of the first
+    set_image, and must not silently re-encode."""
+    need(rcdl, "PromptableSegmenter")
+    import time
+    img = bm.load_bgr("bus.jpg")
+    _, _, sam = _sam(rcdl)
+
+    t0 = time.perf_counter()
+    _set_image(rcdl, sam, img)
+    t1 = time.perf_counter()
+    a = sam.box(36, 230, 799, 771)
+    t2 = time.perf_counter()
+    b = sam.box(36, 230, 799, 771)
+    t3 = time.perf_counter()
+    encode_ms, first_ms, second_ms = (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3
+    print(f"\nencode {encode_ms:.0f} ms, prompt {first_ms:.0f} ms then {second_ms:.0f} ms")
+
+    assert second_ms < encode_ms, "a repeat prompt costs as much as encoding — it re-encoded"
+    np.testing.assert_array_equal(np.asarray(a.mask), np.asarray(b.mask))
+    assert a.score == b.score
+
+
+def test_sam_returns_several_nestings_for_one_prompt(rcdl):
+    """SAM answers an ambiguous prompt with several masks and its own quality
+    estimate for each. The head must expose all of them and hand back the
+    highest-scoring one by default."""
+    need(rcdl, "PromptableSegmenter")
+    img = bm.load_bgr("bus.jpg")
+    _, _, sam = _sam(rcdl)
+    _set_image(rcdl, sam, img)
+    best = sam.point(img.shape[1] / 2.0, img.shape[0] / 2.0)
+    every = sam.masks()
+    print(f"\nnestings for one click: " +
+          ", ".join(f"{100 * m.area:.1f}% @ {m.score:.3f}" for m in every))
+
+    assert len(every) >= 3
+    assert every[0].score >= every[-1].score, "masks() is not best-first"
+    assert best.score == pytest.approx(every[0].score)
+    areas = sorted(m.area for m in every)
+    assert areas[-1] > areas[0] * 1.2, "every nesting is the same size — the ambiguity is gone"
+
+
+def test_sam_refuses_an_encoder_that_takes_image_bytes(rcdl):
+    """The int8 encoder is in the recipe but not in the registry: it keeps the
+    shape of large objects and loses small ones entirely. It is also a quantized
+    model, so its input is image bytes rather than the float tensor this head
+    writes — and the head says so instead of feeding it the wrong thing."""
+    need(rcdl, "PromptableSegmenter")
+    i8 = bm.find_model("edge_sam_3x_encoder_i8_rk3588.rknn")
+    if not i8:
+        pytest.skip("no int8 encoder staged (it is deliberately not in the registry)")
+    dec = rcdl.Engine(bm.require_model(SAM_DECODER))
+    with pytest.raises(Exception):
+        rcdl.Engine(i8).prompt_segmenter(dec)

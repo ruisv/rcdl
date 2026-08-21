@@ -79,6 +79,7 @@ add_library(rcdl SHARED
   src/tasks/features.cc
   src/tasks/superres.cc
   src/tasks/optical_flow.cc
+  src/tasks/promptable_seg.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc
@@ -161,6 +162,7 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(xfeat_demo)
   rcdl_example(sr_demo)
   rcdl_example(flow_demo)
+  rcdl_example(sam_demo)
   rcdl_example(async_check)
 endif()
 

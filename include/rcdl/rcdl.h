@@ -37,6 +37,7 @@
 #include "rcdl/tasks/face.h"
 #include "rcdl/tasks/features.h"
 #include "rcdl/tasks/optical_flow.h"
+#include "rcdl/tasks/promptable_seg.h"
 #include "rcdl/tasks/superres.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"

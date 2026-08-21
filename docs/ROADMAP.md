@@ -266,10 +266,10 @@ with a board-verified result and a pinned test.
   second one applied.* All five heads of the generation are now in the registry.
 
 - **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅,
-  optical flow ✅)
+  optical flow ✅, promptable segmentation ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test: open-vocabulary detection, promptable
-  segmentation, whole-body pose, anomaly detection, stereo disparity.
+  oracle + model + board test: open-vocabulary detection, whole-body pose,
+  anomaly detection, stereo disparity.
   The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic and
   end-to-end driving) are a separate question — they need calibration data and
   sample frames this project does not currently carry.
@@ -311,6 +311,25 @@ with a board-verified result and a pinned test.
   where int8 manages 31.5 and over-sharpens past the original, for 1.6× the
   speed. XFeat's int8 build, measured the same way, is indistinguishable from
   its float one; neither result is a rule.
+
+  **Promptable segmentation (EdgeSAM)** is the first head with no classes at
+  all: it takes a click or a box and returns the mask of whatever is there, which
+  is what an annotation tool, a "cut this out", or any detector wanting
+  silhouettes instead of rectangles actually needs. It is also the first head
+  that is two models, and the split is deliberately visible in the API — the
+  encoder costs ~350 ms per frame and each prompt after it ~140 ms, so a caller
+  that cannot see the difference will write the slow loop. *Verified against a
+  second model rather than against its own prompt: given yolov8n's bus box,
+  EdgeSAM's mask agrees with yolov8n-seg's bus mask at IoU 0.944 while filling
+  only 74% of the box it was given — segmenting the bus, not returning the
+  rectangle.*
+
+  Its quantization result is the mirror of XFeat's. The int8 encoder converts,
+  runs, and keeps the shape of large objects (IoU 0.53–0.82), but a CLICK that
+  returns 3.5% of the frame in float returns 0.07% in int8 — the mask does not
+  degrade, it disappears. An embedding feeding a second network has nothing
+  downstream to re-normalise what quantization moved, so both halves ship float
+  and the head refuses an int8 encoder rather than running one.
 
   **Dense optical flow came last and needed infrastructure, not a decoder.**
   NeuFlow v2 converts cleanly and the toolkit's simulator reproduces the float

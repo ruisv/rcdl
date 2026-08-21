@@ -62,6 +62,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `realesr_general_x4v3_128_fp16_rk3588.rknn` | ×4 super-resolution | 128×128 **f32** | rgb | `[1,3,512,512]` f16 NCHW in [0,1]. Input is float32 **still in 0..255** — the ÷255 is in the model |
 | `realesr_general_x4v3_128_i8_rk3588.rknn` | ×4 super-resolution | 128×128 u8 | rgb | as above, int8. ~1.6× faster, 31 dB from the float model — see below |
 | `neuflow_v2_512x384_fp16_rk3588.rknn` | dense optical flow | 512×384 ×2 **f32** | **bgr** | `[1,2,384,512]` f16 NCHW, pixels (+u right, +v down). Inputs are 0..255 BGR floats. **Needs a custom operator** — see below |
+| `edge_sam_3x_encoder_fp16_rk3588.rknn` | promptable seg — encoder | 1024×1024 **f32** | rgb | `[1,256,64,64]` f16 embedding. Input is float32 in 0..255; SAM's mean/std are folded into the `.rknn` |
+| `edge_sam_3x_decoder_fp16_rk3588.rknn` | promptable seg — decoder | embedding + 2 prompt points | — | `scores[1,4]`, `masks[1,4,256,256]` f16 logits. The embedding input is **NHWC** where the encoder's output is NCHW |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -415,6 +417,48 @@ calls sits between two NPU subgraphs, so the whole correlation volume (37 MB at
 the 1/8 scale) crosses the CPU boundary every time. That is the price of the
 capability on this runtime, not a property of the network.
 
+**Promptable segmentation is two models, and the split is the API.** EdgeSAM's
+encoder runs once per frame (~350 ms at 1024×1024) and every prompt after it is
+a decoder pass (~140 ms) against the same embedding. A caller that re-encodes
+per prompt pays three times over for nothing.
+
+**Both halves are float, on measurement.** The int8 encoder converts and runs and
+looks fine on large objects, and is not usable:
+
+| prompt | float mask | int8 mask | IoU vs float |
+|---|---|---|---|
+| box around the bus | 28.7% of the frame | 15.8% | 0.53 |
+| box around a person | 2.36% | 2.50% | 0.72 |
+| box around another person | 5.23% | 4.67% | 0.82 |
+| **a click** | **3.50%** | **0.07%** | **0.02** |
+
+The click is the one that settles it: the mask does not degrade, it disappears.
+An embedding feeding a second network is not a classifier — nothing downstream
+re-normalises what quantization moved — so the int8 build stays recipe-only
+rather than shipping as a trap. The fp16 encoder reproduces the float ONNX at
+0.997–0.9997 mask IoU.
+
+Three details the code carries so a caller does not have to:
+
+* **The embedding has to be transposed between the two models.** The encoder
+  emits `[1,256,64,64]` NCHW and the decoder's embedding input is reported NHWC.
+  Passing the planar buffer straight across satisfies every shape check and
+  produces masks that are simply wrong.
+* **The prompt convention is SAM's**: a box is two points labelled 2 and 3, a
+  click is one point labelled 1 (or 0 for background) padded with a `(0,0)` point
+  labelled −1. That padding is why one fixed-shape export serves both.
+* **The padding value is not arbitrary.** SAM pads with zero *after* its own
+  normalisation, which corresponds to a pixel value at the channel mean (~124);
+  RCDL's default 114 lands within a fifth of a standard deviation of that, so the
+  band reads as neutral either way. RCDL also centres the image where SAM pins it
+  top-left — the geometry goes through `LetterboxInfo` in both directions, so
+  what changes is where the padding sits, not what the model sees of the object.
+
+The check that makes the masks mean something is a **second model**: prompted
+with yolov8n's bus box, EdgeSAM's mask agrees with yolov8n-seg's bus mask at
+**IoU 0.944**, while filling only 74% of the prompt box — so it is segmenting the
+bus, not returning the rectangle it was given.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -438,6 +482,8 @@ RK3588S, single-frame latency unless stated:
 | XFeat 640×480, frame → 4096 features + descriptors | 56–85 ms (35 ms NPU); matching a 4096-pair is another 213–243 ms |
 | Real-ESRGAN Compact ×4, one 128×128 tile → 512×512 | 70–82 ms fp16, 40–53 ms int8; a 480×270 → 1920×1080 upscale is 15 tiles |
 | NeuFlow v2 512×384, two frames → a dense field | ~1.4 s, nearly all of it the nine CPU GridSample round trips |
+| EdgeSAM 1024×1024, encode a frame | 350–450 ms |
+| EdgeSAM, one prompt against that embedding | 140–165 ms |
 
 ## Adding a model
 

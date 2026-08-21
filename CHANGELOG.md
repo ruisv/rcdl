@@ -321,6 +321,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not model fp16 arithmetic, and a uniform shift cannot see the difference.*
   Each GridSample sits between two NPU subgraphs, so a frame costs about 1.4 s:
   this head is correct, not fast.
+- `tasks/promptable_seg` — SAM-family segmentation: prompt with a click or a box,
+  get the mask of whatever is there, with no class list anywhere. `encodeBoxPrompt`
+  / `encodePointPrompt` (SAM's labels: 2 and 3 for a box's corners, 1/0 for a
+  click padded with the `-1` point that lets one fixed-shape export serve both),
+  `maskFromLogits` (projects a decoder logit map through the letterbox onto the
+  source frame, so the padding never contributes) and `PromptableSegmenter`.
+  With `edge_sam_3x_{encoder,decoder}_fp16_rk3588.rknn`, `sam_demo` and Python
+  bindings (`Engine.prompt_segmenter()`, `prompt_mask`, `encode_box_prompt`,
+  `encode_point_prompt`, `mask_from_logits`).
+  The encoder/decoder split is visible in the API on purpose: encoding a frame
+  costs ~350 ms and each prompt against that embedding ~140 ms.
+  *Verified against a second model instead of against its own prompt: given
+  yolov8n's bus box, the mask agrees with yolov8n-seg's bus mask at IoU 0.944
+  while filling only 74% of the prompt box. Both halves ship float on
+  measurement — the int8 encoder keeps large shapes (IoU 0.53-0.82) but a click
+  that returns 3.5% of the frame in float returns 0.07% in int8, so the head
+  refuses an int8 encoder rather than running one.*
+  One trap is handled in the code because nothing else would catch it: the
+  encoder emits the embedding NCHW and the decoder's input for it is reported
+  NHWC, so it is transposed on the way across.
 - `rcdl::floatToHalf` beside the existing `halfToFloat` (Python:
   `rcdl.float_to_half`) — the direction a CPU kernel writes in when the graph
   around it carries fp16. It sits on a hardware path, so it is checked against

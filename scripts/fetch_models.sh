@@ -82,6 +82,12 @@ REGISTRY=(
   # that op nowhere, and a build without the declaration segfaults inside
   # rknn_init. RCDL registers the CPU kernel itself (backend/custom_ops.h).
   "neuflow_v2_512x384_fp16_rk3588.rknn|convert|neuflow_v2_512x384_fp16_rk3588.rknn"
+  # Promptable segmentation (EdgeSAM): encode once at 1024x1024, then one
+  # decoder pass per prompt. BOTH are float on measurement — the int8 encoder
+  # keeps large shapes and loses small ones entirely, so it stays recipe-only
+  # rather than shipping as a trap. See docs/MODELS.md.
+  "edge_sam_3x_encoder_fp16_rk3588.rknn|convert|edge_sam_3x_encoder_fp16_rk3588.rknn"
+  "edge_sam_3x_decoder_fp16_rk3588.rknn|convert|edge_sam_3x_decoder_fp16_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then
