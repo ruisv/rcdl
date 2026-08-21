@@ -83,15 +83,17 @@ Each milestone ends with a board-verified result and a pinned test.
 - **M3 — pipelines + multi-core** ✅ (async detection, `EnginePool`, ByteTrack)
   `AsyncDetectionPipeline` (preproc ‖ infer ‖ decode, bounded channels, FIFO),
   `EnginePool` (N dup'd contexts on cores 0/1/2, round-robin), `TrackingPipeline`
-  (ByteTrack), `AsyncVideoDetectionPipeline` (VPU → RGA → NPU → overlay → VPU).
+  (ByteTrack), `AsyncVideoDetectionPipeline` (VPU → RGA → NPU, all overlapped).
   *Verified: the async pipeline returns results field-identical to the
   synchronous one, in submission order, at 481 fps against 99 fps — a 4.86x
   speed-up on three pinned contexts. `TrackingPipeline` holds stable ids across
   a panning sequence — 4 objects, 4 distinct ids over 14 frames, three of them
   alive for all 14 — in BOTH its geometry-only and its ReID mode, and takes a
-  decoded `VideoFrame` without copying it.* `AsyncVideoDetectionPipeline` is not
-  built as a class; `video_det_demo` covers the VPU → RGA → NPU → overlay → VPU
-  path as an example.
+  decoded `VideoFrame` without copying it. `AsyncVideoDetectionPipeline` runs
+  1080p H.264 → YOLOv8n at 96.7 fps against 27.7 fps for the same stream through
+  the synchronous pipeline (3.49x), returning detections identical to it frame by
+  frame.* `video_det_demo` remains the synchronous baseline and the only place
+  the overlay → VPU encode tail is demonstrated.
 
 - **M4 — task breadth** ✅
   Port the BCDL task heads that map cleanly: classification, pose, instance
@@ -211,11 +213,15 @@ with a board-verified result and a pinned test.
   and end-to-end driving) are a separate question — they need calibration data
   and sample frames this project does not currently carry.
 
-- **Pipeline debt** — `AsyncVideoDetectionPipeline` as a class rather than only
-  `video_det_demo`. `AsyncDetectionPipeline` already exposes the
+- **Pipeline debt** ✅ — `AsyncVideoDetectionPipeline` is a class, built on the
   `acquireSlot` / `letterboxIntoSlot` / `commitSlot` split that exists precisely
-  so a video stage need not hold a recycled frame while waiting for capacity;
-  that is where it connects.
+  so a video stage need not hold a recycled frame while waiting for capacity,
+  and bound in Python as `Engine.video_detector()`. Writing it turned up a
+  silent hardware bug it is worth reading [`RGA.md`](RGA.md) §3.1 for: the
+  letterbox's **CPU-painted border was not reproducible**, so the same clip gave
+  different boxes on different runs, in the synchronous pipeline too. The border
+  is now blitted by RGA. What found it was a test that compares two runs of one
+  clip frame by frame — nothing errored, and every box looked reasonable.
 
 - **Later** — camera (V4L2/rkaiq) source, RK3576 / RK356x validation, LLM/VLM
   via `rknn-llm` (separate project, as BLLM is to BCDL), ROS 2 nodes.

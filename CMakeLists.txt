@@ -85,6 +85,7 @@ add_library(rcdl SHARED
   src/backend/engine_pool.cc
   src/pipeline/detection_pipeline.cc
   src/pipeline/async_detection_pipeline.cc
+  src/pipeline/async_video_detection_pipeline.cc
   src/pipeline/tracking_pipeline.cc)
 add_library(rcdl::rcdl ALIAS rcdl)
 
@@ -148,6 +149,7 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(video_roundtrip)
   rcdl_example(jpeg_roundtrip)
   rcdl_example(video_det_demo)
+  rcdl_example(video_det_async)
   rcdl_example(async_bench)
   rcdl_example(cls_demo)
   rcdl_example(seg_demo)

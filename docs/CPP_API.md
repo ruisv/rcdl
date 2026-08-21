@@ -131,6 +131,45 @@ before you take a frame.
 
 ---
 
+## Compressed video in, detections out
+
+`AsyncVideoDetectionPipeline` owns the whole path — VPU decode, RGA letterbox,
+NPU inference on N contexts — so the caller only pumps bytes:
+
+```c++
+rcdl::VideoDecConfig dec{.codec = rcdl::VideoCodec::H264};
+rcdl::AsyncVideoDetectionPipeline pipe(engine, cfg, dec);
+
+std::vector<rcdl::Detection> dets;
+while (std::size_t n = fread(buf, 1, sizeof buf, fp)) {
+  while (!pipe.submit(buf, n) && !pipe.finished())
+    while (pipe.tryNext(dets)) { /* make room, then retry */ }
+  while (pipe.tryNext(dets)) { /* ... */ }
+}
+pipe.finish();
+while (pipe.next(dets)) { /* the reorder tail */ }
+```
+
+Chunks may be any size — MPP's parser finds the access units — and results come
+back in decode order with `lastPtsUs()` / `lastFrameIndex()` beside them, which
+is all that ties a result to its frame once the decoded buffer has gone back to
+the pool.
+
+**`submit()` returning `false` is back-pressure, and it must not be a wait.**
+Every queue in the pipeline is bounded and the last one is emptied only by
+`next()`, so a single-threaded caller that blocked inside `submit()` would
+deadlock against itself: no input accepted until frames move, no frames until a
+context frees, no context until results are drained, and the only thread that
+can drain is the one parked in `submit()`. Hence the retry loop above.
+`finished()` distinguishes back-pressure from a closed pipeline; a caller that
+drains on another thread can pass a negative timeout and block instead.
+
+Measured on the board (1080p H.264 → YOLOv8n, three pinned contexts): **96.7 fps
+against 27.7 fps for the same stream through the synchronous pipeline, a 3.49x
+speed-up**, with the per-frame detections identical to the synchronous path.
+
+---
+
 ## Media
 
 ```c++

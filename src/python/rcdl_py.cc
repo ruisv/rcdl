@@ -28,6 +28,7 @@
 #include "rcdl/media/jpeg_codec.h"
 #include "rcdl/media/video_codec.h"
 #include "rcdl/media/video_frame.h"
+#include "rcdl/pipeline/async_video_detection_pipeline.h"
 #include "rcdl/pipeline/detection_pipeline.h"
 #include "rcdl/pipeline/tracking_pipeline.h"
 #include "rcdl/preproc/image.h"
@@ -1234,6 +1235,107 @@ NB_MODULE(rcdl_py, m) {
           },
           "data"_a, nb::keep_alive<0, 1>(),
           "Decode a JPEG file into a dma-buf frame, or None if the VPU refused it");
+
+  // --- async video detection pipeline -------------------------------------------
+  //
+  // The whole VPU -> RGA -> NPU path behind two calls. A Python driver that only
+  // pumps bytes and takes detections runs at the C++ pipeline's speed, because
+  // every stage — decode, letterbox, infer — is a C++ thread with the GIL
+  // released; Python never sees a frame.
+  nb::class_<rcdl::AsyncVideoDetectionPipeline>(m, "AsyncVideoDetectionPipeline")
+      .def(
+          "__init__",
+          [](rcdl::AsyncVideoDetectionPipeline* self, nb::handle engine_arg,
+             const std::string& codec, const std::string& model_input, float conf_thresh,
+             float iou_thresh, int max_dets, int num_classes, bool apply_sigmoid,
+             std::uint8_t pad, const std::string& backend, int workers, bool pin_cores,
+             int reorder_depth, int queue_depth, bool external_buffers, int extra_buffers) {
+            rcdl::Engine& engine = engineFrom(engine_arg);
+            rcdl::PipelineConfig cfg;
+            cfg.model_input = formatFromName(model_input);
+            cfg.pad_value = pad;
+            cfg.backend = backendFromName(backend);
+            cfg.detect.conf_thresh = cfg.ltrb.conf_thresh = conf_thresh;
+            cfg.detect.iou_thresh = cfg.ltrb.iou_thresh = iou_thresh;
+            cfg.detect.max_dets = cfg.ltrb.max_dets = max_dets;
+            cfg.detect.num_classes = cfg.ltrb.num_classes = num_classes;
+            cfg.detect.apply_sigmoid = cfg.ltrb.apply_sigmoid = apply_sigmoid;
+            rcdl::VideoDecConfig dec;
+            dec.codec = codecFromName(codec);
+            dec.external_buffers = external_buffers;
+            dec.extra_buffers = extra_buffers;
+            rcdl::VideoAsyncConfig vcfg;
+            vcfg.async.workers = workers;
+            vcfg.async.pin_cores = pin_cores;
+            vcfg.async.reorder_depth = reorder_depth;
+            vcfg.queue_depth = queue_depth;
+            new (self) rcdl::AsyncVideoDetectionPipeline(engine, cfg, dec, vcfg);
+          },
+          "engine"_a, "codec"_a = "h264", "model_input"_a = "rgb888", "conf_thresh"_a = 0.25f,
+          "iou_thresh"_a = 0.45f, "max_dets"_a = 300, "num_classes"_a = 80,
+          "apply_sigmoid"_a = false, "pad"_a = std::uint8_t(114), "backend"_a = "auto",
+          "workers"_a = 3, "pin_cores"_a = true, "reorder_depth"_a = 0, "queue_depth"_a = 2,
+          "external_buffers"_a = true, "extra_buffers"_a = 4, nb::keep_alive<1, 2>())
+      .def(
+          "submit",
+          [](rcdl::AsyncVideoDetectionPipeline& p, nb::bytes data, int timeout_ms) {
+            const auto* d = reinterpret_cast<const std::uint8_t*>(data.c_str());
+            const std::size_t n = data.size();
+            nb::gil_scoped_release nogil;
+            return p.submit(d, n, timeout_ms);
+          },
+          "data"_a, "timeout_ms"_a = 20,
+          "Feed compressed bytes; False means back-pressure (drain and retry the SAME "
+          "bytes) unless .finished")
+      .def(
+          "next",
+          [](rcdl::AsyncVideoDetectionPipeline& p) -> nb::object {
+            std::vector<rcdl::Detection> dets;
+            bool got;
+            {
+              nb::gil_scoped_release nogil;
+              got = p.next(dets);
+            }
+            return got ? nb::cast(dets) : nb::none();
+          },
+          "Next frame's detections in decode order, blocking; None once drained")
+      .def(
+          "try_next",
+          [](rcdl::AsyncVideoDetectionPipeline& p) -> nb::object {
+            std::vector<rcdl::Detection> dets;
+            bool got;
+            {
+              nb::gil_scoped_release nogil;
+              got = p.tryNext(dets);
+            }
+            return got ? nb::cast(dets) : nb::none();
+          },
+          "Non-blocking next(): None when nothing is ready yet")
+      .def("finish", &rcdl::AsyncVideoDetectionPipeline::finish,
+           nb::call_guard<nb::gil_scoped_release>(),
+           "End of stream: flush the decoder's reorder tail, then drain with next()")
+      .def_prop_ro("finished", &rcdl::AsyncVideoDetectionPipeline::finished)
+      .def_prop_ro("pts_us", &rcdl::AsyncVideoDetectionPipeline::lastPtsUs,
+                   "Presentation timestamp of the last delivered result")
+      .def_prop_ro("frame_index", &rcdl::AsyncVideoDetectionPipeline::lastFrameIndex,
+                   "Decoder frame index of the last delivered result")
+      .def_prop_ro("letterbox", [](const rcdl::AsyncVideoDetectionPipeline& p) {
+        return lbToTuple(p.lastLetterbox());
+      })
+      .def_prop_ro("width", &rcdl::AsyncVideoDetectionPipeline::width)
+      .def_prop_ro("height", &rcdl::AsyncVideoDetectionPipeline::height)
+      .def_prop_ro("frames_decoded", &rcdl::AsyncVideoDetectionPipeline::framesDecoded)
+      .def_prop_ro("using_external_buffers",
+                   &rcdl::AsyncVideoDetectionPipeline::usingExternalBuffers)
+      .def_prop_ro("workers", &rcdl::AsyncVideoDetectionPipeline::workers)
+      .def_prop_ro("head", [](const rcdl::AsyncVideoDetectionPipeline& p) {
+        return std::string(rcdl::headName(p.head()));
+      })
+      .def_prop_ro("profile", [](const rcdl::AsyncVideoDetectionPipeline& p) {
+        const rcdl::StageProfile s = p.profile();
+        return nb::make_tuple(s.decodePerFrame(), s.preprocPerFrame(), s.inferPerFrame(),
+                              s.postprocPerFrame(), s.frames);
+      }, "(decode_ms, preproc_ms, infer_ms, postproc_ms, frames) averaged per frame");
 
   // --- tracking -----------------------------------------------------------------
   nb::class_<rcdl::Track>(m, "Track")

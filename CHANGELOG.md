@@ -172,6 +172,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where the right answer is knowable — every object is present in every frame,
   so any id beyond the object count is association failing rather than the
   scene changing — in both the geometry-only and ReID modes.
+- `rcdl::AsyncVideoDetectionPipeline` — compressed video in, detections out,
+  with VPU decode, RGA letterbox and N-context NPU inference each on their own
+  thread and results in decode order. `submit()` takes arbitrary chunks of an
+  elementary stream (MPP's parser splits them) and reports back-pressure as a
+  return value rather than a wait, which is what keeps a single-threaded driver
+  from deadlocking against its own bounded queues. Bound in Python as
+  `Engine.video_detector()`, with the GIL released around every stage, so a
+  Python caller that only pumps bytes gets the C++ throughput: **96.7 fps on
+  1080p H.264 → YOLOv8n against 27.7 fps frame-at-a-time, a 3.49x speed-up**,
+  and per-frame detections identical to the synchronous path. Example:
+  `video_det_async` (`--sync` measures both in one run).
 
 ### Fixed
 

@@ -129,6 +129,43 @@ Two things the decoder tells you that are worth checking once:
 at the width is the classic way to get a sheared picture. `to_numpy()` removes
 the padding unless you pass `keep_stride=True`.
 
+### Compressed video straight to detections
+
+`engine.video_detector()` puts the whole path — VPU decode, RGA letterbox, NPU
+inference across three contexts — behind two calls, all of it C++ threads with
+the GIL released. Python never touches a frame, so a driver that only pumps
+bytes runs at the C++ speed (**96.7 fps on 1080p H.264 → YOLOv8n, against 27.7
+fps for the frame-at-a-time path**).
+
+```python
+p = engine.video_detector(codec="h264")            # detector kwargs also apply
+for chunk in chunks:                               # any size; MPP splits them
+    while not p.submit(chunk) and not p.finished:
+        while (d := p.try_next()) is not None:     # make room, then retry
+            use(d, p.frame_index)
+    while (d := p.try_next()) is not None:
+        use(d, p.frame_index)
+p.finish()
+while (d := p.next()) is not None:                 # the reorder tail
+    use(d, p.frame_index)
+```
+
+`submit()` returning `False` is **back-pressure**, not an error, and it is a
+return value rather than a wait on purpose: every queue inside is bounded and
+only `next()` empties the last one, so a single-threaded driver that blocked in
+`submit()` would deadlock against its own pipeline. Offer the same bytes again
+after draining; `.finished` tells you when `False` means "closed" instead.
+
+| | |
+|---|---|
+| `engine.video_detector(codec="h264", workers=3, queue_depth=2, **detector_kwargs)` | `.submit(bytes, timeout_ms=20)` / `.next()` / `.try_next()` / `.finish()` |
+| result metadata | `.frame_index .pts_us .letterbox .finished` |
+| stream | `.width .height .frames_decoded .using_external_buffers .workers .head` |
+| `.profile` | `(decode_ms, preproc_ms, infer_ms, postproc_ms, frames)`, per frame |
+
+A raw elementary stream carries no timestamps, so `.pts_us` is 0 on one —
+`.frame_index` is what identifies a frame there.
+
 ---
 
 ## Tracking

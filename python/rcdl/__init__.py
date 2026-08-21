@@ -13,6 +13,7 @@ import numpy as np
 
 import rcdl_py
 from rcdl_py import (
+    AsyncVideoDetectionPipeline,
     Classifier,
     ClsConfig,
     ClsResult,
@@ -122,6 +123,7 @@ __all__ = [
     "Engine",
     "Detection",
     "DetectionPipeline",
+    "AsyncVideoDetectionPipeline",
     "DmaBuf",
     "DmaHeap",
     "NpuCore",
@@ -382,6 +384,36 @@ class Engine:
         ``track_config`` (a :class:`ByteTrackConfig`).
         """
         return TrackingPipeline(self._e, None if reid is None else reid._e, **kwargs)
+
+    def video_detector(self, codec: str = "h264", **kwargs) -> AsyncVideoDetectionPipeline:
+        """Compressed video in, detections out — the whole VPU/RGA/NPU path in C++.
+
+        Feed raw elementary-stream bytes with ``submit(data)`` and take results
+        with ``next()`` / ``try_next()``; the decode, letterbox and inference
+        stages run on C++ threads with the GIL released, so a Python driver that
+        only pumps bytes still reaches the C++ throughput. Chunks may be any
+        size — MPP's parser finds the access units.
+
+        ``submit()`` returning False is BACK-PRESSURE, not an error: the same
+        bytes must be offered again after draining results (see ``.finished``
+        for the other reason it can be False). Blocking there instead would
+        deadlock a single-threaded driver against its own pipeline.
+
+            p = engine.video_detector(codec="h264")
+            for chunk in chunks:
+                while not p.submit(chunk) and not p.finished:
+                    while (d := p.try_next()) is not None:
+                        use(d)
+            p.finish()
+            while (d := p.next()) is not None:
+                use(d)
+
+        Keyword arguments are :meth:`detector`'s, plus ``workers`` /
+        ``pin_cores`` / ``reorder_depth`` (NPU contexts), ``queue_depth``
+        (decoded frames buffered between the VPU and RGA) and the decoder's
+        ``external_buffers`` / ``extra_buffers``.
+        """
+        return AsyncVideoDetectionPipeline(self._e, codec=codec, **kwargs)
 
     def classifier(self, **kwargs) -> Classifier:
         """A Classifier driving this Engine (RGA centre-crop -> NPU -> top-k).

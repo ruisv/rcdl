@@ -9,7 +9,7 @@
 //   media/    VideoDecoder · VideoEncoder · Jpeg (librockchip_mpp)
 //   tasks/    det · cls · pose · seg · obb · ocr · depth ...
 //   tracks/   ByteTrack · ReID
-//   pipeline/ sync / async detection · tracking
+//   pipeline/ sync / async detection · async video detection · tracking
 
 #include "rcdl/version.h"
 #include "rcdl/core/status.h"
@@ -39,4 +39,5 @@
 #include "rcdl/backend/engine_pool.h"
 #include "rcdl/pipeline/detection_pipeline.h"
 #include "rcdl/pipeline/async_detection_pipeline.h"
+#include "rcdl/pipeline/async_video_detection_pipeline.h"
 #include "rcdl/pipeline/tracking_pipeline.h"
