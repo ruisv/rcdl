@@ -114,12 +114,7 @@ def test_classifier_on_the_space_shuttle(rcdl):
     model = bm.find_model("resnet18_rk3588.rknn")
     if model is None:
         pytest.skip("resnet18_rk3588.rknn not staged")
-    import os
-    img_path = os.environ.get("RCDL_SHUTTLE_IMAGE", "")
-    if not img_path or not os.path.isfile(img_path):
-        pytest.skip("set RCDL_SHUTTLE_IMAGE to the ImageNet space-shuttle sample")
-    cv2 = pytest.importorskip("cv2")
-    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    img = bm.load_bgr("space_shuttle_224.jpg")
     e = rcdl.Engine(model)
     top = rcdl.Classifier(e._e).classify(np.ascontiguousarray(img).reshape(-1),
                                          img.shape[1], img.shape[0], "bgr888")

@@ -15,6 +15,7 @@ directory alongside this one.
 | `obb.jpg` | oriented boxes | DOTA aerial scene — planes and a parking row of vehicles |
 | `cityscapes.png` | semantic segmentation | the PP-LiteSeg sample street scene (2048×1024) |
 | `bird.jpg` | classification | ImageNet sample |
+| `space_shuttle_224.jpg` | classification | ImageNet sample, already 224x224 — the pinned expectation is class **812**, "space shuttle" |
 
 **`obb.jpg` is a progressive JPEG**, which the VPU's JPEG core cannot decode
 (it does baseline and extended-sequential Huffman only). Read that one with
