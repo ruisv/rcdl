@@ -46,6 +46,7 @@
 #include "rcdl/tasks/wholebody.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
+#include "rcdl/tasks/open_vocab.h"
 #include "rcdl/tasks/ocr.h"
 #include "rcdl/tasks/pose.h"
 #include "rcdl/tasks/segmentation.h"
@@ -971,6 +972,40 @@ NB_MODULE(rcdl_py, m) {
       "channels_first"_a = true, "apply_sigmoid"_a = false,
       "Decode the anchor-free LTRB multi-scale head from per-scale float32 cls/box buffers");
 
+  m.def(
+      "yolo_head_classes",
+      [](nb::handle engine_arg, int claim) {
+        // TWO MODES, because neither alone is a real check.
+        //
+        // claim = 0 resolves from the signature alone. Honest, but a signature
+        // can be genuinely ambiguous: {4, 64} channels is both "plain-LTRB box
+        // + 64 classes" and "DFL box + 4 classes", and the heuristic picks the
+        // first.
+        //
+        // claim > 0 states a class count — which is the only thing that
+        // disambiguates those — but on its own it is a tautology: resolveYoloHead
+        // picks the branch MATCHING the claim and reports the claim back, so a
+        // labels file with 64 names against an 80-class model resolves happily
+        // with the 80-channel CLASS branch reinterpreted as a box head. What
+        // gives that away is the box width it implies: 80/4 = reg_max 20, which
+        // no export produces. Real heads are 4 channels (plain LTRB) or 64
+        // (ultralytics DFL, reg_max 16).
+        const rcdl::YoloHeadLayout layout = rcdl::resolveYoloHead(engineFrom(engine_arg), claim);
+        if (claim > 0 && layout.reg_max != 0 && layout.reg_max != 16) {
+          throw std::invalid_argument(
+              "yolo_head_classes: claiming " + std::to_string(claim) +
+              " classes leaves a box branch of " + std::to_string(4 * layout.reg_max) +
+              " channels (reg_max " + std::to_string(layout.reg_max) +
+              "), which no export produces — the claim almost certainly belongs to a "
+              "different model");
+        }
+        return layout.num_classes;
+      },
+      "engine"_a, "claim"_a = 0,
+      "The class count an LTRB head declares. With claim=0 it is resolved from the output "
+      "signature alone; with claim>0 that count is asserted against the model and the "
+      "resulting head checked for plausibility");
+
   // --- detection pipeline -------------------------------------------------------
   nb::class_<rcdl::DetectionPipeline>(m, "DetectionPipeline")
       .def(
@@ -1023,6 +1058,14 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("head_layout", [](const rcdl::DetectionPipeline& p) {
         const auto* d = p.decoder().ltrb();
         return d ? d->layout().describe() : std::string("(single-tensor head)");
+      })
+      // What THIS pipeline decodes with. Note that when a class count was
+      // configured, resolveYoloHead picks the branch matching it, so this
+      // reports the configured number back — use yolo_head_classes() for the
+      // count the model itself declares.
+      .def_prop_ro("num_classes", [](const rcdl::DetectionPipeline& p) {
+        const auto* d = p.decoder().ltrb();
+        return d ? d->layout().num_classes : p.config().detect.num_classes;
       })
       .def("reset_profile", &rcdl::DetectionPipeline::resetProfile)
       .def_prop_ro("profile", [](const rcdl::DetectionPipeline& p) {
@@ -3857,4 +3900,34 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("input_width", &rcdl::WholeBodyEstimator::inputWidth)
       .def_prop_ro("input_height", &rcdl::WholeBodyEstimator::inputHeight)
       .def_prop_ro("num_keypoints", &rcdl::WholeBodyEstimator::numKeypoints);
+
+  // ===========================================================================
+  // Open-vocabulary detection — tasks/open_vocab.h
+  // ===========================================================================
+  //
+  // No decode of its own: a YOLOE build is an ordinary LTRB head whose class
+  // axis means words. All that is new at runtime is the table of words.
+
+  nb::class_<rcdl::LabelMap>(m, "LabelMap")
+      .def(nb::init<>())
+      .def_static("from_file", &rcdl::LabelMap::fromFile, "path"_a,
+                  "Load one prompt per line (blank lines dropped)")
+      .def_static("from_list", &rcdl::LabelMap::fromList, "names"_a)
+      .def_ro("names", &rcdl::LabelMap::names)
+      .def("name", &rcdl::LabelMap::name, "class_id"_a,
+           "Name for a class id, or '?' out of range")
+      .def("require_size", &rcdl::LabelMap::requireSize, "num_classes"_a,
+           "Throw unless this table names exactly num_classes classes")
+      .def("__len__", &rcdl::LabelMap::size)
+      .def("__getitem__",
+           [](const rcdl::LabelMap& lm, int i) {
+             const int n = static_cast<int>(lm.size());
+             if (i < 0) i += n;  // sequence semantics: lm[-1] is the last prompt
+             if (i < 0 || i >= n) throw nb::index_error();
+             return lm.names[static_cast<std::size_t>(i)];
+           })
+      .def("__repr__", [](const rcdl::LabelMap& lm) {
+        return "<LabelMap " + std::to_string(lm.size()) + " prompts>";
+      });
+
 }

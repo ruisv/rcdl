@@ -81,6 +81,7 @@ add_library(rcdl SHARED
   src/tasks/optical_flow.cc
   src/tasks/promptable_seg.cc
   src/tasks/wholebody.cc
+  src/tasks/open_vocab.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc

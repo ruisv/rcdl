@@ -94,6 +94,19 @@ REGISTRY=(
   # Input is float32 in 0..255 (ImageNet mean/std folded in); the head is SimCC,
   # two bins per input pixel. See docs/MODELS.md.
   "rtmw_s_133_256x192_fp16_rk3588.rknn|convert|rtmw_s_133_256x192_fp16_rk3588.rknn"
+  # Open-vocabulary detection (YOLOE-11s). The vocabulary is a CONVERSION-time
+  # parameter: the CLIP text encoder runs on the convert host and its output is
+  # folded into the classification conv, so what lands here is an ordinary
+  # 9-output LTRB head with one class channel per word — decoded by the same
+  # code as every other YOLO. The `.labels.txt` beside each model is the only
+  # runtime state (rcdl::LabelMap); load them together.
+  "yoloe_11s_coco80_rk3588.rknn|convert|yoloe_11s_coco80_rk3588.rknn"
+  "yoloe_11s_coco80_rk3588.labels.txt|convert|yoloe_11s_coco80_rk3588.labels.txt"
+  # The same checkpoint with six words COCO has no class for at all. This is the
+  # build that shows the vocabulary is load-bearing rather than decorative.
+  "yoloe_11s_streetwear_rk3588.rknn|convert|yoloe_11s_streetwear_rk3588.rknn"
+  "yoloe_11s_streetwear_rk3588.labels.txt|convert|yoloe_11s_streetwear_rk3588.labels.txt"
+  "yolop_cut_640_i8_rk3588.rknn|convert|yolop_cut_640_i8_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

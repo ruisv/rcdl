@@ -363,6 +363,32 @@ crops; geometry-only tracking never touches it.
 
 ---
 
+## Open-vocabulary detection
+
+```python
+e      = rcdl.Engine("models/yoloe_11s_streetwear_rk3588.rknn")
+labels = e.label_map()               # <model>.labels.txt, checked against the model
+det    = e.detector(num_classes=len(labels))
+
+for d in rcdl.detect(det, frame):
+    print(labels.name(d.class_id), d.score)                    # "sneakers" 0.77
+```
+
+There is **no open-vocabulary decoder**, and that is the point. YOLOE's text
+comparison happens on the conversion host, where the CLIP text encoder folds one
+embedding per prompt into the classification convolution; what reaches the board
+is an ordinary LTRB head with one class channel per word, read by the same
+`DetectionPipeline` as every other YOLO here.
+
+So the vocabulary is chosen when the model is converted, not when it runs.
+`LabelMap` is the only runtime state — and `require_size()` is worth calling,
+because a labels file from a different build does not move a box or change a
+score, it silently renames every result.
+
+---
+
+---
+
 ## Errors
 
 Everything raises `RuntimeError` carrying the vendor's message and, for the

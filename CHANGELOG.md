@@ -330,6 +330,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- `tasks/open_vocab` — open-vocabulary detection (YOLOE) with **no new decode**.
+  The text side of YOLOE runs on the conversion host: a CLIP text embedding per
+  prompt is folded into the classification convolution, so what reaches the board
+  is an ordinary anchor-free LTRB head with one class channel per word and
+  `DetectionPipeline` reads it unchanged. The vocabulary is therefore a
+  conversion-time parameter, and the only runtime state is `rcdl::LabelMap`
+  (class_id → prompt, `fromFile`/`fromList`, and `requireSize` against the class
+  count the model declares). With `yoloe_11s_coco80_rk3588.rknn` and
+  `yoloe_11s_streetwear_rk3588.rknn`, plus `Engine.label_map()` /
+  `DetectionPipeline.num_classes` on the Python side.
+  *`requireSize` is a hard check rather than a warning because the failure it
+  catches is invisible: a labels file from a different build moves no box and
+  changes no score, it only renames every result. Verified two ways — the COCO
+  build agrees with yolov8n about where the bus is (IoU 0.906), and the
+  six-prompt build finds four pairs of `sneakers`, a word COCO has no class for
+  at all, each at the feet of a person yolov8n found. int8 reproduces every
+  detection of the float model with the same word (6/6 and 5/5 at IoU > 0.7).*
 - `tasks/wholebody` — top-down whole-body pose: one person's box in, the
   COCO-WholeBody 133 keypoints out (17 body, 6 feet, 68 face, 21 per hand).
   `cropGeometry` (the box padded by 1.25 and then GROWN to the model's aspect,

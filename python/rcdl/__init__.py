@@ -107,6 +107,8 @@ from rcdl_py import (
     decode_text_orientation,
     ocr_line_fit_width,
     decode_yolo_ltrb,
+    yolo_head_classes,
+    LabelMap,
     depth_colorize,
     depth_resize,
     depth_to_gray8,
@@ -329,6 +331,9 @@ __all__ = [
     "plan_tiles",
     "tile_weight",
     "upscale",
+    # tasks: open-vocabulary detection
+    "LabelMap",
+    "yolo_head_classes",
     "__version__",
 ]
 
@@ -589,6 +594,24 @@ class Engine:
         order comes from the output tensor itself, not from a flag.
         """
         return Segmenter(self._e, **kwargs)
+
+    def label_map(self, path: str | None = None) -> LabelMap:
+        """The open-vocabulary label table for this model.
+
+        Defaults to ``<model>.labels.txt`` beside the ``.rknn``, and checks it
+        against the class count the model declares — a table from a different
+        vocabulary renames every detection without changing a single box.
+        """
+        if path is None:
+            stem = self.path[: -len(".rknn")] if self.path.endswith(".rknn") else self.path
+            path = stem + ".labels.txt"
+        lm = LabelMap.from_file(path)
+        # The vocabulary's length is the CLAIM: a model with no branch that wide
+        # fails to resolve at all, which is the mismatch worth catching, and
+        # yolo_head_classes rejects a claim that only "fits" by reinterpreting
+        # the class branch as a box head.
+        lm.require_size(yolo_head_classes(self._e, len(lm)))
+        return lm
 
     def depth_estimator(self, **kwargs) -> DepthEstimator:
         """A DepthEstimator driving this Engine (monocular depth).

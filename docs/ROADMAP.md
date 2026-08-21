@@ -159,14 +159,17 @@ equivalent of its M5.
 
 | | BCDL | RCDL |
 |---|---|---|
-| Task heads in `src/tasks/` | 22 | **10** |
-| Models in the registry | ~38 | **13** |
+| Task heads in `src/tasks/` | 22 | **16** |
+| Models in the registry | ~38 | **29** |
 | Pipeline classes | 5 | 3 |
 
-The ten RCDL has are the core CV set — detection, classification, pose, instance
-and semantic segmentation, oriented boxes, OCR, face detection, monocular depth,
-embedding/ReID — each with a model and a board test. What is missing splits into
-two kinds, and they are not equally hard.
+The core CV set — detection, classification, pose, instance and semantic
+segmentation, oriented boxes, OCR, face detection, monocular depth,
+embedding/ReID — was there from M4, each with a model and a board test. M7–M10
+added the textline angle classifier, sparse features, super-resolution, optical
+flow, promptable segmentation, whole-body pose and open-vocabulary
+detection. What is still missing splits into two kinds, and they are not
+equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
 * OCR is PP-OCRv4 det + rec against BCDL's v5/v6 stacks, and has **no textline
@@ -178,10 +181,11 @@ two kinds, and they are not equally hard.
   behind.
 
 **Heads RCDL does not have.** Each is a decoder plus a model plus tests:
-anomaly detection, RGB-D depth refinement, end-to-end driving, sparse local
-features, lidar 3-D detection, monocular 3-D, open-vocabulary detection, optical
-flow, panoptic driving, promptable segmentation, super-resolution, whole-body
-pose — plus stereo disparity, which in BCDL is a pipeline rather than a head.
+anomaly detection, RGB-D depth refinement, end-to-end driving, lidar 3-D
+detection, monocular 3-D, panoptic driving — plus stereo disparity, which in BCDL is a pipeline
+rather than a head. Most of what remains is blocked on *data* rather than on
+code: MVTec parts, a stereo pair, calibrated driving frames. None of it is
+carried here.
 
 Milestones follow that split, cheapest and most-broken first. Each still ends
 with a board-verified result and a pinned test.
@@ -266,13 +270,13 @@ with a board-verified result and a pinned test.
   second one applied.* All five heads of the generation are now in the registry.
 
 - **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅,
-  optical flow ✅, promptable segmentation ✅, whole-body pose ✅)
+  optical flow ✅, promptable segmentation ✅, whole-body pose ✅,
+  open-vocabulary detection ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test: open-vocabulary detection, anomaly detection,
-  stereo disparity.
-  The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic and
-  end-to-end driving) are a separate question — they need calibration data and
-  sample frames this project does not currently carry.
+  oracle + model + board test. What is left — panoptic driving, anomaly
+  detection, stereo disparity, and the sensor-fusion heads (lidar 3-D,
+  mono3d, end-to-end driving) — is mostly blocked on data rather than code: MVTec parts, a rectified
+  stereo pair, calibrated driving frames, none of which this project carries.
 
   **Sparse local features (XFeat) landed first**, and it is the first head here
   that answers a question about *two* frames rather than one: repeatable points
@@ -311,6 +315,25 @@ with a board-verified result and a pinned test.
   where int8 manages 31.5 and over-sharpens past the original, for 1.6× the
   speed. XFeat's int8 build, measured the same way, is indistinguishable from
   its float one; neither result is a rule.
+
+  **Open-vocabulary detection (YOLOE) added no decoder at all**, and that is the
+  finding rather than a shortcut. YOLOE is open-vocabulary because its
+  classification branch compares an image embedding against a CLIP *text*
+  embedding of each prompt — a 600 MB text encoder and a tensor of words, none of
+  which belongs on an NPU. Run the text encoder once on the conversion host,
+  fold its output into the classification convolution, and what reaches the board
+  is an ordinary anchor-free head with one class channel per word: `resolveYoloHead`
+  reports the same layout as yolov8n and `DetectionPipeline` reads it unchanged.
+  The vocabulary becomes a **conversion-time** parameter, and the only runtime
+  state is the class_id → prompt table (`rcdl::LabelMap`).
+  *Verified two ways, because "it found five things" proves nothing here: the
+  COCO-80 build agrees with yolov8n about where the bus is (IoU 0.906), and a
+  six-prompt build finds four pairs of `sneakers` — a word COCO has no class for
+  — each at the feet of a person yolov8n found.* Not every prompt works;
+  `wheel`, `window` and `tree` returned nothing on the same frame, so a
+  vocabulary is worth measuring before it ships. `LabelMap::requireSize()` is a
+  hard check because a labels file from another build moves no box and changes no
+  score — it only renames every result.
 
   **Whole-body pose (RTMW)** is the same task as `tasks/pose.h` with the cost
   model inverted: top-down, one inference per person (~25 ms), 133 keypoints

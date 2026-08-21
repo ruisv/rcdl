@@ -1889,3 +1889,143 @@ def test_wholebody_is_reproducible(rcdl):
     a = rcdl.estimate_wholebody(wb, img, box)
     b = rcdl.estimate_wholebody(wb, img, box)
     np.testing.assert_array_equal(a, b)
+
+
+# --------------------------------------------------------------------------- #
+# Open-vocabulary detection — YOLOE-11s with a vocabulary baked in             #
+# --------------------------------------------------------------------------- #
+YOLOE_COCO = "yoloe_11s_coco80_rk3588.rknn"
+YOLOE_STREET = "yoloe_11s_streetwear_rk3588.rknn"
+
+
+def _labels_for(rcdl, model_path):
+    """The `.labels.txt` staged beside a model. Open-vocabulary class ids mean
+    nothing without it."""
+    import os
+    p = model_path[: -len(".rknn")] + ".labels.txt"
+    if not os.path.isfile(p):
+        pytest.skip(f"labels file not staged beside the model: {p}")
+    return rcdl.LabelMap.from_file(p)
+
+
+def _detect_with(rcdl, model_name, img, conf=0.25):
+    model = bm.require_model(model_name)
+    lm = _labels_for(rcdl, model)
+    engine = rcdl.Engine(model)
+    pipe = rcdl.DetectionPipeline(engine._e, num_classes=len(lm), conf_thresh=conf)
+    dets = pipe.process(np.ascontiguousarray(img).reshape(-1), img.shape[1], img.shape[0],
+                        "bgr888")
+    return lm, dets
+
+
+def _iou(a, b):
+    x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter
+    return inter / (union + 1e-9)
+
+
+def test_an_open_vocabulary_model_decodes_through_the_ordinary_detector(rcdl):
+    """YOLOE's whole point is that the class axis is chosen at CONVERSION time —
+    the CLIP text encoder runs on the host and is folded into the classification
+    conv, so what reaches the board is a plain 9-output LTRB head. This asserts
+    exactly that: the standard DetectionPipeline, no new decode, reads the same
+    scene an ordinary COCO detector reads. Measured: bus 0.946 and four people,
+    the bus box within IoU 0.9 of yolov8n's."""
+    need(rcdl, "LabelMap", "DetectionPipeline")
+    img = bm.load_bgr("bus.jpg")
+    lm, dets = _detect_with(rcdl, YOLOE_COCO, img)
+    assert len(lm) == 80
+
+    counts = {}
+    for d in dets:
+        counts[lm.name(d.class_id)] = counts.get(lm.name(d.class_id), 0) + 1
+    print(f"\nYOLOE(coco80): {counts}")
+    assert counts.get("bus", 0) == 1, counts
+    assert counts.get("person", 0) >= 4, counts
+
+    # Cross-model: a separately trained closed-vocabulary detector on the same
+    # frame. Agreement here cannot come from the decode being self-consistent.
+    v8 = rcdl.Engine(bm.require_model("yolov8n_rk3588.rknn"))
+    ref = rcdl.DetectionPipeline(v8._e, conf_thresh=0.25).process(
+        np.ascontiguousarray(img).reshape(-1), img.shape[1], img.shape[0], "bgr888")
+    ref_bus = [d for d in ref if rcdl.coco_class_name(d.class_id) == "bus"]
+    got_bus = [d for d in dets if lm.name(d.class_id) == "bus"]
+    assert ref_bus and got_bus
+    overlap = _iou(ref_bus[0], got_bus[0])
+    print(f"  bus box vs yolov8n: IoU {overlap:.3f}")
+    assert overlap > 0.85, "the two models disagree about where the bus is"
+
+
+def test_a_prompt_coco_has_no_class_for_is_found_where_it_belongs(rcdl):
+    """The build that shows the vocabulary is load-bearing rather than
+    decorative. "sneakers" is not a COCO class and cannot be expressed by any
+    class id of the model above — yet this build finds four pairs, and the check
+    is geometric and cross-model: every pair must sit in the bottom fifth of a
+    person box found by yolov8n. A vocabulary that was being ignored would give
+    either nothing or boxes unrelated to feet."""
+    need(rcdl, "LabelMap", "DetectionPipeline")
+    img = bm.load_bgr("bus.jpg")
+    lm, dets = _detect_with(rcdl, YOLOE_STREET, img)
+    assert "sneakers" in list(lm.names)
+    assert "sneakers" not in bm.COCO_NAMES, "pick a prompt COCO cannot express"
+
+    shoes = [d for d in dets if lm.name(d.class_id) == "sneakers"]
+    print(f"\nYOLOE({len(lm)} prompts): {len(shoes)} sneakers, "
+          f"scores {[round(d.score, 3) for d in shoes]}")
+    assert len(shoes) >= 3, "the open-vocabulary prompt found nothing"
+
+    v8 = rcdl.Engine(bm.require_model("yolov8n_rk3588.rknn"))
+    people = [d for d in rcdl.DetectionPipeline(v8._e, conf_thresh=0.25).process(
+        np.ascontiguousarray(img).reshape(-1), img.shape[1], img.shape[0], "bgr888")
+        if rcdl.coco_class_name(d.class_id) == "person"]
+    assert people
+    for s in shoes:
+        cx, cy = (s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2
+        at_feet = [p for p in people
+                   if p.x1 - 10 <= cx <= p.x2 + 10 and cy >= p.y1 + 0.75 * (p.y2 - p.y1)]
+        assert at_feet, (f"a 'sneakers' box at ({cx:.0f},{cy:.0f}) is not at the bottom "
+                         f"of any person yolov8n found")
+
+
+def test_the_labels_file_is_checked_against_the_model(rcdl):
+    """A labels file from a different build moves no box and changes no score —
+    it only renames every result. require_size is the only thing standing
+    between the two vocabularies here, so pin that it fires."""
+    need(rcdl, "LabelMap")
+    coco = bm.require_model(YOLOE_COCO)
+    street = bm.require_model(YOLOE_STREET)
+    coco_labels = _labels_for(rcdl, coco)
+    street_labels = _labels_for(rcdl, street)
+
+    def declared(model_path):
+        """What the MODEL says its class axis is, resolved from its output
+        signature with NO hint from us. Asking with a hint would only confirm
+        the hint — resolveYoloHead picks the branch matching whatever it is
+        told, which would make this whole test a tautology."""
+        return rcdl.yolo_head_classes(rcdl.Engine(model_path)._e)
+
+    assert declared(coco) == 80 and declared(street) == 6
+    for model, labels in ((coco, coco_labels), (street, street_labels)):
+        labels.require_size(declared(model))            # matching pair: no throw
+
+    # And the hazard the plain "resolve with a hint" check cannot see: 64 names
+    # against the 80-class model. There IS a 64-channel branch — the DFL box
+    # head — so the claim "fits", and the 80-channel class branch gets
+    # reinterpreted as a box of reg_max 20, which no export produces.
+    with pytest.raises(Exception):
+        rcdl.yolo_head_classes(rcdl.Engine(coco)._e, 64)
+    # A real claim still resolves.
+    assert rcdl.yolo_head_classes(rcdl.Engine(coco)._e, 80) == 80
+    assert rcdl.yolo_head_classes(rcdl.Engine(street)._e, 6) == 6
+
+    print(f"\ncoco labels: {len(coco_labels)}, streetwear model classes: {declared(street)}")
+    with pytest.raises(Exception):                      # 80 names, 6-class model
+        coco_labels.require_size(declared(street))
+    with pytest.raises(Exception):                      # and the other way round
+        street_labels.require_size(declared(coco))
+    # And the pairing the library does for you must fail the same way.
+    with pytest.raises(Exception):
+        rcdl.Engine(street).label_map(coco[: -len(".rknn")] + ".labels.txt")
+

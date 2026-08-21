@@ -40,6 +40,7 @@
 #include "rcdl/tasks/promptable_seg.h"
 #include "rcdl/tasks/superres.h"
 #include "rcdl/tasks/wholebody.h"
+#include "rcdl/tasks/open_vocab.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"
 #include "rcdl/backend/engine_pool.h"

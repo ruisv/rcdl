@@ -115,6 +115,14 @@ correlation-based optical-flow model loadable at all — librknnrt 2.3.2 has no
 `GridSample` on the NPU *or* on its CPU fallback path, and a model built without
 that node declared as a custom operator segfaults inside `rknn_init`.
 
+The opposite case is a head that needs **no** new code: an open-vocabulary
+(YOLOE) build is an ordinary LTRB head whose class axis happens to mean words,
+because the CLIP text embeddings were folded into the classification convolution
+at conversion time. `rcdl::LabelMap` carries the class_id → prompt table and
+`requireSize()` checks it against the class count the model declares, which is
+the only way to catch a labels file from a different vocabulary: it renames every
+detection without moving one.
+
 ---
 
 ## Detection, end to end

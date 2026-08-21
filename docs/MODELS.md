@@ -65,6 +65,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `edge_sam_3x_encoder_fp16_rk3588.rknn` | promptable seg — encoder | 1024×1024 **f32** | rgb | `[1,256,64,64]` f16 embedding. Input is float32 in 0..255; SAM's mean/std are folded into the `.rknn` |
 | `edge_sam_3x_decoder_fp16_rk3588.rknn` | promptable seg — decoder | embedding + 2 prompt points | — | `scores[1,4]`, `masks[1,4,256,256]` f16 logits. The embedding input is **NHWC** where the encoder's output is NCHW |
 | `rtmw_s_133_256x192_fp16_rk3588.rknn` | whole-body pose (133 kpts) | 192×256 **f32** | rgb | `simcc_x[1,133,384]` + `simcc_y[1,133,512]` f16. Top-down: one person per inference. Input is float32 in 0..255 |
+| `yoloe_11s_coco80_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | 9 outputs, the yolov8n layout with `cls[1,80,H,W]`. The class axis is **80 words chosen at conversion time**; pair it with `yoloe_11s_coco80_rk3588.labels.txt` |
+| `yoloe_11s_streetwear_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | same head with `cls[1,6,H,W]` — six prompts COCO has no class for. Pair with its own `.labels.txt` |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -490,6 +492,44 @@ structurally: the 68 face landmarks cluster within 4 px of the nose and each han
 cluster sits at its own wrist, which is what catches a mis-sliced layout that a
 body-only comparison cannot see.
 
+### Open-vocabulary detection is a conversion-time vocabulary
+
+YOLOE is open-vocabulary because its classification branch compares an image
+embedding against a CLIP **text** embedding of each prompt. That comparison is
+the part that does not belong on an NPU: it needs a 600 MB text encoder and a
+tensor of words. So the text encoder runs once on the conversion host and its
+output is folded into the classification convolution. What reaches the board is
+an ordinary anchor-free head with one class channel per word — **`resolveYoloHead`
+reports the same `DFL reg_max=16` layout as yolov8n and the decoder needs no new
+code at all.**
+
+The consequence is that **the vocabulary is a conversion-time parameter, not a
+runtime one**: different words mean a different `.rknn`. All that survives into
+the runtime is the class_id → prompt mapping, which is `rcdl::LabelMap` (one
+prompt per line, kept beside the model as `<model>.labels.txt`).
+
+Because a stale labels file moves no box and changes no score — it only *renames*
+every result, and a build with one word removed shifts every name after it by one
+— `LabelMap::requireSize()` checks the table against the class count the model
+declares. Use it; the failure it catches is otherwise invisible.
+
+Two builds ship, from the same checkpoint:
+
+| build | vocabulary | on `bus.jpg` |
+|---|---|---|
+| `..._coco80` | the COCO-80 names | 1 bus + 4 people, bus box within **IoU 0.906** of yolov8n's |
+| `..._streetwear` | `sneakers`, `jeans`, `hoodie`, `sunglasses`, `license plate`, `street lamp` | **4 pairs of sneakers** (0.51–0.77), each at the feet of a person yolov8n found |
+
+The second build is the one that shows the vocabulary is load-bearing rather
+than decorative: `sneakers` is not a COCO class and no class id of the first
+build can express it. Not every prompt works — `wheel`, `window`, `door` and
+`tree` returned nothing at all on the same frame, so a vocabulary is worth
+measuring on real frames before it is shipped.
+
+int8 costs nothing measurable here. Against the float ONNX on `bus.jpg`, both
+builds reproduce **every** detection with the same word at IoU > 0.7 (6/6 and
+5/5); the int8 COCO build adds one spurious 6×20 px `tie` at 0.295.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -516,6 +556,7 @@ RK3588S, single-frame latency unless stated:
 | EdgeSAM 1024×1024, encode a frame | 350–450 ms |
 | EdgeSAM, one prompt against that embedding | 140–165 ms |
 | RTMW whole-body, one person (crop + 133 keypoints) | 23–47 ms |
+| YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 
 ## Adding a model
 
