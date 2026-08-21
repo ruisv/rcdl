@@ -204,6 +204,29 @@ wants. `float_inputs=[0]` above is not optional: see the Inference section.
 
 ---
 
+## Super-resolution
+
+```python
+sr = rcdl.Engine("models/realesr_general_x4v3_128_fp16_rk3588.rknn").upscaler(overlap=16)
+big = rcdl.upscale(sr, frame)                    # BGR uint8 in, BGR uint8 out
+sr.scale, sr.tile, sr.last_tile_count            # 4, 128, tiles the last call ran
+```
+
+The model upscales one fixed tile; `SuperResolver` cuts the image into
+overlapping tiles, runs each, and cross-fades them back together — cost is
+linear in `last_tile_count`, and each tile is a whole inference (70–82 ms in
+fp16 on this NPU). `overlap=0` butt-joints the tiles, which is only useful for
+seeing the seam the cross-fade exists to remove.
+
+`rcdl.plan_tiles(w, h, tile_w, tile_h, overlap)` and `rcdl.tile_weight(i, len,
+ramp)` expose the geometry and the fade on their own.
+
+Judge the result by sharpness, not PSNR: this family is trained perceptually and
+scores *below* a bicubic resize against the ground truth while looking better.
+See `docs/MODELS.md`, which also covers why the int8 build is not the default.
+
+---
+
 ## Tracking
 
 ```python

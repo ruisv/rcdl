@@ -51,6 +51,8 @@ from rcdl_py import (
     PoseEstimator,
     RotatedBox,
     SegMask,
+    SuperResConfig,
+    SuperResolver,
     Segmenter,
     TextAngleClassifier,
     TextBox,
@@ -101,10 +103,12 @@ from rcdl_py import (
     min_area_quad,
     rotated_iou,
     rotated_nms,
+    plan_tiles,
     seg_colorize,
     seg_resize,
     seg_to_source,
     sort_text_boxes,
+    tile_weight,
     unclip_quad,
     voc_class_name,
     voc_class_names,
@@ -275,6 +279,12 @@ __all__ = [
     "decode_xfeat",
     "match_features",
     "extract_features",
+    # tasks: super-resolution
+    "SuperResConfig",
+    "SuperResolver",
+    "plan_tiles",
+    "tile_weight",
+    "upscale",
     "__version__",
 ]
 
@@ -474,6 +484,15 @@ class Engine:
         than running if it was not.
         """
         return FeatureExtractor(self._e, **kwargs)
+
+    def upscaler(self, **kwargs) -> SuperResolver:
+        """A SuperResolver driving this Engine (tiled x4 upscaling).
+
+        Keyword arguments: ``overlap`` (input pixels of cross-fade between
+        neighbouring tiles), ``input_index``, ``output_index``. The scale factor
+        and tile size come from the model's own shapes.
+        """
+        return SuperResolver(self._e, **kwargs)
 
     def instance_segmenter(self, **kwargs) -> InstanceSegmenter:
         """An InstanceSegmenter driving this Engine (YOLO-seg head).
@@ -714,6 +733,18 @@ def extract_features(extractor: FeatureExtractor, img) -> FeatureSet:
     if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
         raise ValueError("extract_features: expected an HxWx3 uint8 image")
     return extractor.extract(a)
+
+
+def upscale(upscaler: SuperResolver, img) -> np.ndarray:
+    """Upscale a numpy BGR image (HxWx3 uint8) by the model's own factor.
+
+    Tiling is internal; ``upscaler.last_tile_count`` says how many inferences it
+    took, and the cost is linear in that.
+    """
+    a = np.ascontiguousarray(img)
+    if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
+        raise ValueError("upscale: expected an HxWx3 uint8 BGR image")
+    return upscaler.upscale(a)
 
 
 def segment_instances(segmenter: InstanceSegmenter, img, fmt: str = "bgr888"):

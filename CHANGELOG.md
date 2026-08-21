@@ -271,6 +271,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the zero point while the head went on returning keypoints that look like
   keypoints. `FeatureExtractor` checks `inputType()` and refuses to construct on
   an Engine that was opened the ordinary way.
+- `tasks/superres` — ×4 super-resolution by tiling a fixed-size upscaler:
+  `planTiles` (coverage with the last tile flush against the far edge rather
+  than overhanging), `tileWeight` (a cross-fade that is never zero, so the
+  normalized blend needs no border case) and `SuperResolver`, which reads the
+  scale factor and tile size off the model's own shapes. With
+  `realesr_general_x4v3_128_fp16_rk3588.rknn` and its int8 sibling, `sr_demo`
+  and Python bindings (`Engine.upscaler()`, `upscale`, `plan_tiles`,
+  `tile_weight`).
+  Two things here produce a plausible picture when they are wrong, so both are
+  pinned by tests: the tensor wants **0..255 in both builds** — bytes for int8,
+  floats still in 0..255 for fp16, because the ÷255 is inside the model, and
+  feeding 0..1 measures 7.3 dB against the reference instead of 63.2 — and the
+  model is RGB where every image entry point here is BGR.
+  *The registry keeps fp16 as the default on measurement: it reproduces the
+  float model at 63.2 dB where int8 manages 31.5 and over-sharpens past the
+  original (edge energy 66.4 against the original's 62.3), for 1.6× the speed.
+  Judge this family by edge energy, not PSNR — it is trained perceptually and
+  scores below a bicubic resize on PSNR while looking obviously sharper.*
 
 ### Fixed
 

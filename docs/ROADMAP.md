@@ -265,10 +265,10 @@ with a board-verified result and a pinned test.
   in-graph softmax and 0.003 — same argmax, meaningless confidence — with a
   second one applied.* All five heads of the generation are now in the registry.
 
-- **M10 and beyond — new task heads** (sparse features ✅, the rest to do)
+- **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test: super-resolution, open-vocabulary detection,
-  promptable segmentation, whole-body pose, anomaly detection, stereo disparity.
+  oracle + model + board test: open-vocabulary detection, promptable
+  segmentation, whole-body pose, anomaly detection, stereo disparity.
   The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic and
   end-to-end driving) are a separate question — they need calibration data and
   sample frames this project does not currently carry.
@@ -293,6 +293,23 @@ with a board-verified result and a pinned test.
   keypoints that look like keypoints. `EngineOptions::float_inputs` names such
   inputs, and `FeatureExtractor` refuses to construct without it rather than
   running.
+
+  **Super-resolution followed**, and it is the first head whose output is an
+  image rather than a description: a fixed 128×128 tile upscaled ×4, with an
+  arbitrary frame cut into overlapping tiles and cross-faded back together.
+  *Verified: butt-jointed tiles leave a 2.1× jump at the seam columns and the
+  cross-fade brings it to 1.05×, indistinguishable from the picture's own
+  variation.* Its lesson is about **how to judge a model at all**. This family is
+  trained perceptually, so it scores BELOW a bicubic resize on PSNR against the
+  ground truth (24.6 dB vs 28.4 dB) while looking obviously sharper — it invents
+  plausible texture rather than the blur that minimises squared error. The board
+  test therefore asserts recovered high-frequency energy, with bicubic as the
+  floor and the original as the target, and PSNR is used only where it is valid:
+  comparing one build against the float model it came from. That is also how the
+  registry's default was chosen — fp16 reproduces the float model at 63.2 dB
+  where int8 manages 31.5 and over-sharpens past the original, for 1.6× the
+  speed. XFeat's int8 build, measured the same way, is indistinguishable from
+  its float one; neither result is a rule.
 
   **Optical flow is blocked on the runtime, not on the maths.** NeuFlow v2
   converts and the toolkit's simulator reproduces the float ONNX to 0.03 px on

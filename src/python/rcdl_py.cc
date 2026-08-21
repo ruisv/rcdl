@@ -40,6 +40,7 @@
 #include "rcdl/tasks/embedding.h"
 #include "rcdl/tasks/face.h"
 #include "rcdl/tasks/features.h"
+#include "rcdl/tasks/superres.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
 #include "rcdl/tasks/ocr.h"
@@ -3413,4 +3414,69 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("input_width", &rcdl::FeatureExtractor::inputWidth)
       .def_prop_ro("input_height", &rcdl::FeatureExtractor::inputHeight)
       .def_prop_ro("config", &rcdl::FeatureExtractor::config, nb::rv_policy::copy);
+  // ===========================================================================
+  // Super-resolution — tasks/superres.h
+  // ===========================================================================
+  //
+  // The tiling helpers are exposed as free functions because they are what the
+  // numpy oracle checks: coverage and cross-fade weights are pure geometry, and
+  // getting either wrong shows up as a seam rather than as an error.
+
+  nb::class_<rcdl::SuperResConfig>(m, "SuperResConfig")
+      .def(nb::init<>())
+      .def_rw("overlap", &rcdl::SuperResConfig::overlap);
+
+  m.def(
+      "plan_tiles",
+      [](int width, int height, int tile_w, int tile_h, int overlap) {
+        const std::vector<rcdl::TilePlacement> p =
+            rcdl::planTiles(width, height, tile_w, tile_h, overlap);
+        std::vector<int> flat(p.size() * 2);
+        for (std::size_t i = 0; i < p.size(); ++i) {
+          flat[2 * i] = p[i].x;
+          flat[2 * i + 1] = p[i].y;
+        }
+        return ownedArray<int>(flat.data(), {p.size(), 2});
+      },
+      "width"_a, "height"_a, "tile_w"_a, "tile_h"_a, "overlap"_a = 16,
+      "Tile origins covering the image, last one flush against the far edge — (N,2) int32");
+
+  m.def("tile_weight", &rcdl::tileWeight, "i"_a, "len"_a, "ramp"_a,
+        "Cross-fade weight along one tile axis; always > 0 so the blend can normalize");
+
+  nb::class_<rcdl::SuperResolver>(m, "SuperResolver")
+      .def(
+          "__init__",
+          [](rcdl::SuperResolver* self, nb::handle engine_arg, int overlap, int input_index,
+             int output_index) {
+            rcdl::SuperResConfig cfg;
+            cfg.overlap = overlap;
+            new (self) rcdl::SuperResolver(engineFrom(engine_arg), cfg, input_index,
+                                           output_index);
+          },
+          "engine"_a, "overlap"_a = 16, "input_index"_a = 0, "output_index"_a = 0,
+          nb::keep_alive<1, 2>())
+      .def(
+          "upscale",
+          [](rcdl::SuperResolver& sr, const Contig& bgr) {
+            if (bgr.ndim() != 3 || bgr.shape(2) != 3 || bgr.dtype() != nb::dtype<std::uint8_t>()) {
+              throw std::invalid_argument("upscale: expected an HxWx3 uint8 BGR image");
+            }
+            const int h = static_cast<int>(bgr.shape(0));
+            const int w = static_cast<int>(bgr.shape(1));
+            rcdl::SrImage out;
+            {
+              nb::gil_scoped_release nogil;  // one NPU inference per tile
+              out = sr.upscale(static_cast<const std::uint8_t*>(bgr.data()), w, h, w * 3);
+            }
+            return ownedArray<std::uint8_t>(out.data.data(),
+                                            {static_cast<std::size_t>(out.height),
+                                             static_cast<std::size_t>(out.width), 3});
+          },
+          "bgr"_a, "Upscale a BGR image, tiling as needed -> (H*scale, W*scale, 3) uint8 BGR")
+      .def_prop_ro("scale", &rcdl::SuperResolver::scale)
+      .def_prop_ro("tile", &rcdl::SuperResolver::tile)
+      .def_prop_ro("tile_height", &rcdl::SuperResolver::tileHeight)
+      .def_prop_ro("last_tile_count", &rcdl::SuperResolver::lastTileCount,
+                   "Tiles the last upscale() ran — cost is linear in this");
 }

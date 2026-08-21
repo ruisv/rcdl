@@ -1349,3 +1349,150 @@ def test_xfeat_descriptors_separate_a_place_from_another_place(rcdl):
     print(f"\nmatches: same scene warped {len(self_matches)}, different scene "
           f"{len(cross_matches)}")
     assert len(self_matches) > 4 * max(len(cross_matches), 1)
+
+
+# --------------------------------------------------------------------------- #
+# Super-resolution — Real-ESRGAN Compact x4                                    #
+# --------------------------------------------------------------------------- #
+SR_MODEL = "realesr_general_x4v3_128_fp16_rk3588.rknn"
+SR_MODEL_I8 = "realesr_general_x4v3_128_i8_rk3588.rknn"
+
+
+def _sr_pair(rcdl, name="bus.jpg", side=512):
+    """(HR crop, LR = HR shrunk by 4) — the original IS the right answer."""
+    cv2 = pytest.importorskip("cv2")
+    img = bm.load_bgr(name)
+    h, w = img.shape[:2]
+    s = max(side / h, side / w) * 1.02
+    if s > 1:
+        img = cv2.resize(img, (int(w * s) + 1, int(h * s) + 1))
+        h, w = img.shape[:2]
+    hr = np.ascontiguousarray(img[(h - side) // 2:(h - side) // 2 + side,
+                                  (w - side) // 2:(w - side) // 2 + side])
+    lr = cv2.resize(hr, (side // 4, side // 4), interpolation=cv2.INTER_AREA)
+    return hr, lr
+
+
+def _psnr(a, b):
+    d = a.astype(np.float64) - b.astype(np.float64)
+    mse = float((d * d).mean())
+    return 99.0 if mse <= 0 else 10.0 * np.log10(255.0 * 255.0 / mse)
+
+
+def _edge_energy(img):
+    cv2 = pytest.importorskip("cv2")
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.sqrt(gx * gx + gy * gy).mean())
+
+
+def test_superres_puts_back_detail_a_resize_cannot(rcdl):
+    """PSNR cannot judge this model, so the test does not ask it to.
+
+    A perceptually-trained upscaler invents plausible texture instead of the
+    blur that minimises squared error, so it scores BELOW bicubic against the
+    ground truth while looking obviously better. What it must do is recover the
+    high-frequency energy the downscale destroyed — measured here as mean
+    gradient magnitude, with bicubic as the floor and the original as the target.
+    """
+    need(rcdl, "SuperResolver")
+    cv2 = pytest.importorskip("cv2")
+    model = bm.require_model(SR_MODEL)
+    hr, lr = _sr_pair(rcdl)
+    sr = rcdl.Engine(model).upscaler()
+    assert sr.scale == 4 and sr.tile == 128
+
+    up = rcdl.upscale(sr, lr)
+    bicubic = cv2.resize(lr, (up.shape[1], up.shape[0]), interpolation=cv2.INTER_CUBIC)
+    e_up, e_bic, e_hr = _edge_energy(up), _edge_energy(bicubic), _edge_energy(hr)
+    print(f"\nx4 from {lr.shape[1]}x{lr.shape[0]}: {sr.last_tile_count} tiles, "
+          f"edge energy {e_up:.1f} vs bicubic {e_bic:.1f} vs original {e_hr:.1f}; "
+          f"PSNR {_psnr(up, hr):.2f} dB vs bicubic {_psnr(bicubic, hr):.2f} dB")
+
+    assert up.shape == (hr.shape[0], hr.shape[1], 3)
+    assert e_up > 1.2 * e_bic, "the upscale is no sharper than a resize"
+    assert e_up > 0.7 * e_hr, "most of the detail the downscale destroyed is still missing"
+    # A scrambled tiling or a swapped channel order still produces *an* image;
+    # it does not survive being shrunk back to the input it came from.
+    back = cv2.resize(up, (lr.shape[1], lr.shape[0]), interpolation=cv2.INTER_AREA)
+    assert _psnr(back, lr) > 20.0, "the result is not consistent with its own input"
+
+
+def test_superres_colours_are_not_swapped(rcdl):
+    """The model is RGB and every image entry point here is BGR. Getting that
+    backwards costs nothing in sharpness or size — the picture just comes out
+    with its channels exchanged, which no geometric check would notice."""
+    need(rcdl, "SuperResolver")
+    _, lr = _sr_pair(rcdl)
+    sr = rcdl.Engine(bm.require_model(SR_MODEL)).upscaler()
+    up = rcdl.upscale(sr, lr)
+    cv2 = pytest.importorskip("cv2")
+    small = cv2.resize(up, (lr.shape[1], lr.shape[0]), interpolation=cv2.INTER_AREA)
+    per_channel = [_psnr(small[..., c], lr[..., c]) for c in range(3)]
+    swapped = [_psnr(small[..., 2 - c], lr[..., c]) for c in range(3)]
+    print(f"\nper-channel PSNR straight {['%.1f' % v for v in per_channel]}, "
+          f"B<->R swapped {['%.1f' % v for v in swapped]}")
+    assert min(per_channel) > min(swapped) + 3.0
+
+
+def test_superres_tiling_leaves_no_seam(rcdl):
+    """Two tiles disagree slightly where their receptive fields were truncated.
+    Cross-fading spreads that over a band; butt-joining concentrates it on one
+    column, which is what the eye finds.
+
+    This needs a source LARGER than one tile or it measures nothing at all —
+    with a single tile both settings return the same image. The seam columns are
+    known (butt-jointed tiles meet every `tile * scale` pixels), so the test
+    compares the jump exactly there against the jump everywhere else.
+    """
+    need(rcdl, "SuperResolver")
+    cv2 = pytest.importorskip("cv2")
+    engine = rcdl.Engine(bm.require_model(SR_MODEL))
+    probe = engine.upscaler()
+    lr = cv2.resize(bm.load_bgr("zidane.jpg"), (probe.tile * 2 + 40, probe.tile + 30))
+
+    butted_up = engine.upscaler(overlap=0)
+    butted = rcdl.upscale(butted_up, lr)
+    blended_up = engine.upscaler(overlap=16)
+    blended = rcdl.upscale(blended_up, lr)
+    assert butted_up.last_tile_count >= 4, "the source has to span several tiles"
+
+    seams = [x for x in range(1, butted.shape[1])
+             if x % (probe.tile * probe.scale) == 0]
+
+    def seam_ratio(img):
+        col = img.astype(np.float64).mean(axis=2)
+        jump = np.abs(np.diff(col, axis=1)).mean(axis=0)   # per boundary column
+        elsewhere = np.delete(jump, [s - 1 for s in seams]).mean()
+        return float(jump[[s - 1 for s in seams]].mean() / (elsewhere + 1e-6))
+
+    b, u = seam_ratio(blended), seam_ratio(butted)
+    print(f"\nseam columns {seams}, jump vs elsewhere: blended {b:.2f}x, "
+          f"butt-jointed {u:.2f}x ({butted_up.last_tile_count} tiles)")
+    assert u > 1.15, "butt-jointed tiles left no measurable seam — nothing is being tested"
+    assert b < u, "the cross-fade did not reduce the seam it exists to remove"
+
+
+def test_superres_int8_is_the_faster_lower_fidelity_build(rcdl):
+    """Both builds are in the registry and they are not interchangeable.
+
+    int8 is ~1.8x faster and does not reproduce the float model: it disagrees by
+    about 31 dB and over-sharpens past the original. This is the measurement the
+    choice is made on, so it is pinned rather than described.
+    """
+    need(rcdl, "SuperResolver")
+    fp16 = bm.find_model(SR_MODEL)
+    i8 = bm.find_model(SR_MODEL_I8)
+    if not fp16 or not i8:
+        pytest.skip("both the fp16 and the int8 super-resolution builds are needed")
+    hr, lr = _sr_pair(rcdl)
+    a = rcdl.upscale(rcdl.Engine(fp16).upscaler(), lr)
+    b = rcdl.upscale(rcdl.Engine(i8).upscaler(), lr)
+    agree = _psnr(b, a)
+    print(f"\nint8 vs fp16 output: {agree:.2f} dB; edge energy fp16 {_edge_energy(a):.1f}, "
+          f"int8 {_edge_energy(b):.1f}, original {_edge_energy(hr):.1f}")
+    assert 25.0 < agree < 45.0, (
+        "int8 is expected to differ from the float build by roughly 31 dB — "
+        "a much higher number means the builds are no longer what this test describes")
+    assert _edge_energy(b) > _edge_energy(a), "the int8 build's extra edge energy is gone"

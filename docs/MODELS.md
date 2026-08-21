@@ -59,6 +59,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
 | `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
 | `xfeat_640x480_i8_rk3588.rknn` | sparse local features | 640×480 **f32** | — (grey) | 3 outputs: `feats[1,64,60,80]`, `keypoints[1,65,60,80]`, `reliability[1,1,60,80]`, all int8 NCHW. **The input is a normalised map, not image bytes** — see below |
+| `realesr_general_x4v3_128_fp16_rk3588.rknn` | ×4 super-resolution | 128×128 **f32** | rgb | `[1,3,512,512]` f16 NCHW in [0,1]. Input is float32 **still in 0..255** — the ÷255 is in the model |
+| `realesr_general_x4v3_128_i8_rk3588.rknn` | ×4 super-resolution | 128×128 u8 | rgb | as above, int8. ~1.6× faster, 31 dB from the float model — see below |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -327,6 +329,43 @@ without complaint; the runtime then reports `Unsupport CPU op: GridSample` and
 supported route is a custom operator (`rknn_register_custom_ops`, declared at
 conversion time), which is a piece of work RCDL has not done yet.
 
+**Super-resolution: the input is 0..255 in both builds, and one of them is
+float.** The `÷255` is folded into the `.rknn` by the toolkit's `std_values`, so
+a quantized build takes plain u8 bytes and a float build takes *float32 of the
+same numbers*. Handing the float build 0..1 — the obvious guess — produces a
+dark, low-contrast image that still looks like an upscale: **7.3 dB against the
+reference, where the correct range gives 63.2 dB**. `SuperResolver` writes
+whichever type the Engine reports, so this only bites callers driving the Engine
+by hand.
+
+**Judge it by edge energy, not PSNR.** Real-ESRGAN Compact is trained
+perceptually: it invents plausible texture rather than the blur that minimises
+squared error, so it scores *below* a bicubic resize on PSNR against the ground
+truth while looking obviously sharper. Measured over six ×4 downscale/upscale
+pairs:
+
+| | vs the original (PSNR) | mean gradient magnitude |
+|---|---|---|
+| bicubic ×4 | 28.35 dB | 40.5 |
+| **the model** | **24.55 dB** | **55.3** |
+| the original | — | 62.3 |
+
+So PSNR is the right tool for one job only — comparing a build against the float
+model it came from — and that is where the two builds differ:
+
+| build | agreement with the float ONNX | edge energy | one 128×128 tile |
+|---|---|---|---|
+| **fp16** (default) | **63.2 dB** | 55.3 (as the float model) | 70–82 ms |
+| int8 | 31.5 dB | 66.4 — *past the original's 62.3* | 40–53 ms |
+
+The int8 build's extra edge energy is not detail, it is quantization noise
+landing on edges. It is registered because 1.6× matters for some uses, but the
+default is fp16, and this is a per-model finding: XFeat's int8 build is
+indistinguishable from its float one.
+
+Tiling cost is linear and inference dominates: a 480×270 source is 15 tiles and
+1237 ms in fp16 (796 ms int8) end to end.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -348,6 +387,7 @@ RK3588S, single-frame latency unless stated:
 | Same at the native 518×518 | 963 ms |
 | OSNet x0.25 ReID, detection box → 512-d vector | 13.5 ms per crop (9.9 ms NPU) |
 | XFeat 640×480, frame → 4096 features + descriptors | 56–85 ms (35 ms NPU); matching a 4096-pair is another 213–243 ms |
+| Real-ESRGAN Compact ×4, one 128×128 tile → 512×512 | 70–82 ms fp16, 40–53 ms int8; a 480×270 → 1920×1080 upscale is 15 tiles |
 
 ## Adding a model
 

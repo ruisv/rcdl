@@ -70,6 +70,13 @@ REGISTRY=(
   # float_inputs=[0] (FeatureExtractor refuses otherwise). int8 measured
   # equivalent to the float ONNX on a known-warp match test; see docs/MODELS.md.
   "xfeat_640x480_i8_rk3588.rknn|convert|xfeat_640x480_i8_rk3588.rknn"
+  # x4 super-resolution, 128x128 tile. The fp16 build is the default: it
+  # reproduces the float model to 63 dB where int8 manages 31 and over-sharpens.
+  # int8 is ~1.6x faster and stays for when that trade is worth it.
+  # Both take 0..255 (bytes for int8, FLOATS still in 0..255 for fp16) — the
+  # /255 is inside the model. See docs/MODELS.md.
+  "realesr_general_x4v3_128_fp16_rk3588.rknn|convert|realesr_general_x4v3_128_fp16_rk3588.rknn"
+  "realesr_general_x4v3_128_i8_rk3588.rknn|convert|realesr_general_x4v3_128_i8_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then
