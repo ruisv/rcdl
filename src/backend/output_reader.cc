@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "rcdl/backend/engine.h"
 #include "rcdl/core/status.h"
 
 namespace rcdl {
@@ -131,6 +132,55 @@ void dequantizeToFloat(const rknn_tensor_attr& attr, const void* src, float* dst
       throw Error(-1, std::string("RCDL: dequantizeToFloat: unsupported tensor type ") +
                           dtypeName(attr.type));
   }
+}
+
+namespace {
+
+// Width (innermost spatial dim) of a tensor in its own layout — the axis
+// w_stride pads. Mirrors the helper Engine uses when it de-pads a row, so the
+// "are the rows packed?" test below agrees with the gather that would run.
+int widthOf(const rknn_tensor_attr& a) noexcept {
+  if (a.n_dims == 4) {
+    if (a.fmt == RKNN_TENSOR_NHWC) return static_cast<int>(a.dims[2]);
+    return static_cast<int>(a.dims[3]);  // NCHW and friends
+  }
+  return a.n_dims > 0 ? static_cast<int>(a.dims[a.n_dims - 1]) : 1;
+}
+
+}  // namespace
+
+const float* outputAsFloat(const Engine& engine, int out_idx, std::vector<float>& scratch,
+                           std::vector<int>& shape) {
+  shape = engine.outputShape(out_idx);  // range-checks out_idx (throws rcdl::Error)
+  const rknn_tensor_attr& attr = engine.outputAttr(out_idx);
+
+  // FAST PATH: the runtime already wrote logical row-major float32 with no row
+  // padding, so the decoder can read the device buffer in place. A 640x640
+  // YOLO head is ~10^5-10^6 elements per frame; skipping the gather here is the
+  // difference between ~10 ms and ~1 ms of post-processing.
+  const bool packed_rows =
+      attr.w_stride == 0 || static_cast<int>(attr.w_stride) == widthOf(attr);
+  if (attr.type == RKNN_TENSOR_FLOAT32 && packed_rows) {
+    return static_cast<const float*>(engine.outputData(out_idx));
+  }
+
+  // SLOW PATH: int8-affine / fp16 / stride-padded. Engine::outputAsFloat already
+  // de-pads rows and dequantizes, so this only owns the destination storage.
+  scratch.resize(attr.n_elems);
+  engine.outputAsFloat(out_idx, scratch.data(), scratch.size());
+  return scratch.data();
+}
+
+QuantParams quantParams(const rknn_tensor_attr& attr) noexcept {
+  QuantParams q;
+  // Only the affine-asymmetric int8/uint8 case gives a decoder a usable
+  // (scale, zero_point) to threshold in the quantized domain; DFP and float
+  // encodings report is_affine = false so callers fall back to dequantizing.
+  q.is_affine = attr.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
+                (attr.type == RKNN_TENSOR_INT8 || attr.type == RKNN_TENSOR_UINT8);
+  q.scale = attr.scale;
+  q.zero_point = attr.zp;
+  return q;
 }
 
 }  // namespace rcdl

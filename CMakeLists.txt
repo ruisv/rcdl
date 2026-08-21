@@ -64,7 +64,9 @@ add_library(rcdl SHARED
   src/preproc/image.cc
   src/preproc/rga.cc
   src/preproc/letterbox_cpu.cc
-  src/preproc/letterbox.cc)
+  src/preproc/letterbox.cc
+  src/tasks/detection.cc
+  src/pipeline/detection_pipeline.cc)
 add_library(rcdl::rcdl ALIAS rcdl)
 
 configure_file(
@@ -122,6 +124,7 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(model_info)
   rcdl_example(npu_bench)
   rcdl_example(dma_buf_probe)
+  rcdl_example(det_demo)
 endif()
 
 # --- python module -----------------------------------------------------------
