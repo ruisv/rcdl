@@ -49,9 +49,11 @@ from rcdl_py import (
     RotatedBox,
     SegMask,
     Segmenter,
+    TextAngleClassifier,
     TextBox,
     TextDetector,
     TextLine,
+    TextOrientation,
     TextRecognizer,
     center_crop_box,
     class_count_from_shape,
@@ -73,6 +75,8 @@ from rcdl_py import (
     decode_pose,
     decode_seg,
     decode_text_boxes,
+    decode_text_orientation,
+    ocr_line_fit_width,
     decode_yolo_ltrb,
     depth_colorize,
     depth_resize,
@@ -231,7 +235,11 @@ __all__ = [
     "TextDetector",
     "TextLine",
     "TextRecognizer",
+    "TextAngleClassifier",
+    "TextOrientation",
     "decode_text_boxes",
+    "decode_text_orientation",
+    "ocr_line_fit_width",
     "sort_text_boxes",
     "min_area_quad",
     "unclip_quad",
@@ -486,6 +494,20 @@ class Engine:
         ``model_input``, ``pad``, ``backend``, ``output_index``.
         """
         return TextDetector(self._e, **kwargs)
+
+    def text_angle_classifier(self, **kwargs) -> TextAngleClassifier:
+        """A TextAngleClassifier driving this Engine (PP-OCR 0/180 direction head).
+
+        It belongs between :meth:`text_detector` and :meth:`text_recognizer`,
+        and it is not optional decoration: a CTC recogniser fed an upside-down
+        line does not fail, it returns confident nonsense. Feed it the same crop
+        you are about to recognise, and rotate the crop 180 degrees when the
+        result's ``flip180`` is set.
+
+        Keyword arguments: ``thresh`` (the flip gate, PP-OCR's default 0.9),
+        ``model_input``, ``pad``, ``backend``, ``output_index``.
+        """
+        return TextAngleClassifier(self._e, **kwargs)
 
     def text_recognizer(self, dict_path, **kwargs) -> TextRecognizer:
         """A TextRecognizer driving this Engine (CRNN + CTC).

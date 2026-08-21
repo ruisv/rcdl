@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -668,6 +669,66 @@ std::string TextRecognizer::describe() const {
   os << "T=" << num_steps_ << " C=" << num_classes_ << ' '
      << (cfg_.time_major ? "[1,T,C]" : "[1,C,T]") << ", dict " << dict_.size()
      << (cfg_.apply_softmax ? ", softmax on the CPU" : ", softmax in the graph");
+  return os.str();
+}
+
+// ===========================================================================
+// Text-line orientation (0 deg / 180 deg)
+// ===========================================================================
+
+int ocrLineFitWidth(int src_w, int src_h, int dst_w, int dst_h) {
+  if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return dst_w > 0 ? dst_w : 1;
+  // ceil, as the reference does: a crop whose scaled width lands a fraction over
+  // the input is capped rather than rounded down, so a wide line always fills
+  // the width instead of leaving a one-pixel strip of padding.
+  const double scaled = std::ceil(static_cast<double>(dst_h) * src_w / src_h);
+  const int w = static_cast<int>(scaled);
+  if (w >= dst_w) return dst_w;
+  return w > 0 ? w : 1;
+}
+
+TextOrientation decodeTextOrientation(const float* scores, int n, float thresh) {
+  TextOrientation out;
+  if (scores == nullptr || n <= 0) return out;
+  // Argmax over every element rather than over exactly two, so a head that
+  // emits [1,N] (or carries a stray unit axis) still yields a sane label
+  // instead of reading past the end of a two-element assumption.
+  int best = 0;
+  float best_v = scores[0];
+  for (int i = 1; i < n; ++i) {
+    if (scores[i] > best_v) {
+      best_v = scores[i];
+      best = i;
+    }
+  }
+  out.label = best;
+  out.score = best_v;
+  out.flip180 = (best == 1 && best_v > thresh);
+  return out;
+}
+
+TextAngleClassifier::TextAngleClassifier(Engine& engine, float thresh, int output_index)
+    : engine_(engine), thresh_(thresh), out_idx_(output_index) {
+  RCDL_REQUIRE(out_idx_ >= 0 && out_idx_ < engine.numOutputs(),
+               "RCDL TextAngleClassifier: output index is out of range");
+}
+
+TextOrientation TextAngleClassifier::postprocess() const {
+  std::vector<float> scratch;
+  std::vector<int> shape;
+  const float* data = outputAsFloat(engine_, out_idx_, scratch, shape);
+  std::int64_t total = 1;
+  for (int d : shape) total *= (d > 0 ? d : 0);
+  RCDL_REQUIRE(data != nullptr && total > 0, "RCDL TextAngleClassifier: the output is empty");
+  return decodeTextOrientation(data, static_cast<int>(total), thresh_);
+}
+
+std::string TextAngleClassifier::describe() const {
+  std::ostringstream os;
+  const std::vector<int> shape = engine_.outputShape(out_idx_);
+  std::int64_t total = 1;
+  for (int d : shape) total *= (d > 0 ? d : 0);
+  os << total << " classes, flip above " << std::fixed << std::setprecision(2) << thresh_;
   return os.str();
 }
 

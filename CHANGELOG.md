@@ -183,6 +183,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1080p H.264 → YOLOv8n against 27.7 fps frame-at-a-time, a 3.49x speed-up**,
   and per-frame detections identical to the synchronous path. Example:
   `video_det_async` (`--sync` measures both in one run).
+- `rcdl::TextAngleClassifier` + `decodeTextOrientation()` — PP-OCR's 0°/180°
+  text-line direction head, the piece whose absence made rotated text decode
+  *wrong* rather than merely unsupported: measured on the sample page, all 16
+  lines rotated 180° come back from the recogniser as the empty string or a
+  single stray bracket, with nothing in the result to say the content was lost.
+  With the classifier in front they read exactly as they do upright. The flip
+  gate is asymmetric on purpose (only class 1 above the threshold flips),
+  because flipping an upright line is the one outcome worse than not
+  classifying it. Bound in Python as `Engine.text_angle_classifier()`, with
+  `ocrLineFitWidth()` exposing the reference preprocessing — fit the crop to the
+  model's HEIGHT, cap the width, anchor top-left, pad the rest, which is NOT the
+  centred letterbox the rest of the library uses and is worth 16/16 orientations
+  right against 9/16. Model: `ppocr_cls_rk3588.rknn` (`ch_ppocr_mobile_v2.0_cls`,
+  192×48 BGR, int8), calibrated on line crops cut by RCDL's own detector and
+  checked against the Paddle fp32 original — 100% label agreement on a held-out
+  split, probability MAE 0.0000.
 
 ### Fixed
 

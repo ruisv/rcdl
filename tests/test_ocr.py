@@ -836,3 +836,115 @@ def test_load_char_dict_matches_cxx(cxx, tmp_path):
     assert list(cxx.load_char_dict(str(p))) == ["a", "b"]
     # paddle_special applies the reference's convention: blank first, space last
     assert list(cxx.load_char_dict(str(p), True)) == ["blank", "a", "b", " "]
+
+
+# --------------------------------------------------------------------------- #
+# Text-line orientation (0 deg / 180 deg)                                      #
+# --------------------------------------------------------------------------- #
+def ref_text_orientation(scores, thresh=0.9):
+    """The oracle for `rcdl::decodeTextOrientation`.
+
+    Argmax for the label, its value for the score, and — the part worth pinning
+    — a flip decision that is gated only on the 180 class. The asymmetry is
+    deliberate: flipping an upright line makes it unreadable, while leaving a
+    rotated one alone is only as bad as not having the classifier at all.
+    """
+    a = np.asarray(scores, dtype=np.float32).ravel()
+    if a.size == 0:
+        return 0, 0.0, False
+    label = int(np.argmax(a))
+    score = float(a[label])
+    return label, score, bool(label == 1 and score > thresh)
+
+
+@pytest.mark.parametrize("scores,thresh,expect", [
+    ([0.99, 0.01], 0.9, (0, 0.99, False)),   # upright, confident
+    ([0.01, 0.99], 0.9, (1, 0.99, True)),    # upside down, confident: flip
+    ([0.45, 0.55], 0.9, (1, 0.55, False)),   # upside down, unsure: leave it
+    ([0.55, 0.45], 0.9, (0, 0.55, False)),   # upright, unsure: nothing to do
+    ([0.01, 0.90], 0.9, (1, 0.90, False)),   # exactly at the gate is NOT above it
+])
+def test_orientation_gate_is_asymmetric(scores, thresh, expect):
+    label, score, flip = ref_text_orientation(scores, thresh)
+    assert (label, pytest.approx(score, abs=1e-6), flip) == (
+        expect[0], pytest.approx(expect[1], abs=1e-6), expect[2])
+
+
+def test_orientation_matches_cxx(cxx):
+    if cxx is None or not hasattr(cxx, "decode_text_orientation"):
+        pytest.skip("compiled module without decode_text_orientation")
+    rng = np.random.default_rng(7)
+    for _ in range(64):
+        raw = rng.normal(size=2).astype(np.float32)
+        probs = np.exp(raw) / np.exp(raw).sum()
+        for thresh in (0.5, 0.9, 0.99):
+            got = cxx.decode_text_orientation(probs.astype(np.float32), thresh)
+            label, score, flip = ref_text_orientation(probs, thresh)
+            assert got.label == label
+            assert got.score == pytest.approx(score, abs=1e-6)
+            assert got.flip180 == flip
+
+
+def test_orientation_of_an_empty_head_is_upright_and_no_flip(cxx):
+    """An empty buffer must decode to "leave it alone", not to a flip."""
+    assert ref_text_orientation([]) == (0, 0.0, False)
+    if cxx is None or not hasattr(cxx, "decode_text_orientation"):
+        pytest.skip("compiled module without decode_text_orientation")
+    got = cxx.decode_text_orientation(np.zeros(0, dtype=np.float32))
+    assert (got.label, got.score, got.flip180) == (0, 0.0, False)
+
+
+def test_orientation_reads_more_than_two_classes_without_running_off(cxx):
+    """A head with a stray axis (or more classes) must still decode, not read past 2."""
+    scores = np.array([0.1, 0.2, 0.7], dtype=np.float32)
+    assert ref_text_orientation(scores) == (2, pytest.approx(0.7, abs=1e-6), False)
+    if cxx is None or not hasattr(cxx, "decode_text_orientation"):
+        pytest.skip("compiled module without decode_text_orientation")
+    got = cxx.decode_text_orientation(scores)
+    assert got.label == 2 and got.score == pytest.approx(0.7, abs=1e-6)
+    assert not got.flip180  # only class 1 means "upside down"
+
+
+def ref_line_fit_width(src_w, src_h, dst_w, dst_h):
+    """The oracle for `rcdl::ocrLineFitWidth` — PP-OCR's line-crop fit.
+
+    Scale to the destination HEIGHT, cap at its width, anchor top-left. Not the
+    centred letterbox the rest of the library uses, and the difference is not
+    cosmetic: the direction classifier drops from 16/16 orientations right to
+    9/16 when fed a centred letterbox (docs/MODELS.md).
+    """
+    if min(src_w, src_h, dst_w, dst_h) <= 0:
+        return max(dst_w, 1)
+    w = math.ceil(dst_h * src_w / src_h)
+    return dst_w if w >= dst_w else max(w, 1)
+
+
+@pytest.mark.parametrize("src_w,src_h,expect", [
+    (274, 33, 192),   # a normal text line: wider than 4:1, so it fills the width
+    (768, 48, 192),   # far wider: capped, not scaled down further
+    (192, 48, 192),   # exactly the input's aspect
+    (96, 48, 96),     # half as wide: padded to the right
+    (17, 73, 12),     # the vertical strip on the sample page: ceil(48*17/73) = 12
+    (1, 1000, 1),     # degenerate: at least one column
+])
+def test_line_fit_width(src_w, src_h, expect):
+    assert ref_line_fit_width(src_w, src_h, 192, 48) == expect
+
+
+def test_line_fit_width_matches_cxx(cxx):
+    if cxx is None or not hasattr(cxx, "ocr_line_fit_width"):
+        pytest.skip("compiled module without ocr_line_fit_width")
+    for src_w in (1, 7, 17, 96, 191, 192, 193, 274, 1000):
+        for src_h in (1, 18, 33, 48, 73, 200):
+            for dst in ((192, 48), (320, 48), (160, 80)):
+                assert cxx.ocr_line_fit_width(src_w, src_h, *dst) == \
+                    ref_line_fit_width(src_w, src_h, *dst), (src_w, src_h, dst)
+
+
+def test_line_fit_width_survives_a_degenerate_size(cxx):
+    """A zero-sized crop must not divide by zero or return 0 columns."""
+    assert ref_line_fit_width(0, 0, 192, 48) == 192
+    if cxx is None or not hasattr(cxx, "ocr_line_fit_width"):
+        pytest.skip("compiled module without ocr_line_fit_width")
+    assert cxx.ocr_line_fit_width(0, 0, 192, 48) == 192
+    assert cxx.ocr_line_fit_width(10, 0, 192, 48) == 192

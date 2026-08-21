@@ -475,6 +475,130 @@ def test_ocr_recognizes_the_sample_text(rcdl):
     assert "YM-X-3011" in joined, "the Latin/digit part of the dictionary is off"
 
 
+def _ocr_line_crops(rcdl, img):
+    """Every text line of the sample page, cropped and warped upright."""
+    det = rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector()
+    boxes = rcdl.detect_text(det, img, "bgr888")
+    crops = []
+    for b in sorted(boxes, key=lambda b: (b.y1, b.x1)):
+        c = _warp_upright(img, b)
+        if c.shape[0] >= 6 and c.shape[1] >= 12:
+            crops.append(c)
+    return crops
+
+
+def test_text_angle_classifier_reads_the_direction_of_every_line(rcdl):
+    """Both orientations of all 16 sample lines, called right every time.
+
+    Measured on the board: 16/16 upright lines labelled 0 and 16/16 of the same
+    lines rotated 180 degrees labelled 1, at confidence 1.000 for every line but
+    one. That one is the 17x73 vertical strip — a column of stacked glyphs, not a
+    text line, which the model scores 0.57/0.61 either way and the 0.9 flip gate
+    therefore leaves alone. That is the gate doing its job, so it is asserted
+    rather than excluded: an unreadable crop must produce NO flip, because
+    flipping an upright line is the one outcome worse than not classifying it.
+    """
+    need(rcdl, "TextAngleClassifier", "TextDetector")
+    import cv2
+    cls_model = bm.require_model("ppocr_cls_rk3588.rknn")
+    img = bm.load_bgr("ocr.jpg")
+    crops = _ocr_line_crops(rcdl, img)
+    assert len(crops) >= 15, f"the detector only found {len(crops)} usable lines"
+
+    cls = rcdl.Engine(cls_model).text_angle_classifier()
+    assert (cls.input_width, cls.input_height) == (192, 48)
+
+    upright, rotated, flips, unsure = 0, 0, 0, 0
+    for c in crops:
+        u = cls.process(np.ascontiguousarray(c), c.shape[1], c.shape[0], "bgr888")
+        d = cls.process(np.ascontiguousarray(cv2.rotate(c, cv2.ROTATE_180)),
+                        c.shape[1], c.shape[0], "bgr888")
+        upright += u.label == 0
+        rotated += d.label == 1
+        flips += d.flip180
+        unsure += max(u.score, d.score) < 0.9
+        # Never flip an upright line: that is the failure this head must not have.
+        assert not u.flip180, f"an upright crop was marked for flipping: {u}"
+    assert upright == len(crops), f"{upright}/{len(crops)} upright lines called upright"
+    assert rotated == len(crops), f"{rotated}/{len(crops)} rotated lines called rotated"
+    assert flips >= len(crops) - 1, f"the flip gate only fired {flips}/{len(crops)} times"
+    assert unsure <= 1, f"{unsure} lines were below the gate; only the vertical strip should be"
+
+
+def test_the_fit_is_pp_ocrs_own_and_a_centred_letterbox_is_not(rcdl):
+    """A wide line fills the input's width; a tall crop does not, and is padded.
+
+    This pins the preprocessing rather than the model, because the preprocessing
+    is what silently costs accuracy here: the same 16 lines through a CENTRED
+    letterbox score 9/16 upright and 11/16 rotated instead of 16/16, with mean
+    confidence 0.78 instead of 0.98 (docs/MODELS.md). Nothing errors — the head
+    just gets worse at its one job.
+    """
+    need(rcdl, "TextAngleClassifier")
+    cls_model = bm.require_model("ppocr_cls_rk3588.rknn")
+    img = bm.load_bgr("ocr.jpg")
+    crops = _ocr_line_crops(rcdl, img)
+    cls = rcdl.Engine(cls_model).text_angle_classifier()
+
+    wide = max(crops, key=lambda c: c.shape[1] / c.shape[0])
+    cls.process(np.ascontiguousarray(wide), wide.shape[1], wide.shape[0], "bgr888")
+    assert cls.fit_width == cls.input_width, "a wide line should fill the input's width"
+
+    tall = min(crops, key=lambda c: c.shape[1] / c.shape[0])
+    cls.process(np.ascontiguousarray(tall), tall.shape[1], tall.shape[0], "bgr888")
+    if tall.shape[1] / tall.shape[0] < cls.input_width / cls.input_height:
+        assert cls.fit_width < cls.input_width, (
+            f"a {tall.shape[1]}x{tall.shape[0]} crop should be padded, not stretched")
+
+
+def test_a_rotated_line_is_lost_until_the_classifier_flips_it(rcdl):
+    """The reason this head exists, end to end.
+
+    A recogniser handed an upside-down line does not report a problem. Measured
+    on the sample page: of the 16 lines rotated 180 degrees, the recogniser
+    returns the empty string or a single stray bracket at score <= 0.6 — the
+    content is simply gone, with nothing in the result to say so. Run the
+    classifier first, rotate what it marks, and every line comes back exactly as
+    it reads upright.
+    """
+    need(rcdl, "TextAngleClassifier", "TextRecognizer", "TextDetector")
+    import cv2
+    import os
+    cls_model = bm.require_model("ppocr_cls_rk3588.rknn")
+    rec_model = bm.require_model("ppocrv4_rec_rk3588.rknn")
+    dict_path = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")
+    if not os.path.isfile(dict_path):
+        pytest.skip(f"character dictionary missing: {dict_path}")
+
+    img = bm.load_bgr("ocr.jpg")
+    crops = [c for c in _ocr_line_crops(rcdl, img) if c.shape[1] > 4 * c.shape[0]]
+    assert crops, "no wide text lines to test with"
+    cls = rcdl.Engine(cls_model).text_angle_classifier()
+    rec = rcdl.Engine(rec_model).text_recognizer(dict_path)
+
+    naive_survived, recovered, checked = 0, 0, 0
+    for c in crops:
+        upright = rcdl.recognize_text(rec, c, "bgr888").text
+        if not upright:
+            continue
+        checked += 1
+        flipped = cv2.rotate(c, cv2.ROTATE_180)
+        naive = rcdl.recognize_text(rec, flipped, "bgr888").text
+        if naive == upright:
+            naive_survived += 1
+        verdict = cls.process(np.ascontiguousarray(flipped), flipped.shape[1], flipped.shape[0],
+                              "bgr888")
+        fixed = cv2.rotate(flipped, cv2.ROTATE_180) if verdict.flip180 else flipped
+        if rcdl.recognize_text(rec, fixed, "bgr888").text == upright:
+            recovered += 1
+
+    assert checked >= 10, f"only {checked} lines produced text to compare"
+    assert naive_survived == 0, (
+        f"{naive_survived} rotated lines read the same as upright — then this test proves nothing")
+    assert recovered == checked, (
+        f"only {recovered}/{checked} lines came back after the classifier's flip")
+
+
 # --------------------------------------------------------------------------- #
 # Monocular depth — Depth-Anything-V2-Small (ViT-S, DPT head)                   #
 # --------------------------------------------------------------------------- #

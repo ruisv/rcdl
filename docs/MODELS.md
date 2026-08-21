@@ -45,12 +45,40 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `yolov8n-obb_rk3588.rknn` | oriented boxes | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,79,H,W]` = 64 DFL + 15 DOTA classes, plus `angle[1,1,8400]` (sigmoid in-graph; decode as `(a − 0.25)·π`). **Class sigmoid on the CPU.** |
 | `ppocrv4_det_rk3588.rknn` | text detection | DBNet probability map | — | thresholded map → contours → unclipped quads |
 | `ppocrv4_rec_rk3588.rknn` | text recognition | CRNN | — | CTC greedy decode against `data/ppocr_keys_*.txt` |
+| `ppocr_cls_rk3588.rknn` | text-line direction | 192×48 u8 | **bgr** | `[1,2]` f16, **softmax in-graph**: argmax is the label (0 upright / 1 rotated 180°), its value the score |
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
 | `resnet18_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]`, softmax on the CPU |
 | `depth_anything_v2_vits_308_rk3588.rknn` | monocular depth | 308×308 u8 | rgb | `[1,308,308]` int8 — **relative inverse depth (disparity, big = near)**, no activation. ImageNet mean/std baked into the `.rknn` preprocessing, so the NPU takes raw u8 RGB |
 | `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
 | `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
+
+**The direction classifier is fed differently from everything else, and it
+matters.** PP-OCR fits a line crop to the model's HEIGHT, caps the width at the
+input's, anchors it top-left and pads the remainder — `ocrLineFitWidth()`. Feed
+it the centred letterbox the rest of the library uses and, measured on the 16
+lines of `data/images/ocr.jpg`, it drops from **16/16 orientations right (mean
+confidence 0.98) to 9/16 upright and 11/16 rotated (0.78)**. Nothing errors; the
+model is simply looking at a thin band of text between two thick bars, which is
+not what it was trained on.
+
+The model is `ch_ppocr_mobile_v2.0_cls`, exported to ONNX with paddle2onnx and
+quantized int8 against 96 line crops cut out of the sample page by RCDL's own
+PP-OCRv4 detector — both orientations, plus a brightness and a blur variant of
+each. Validated against the **Paddle fp32 original on the same crops**: on a
+held-out split (calibrate on 10 of the 16 lines, measure on the other 6) the
+int8 build agrees with Paddle on **100% of labels with a probability MAE of
+0.0000 (max 0.0003)**; over all 96 crops, 100% of labels and MAE 0.003. Both
+agree with the intended orientation on every line except the 17×73 vertical
+strip, which is a column of stacked glyphs rather than a text line and which
+both score ~0.6 either way — below the 0.9 flip gate, which is the point of
+having one.
+
+**Why the head is in the pipeline at all**: a CTC recogniser fed an upside-down
+line does not fail. On this page the rotated lines come back as the empty string
+or a single stray bracket at score ≤ 0.6 — the content is gone, with nothing in
+the result to say so. With the classifier in front, all of them read exactly as
+they do upright.
 
 **RetinaFace wants BGR.** The vendor's Python demo converts BGR→RGB before
 inference, but the converted `.rknn` does not behave that way: fed RGB it finds

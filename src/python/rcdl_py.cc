@@ -502,6 +502,77 @@ struct BoundRecognizer {
   }
 };
 
+/// The Engine-bound direction classifier, which cannot be a plain BoundTask
+/// because its input is not a letterbox.
+///
+/// PP-OCR fits a line crop to the model's HEIGHT, caps the width, anchors it at
+/// the top-left and pads the rest — see ocrLineFitWidth() for what feeding it a
+/// centred letterbox instead costs (16/16 orientations right becomes 9/16). The
+/// resize therefore goes into a LEFT SUB-VIEW of a host scratch buffer, whose
+/// remainder is set to the pad value, and the result is handed over with
+/// setInput. A host buffer rather than the NPU's tensor because the padding is a
+/// CPU write, and a CPU write into a buffer RGA is also writing is exactly the
+/// race docs/RGA.md 3.1 is about.
+struct BoundAngleClassifier {
+  rcdl::Engine* engine;
+  int in_w = 0;
+  int in_h = 0;
+  rcdl::PixelFormat in_fmt;
+  std::uint8_t pad;
+  rcdl::PreprocBackend backend;
+  rcdl::PreprocBackend last_backend = rcdl::PreprocBackend::Auto;
+  int last_fit_w = 0;
+  std::vector<std::uint8_t> host;  ///< packed WxHxC scratch, reused per call
+  rcdl::TextAngleClassifier task;
+
+  BoundAngleClassifier(rcdl::Engine& e, const std::string& model_input, std::uint8_t pad_value,
+                       const std::string& backend_name, float thresh, int output_index)
+      : engine(&e),
+        in_fmt(formatFromName(model_input)),
+        pad(pad_value),
+        backend(backendFromName(backend_name)),
+        task(e, thresh, output_index) {
+    const rknn_tensor_attr& a = e.inputAttr(0);
+    if (a.n_dims != 4u || a.fmt != RKNN_TENSOR_NHWC) {
+      throw std::invalid_argument("TextAngleClassifier: input 0 is not a 4-D NHWC image tensor");
+    }
+    in_h = static_cast<int>(a.dims[1]);
+    in_w = static_cast<int>(a.dims[2]);
+    const std::size_t bytes = rcdl::imageBytes(in_fmt, in_w, in_h);
+    const std::size_t channels = static_cast<std::size_t>(a.dims[3]);
+    if (in_w <= 0 || in_h <= 0 ||
+        bytes != static_cast<std::size_t>(in_w) * static_cast<std::size_t>(in_h) * channels) {
+      throw std::invalid_argument("TextAngleClassifier: input 0 has " + std::to_string(channels) +
+                                  " channels, which " + std::string(pyFormatName(in_fmt)) +
+                                  " does not carry");
+    }
+    if (e.inputType(0) != RKNN_TENSOR_UINT8) {
+      throw std::invalid_argument("TextAngleClassifier: input 0 takes " +
+                                  std::string(rcdl::dtypeName(e.inputType(0))) +
+                                  "; this head expects a quantized u8 image input");
+    }
+    host.resize(bytes);
+  }
+
+  /// Preproc + infer. Call with the GIL released.
+  void run(const rcdl::ImageView& src) {
+    last_fit_w = rcdl::ocrLineFitWidth(src.width, src.height, in_w, in_h);
+    rcdl::ImageView dst = rcdl::hostView(host.data(), in_w, in_h, in_fmt);
+    dst.size = host.size();
+    if (last_fit_w < in_w) {
+      // Pad first, then resize: both are host writes on a buffer no hardware
+      // owns, and painting the whole canvas is cheaper to get right than
+      // painting the leftover strip row by row.
+      std::fill(host.begin(), host.end(), pad);
+      dst.width = last_fit_w;  // the left sub-view; the row stride stays in_w
+      dst.wstride = in_w;
+    }
+    rcdl::resize(dst, src, backend, rcdl::YuvRange::kStudioToFull, &last_backend);
+    engine->setInput(0, host.data(), host.size());
+    engine->infer();
+  }
+};
+
 // An Engine-bound head that only postprocesses (Segmenter, DepthEstimator,
 // InstanceSegmenter) plus the preprocessing it needs to be usable from Python:
 // RGA letterboxes the source straight into the NPU's input tensor, exactly as
@@ -2916,6 +2987,83 @@ NB_MODULE(rcdl_py, m) {
                      return std::string(rcdl::backendName(p.last_backend));
                    })
       .def("describe", [](const PyTextRecognizer& p) { return p.task.describe(); });
+
+  // --- OCR: text-line orientation ----------------------------------------------
+  nb::class_<rcdl::TextOrientation>(m, "TextOrientation")
+      .def_ro("label", &rcdl::TextOrientation::label, "0 = upright, 1 = rotated 180 degrees")
+      .def_ro("score", &rcdl::TextOrientation::score)
+      .def_ro("flip180", &rcdl::TextOrientation::flip180,
+              "label == 1 and score > threshold: rotate the crop before recognising it")
+      .def("__repr__", [](const rcdl::TextOrientation& o) {
+        char buf[80];
+        std::snprintf(buf, sizeof(buf), "TextOrientation(label=%d score=%.3f%s)", o.label,
+                      o.score, o.flip180 ? " flip180" : "");
+        return std::string(buf);
+      });
+
+  m.def("ocr_line_fit_width", &rcdl::ocrLineFitWidth, "src_w"_a, "src_h"_a, "dst_w"_a,
+        "dst_h"_a,
+        "Columns a line crop occupies in a dst_w x dst_h input under PP-OCR's fit "
+        "(scale to the height, cap the width, anchor top-left, pad the rest)");
+
+  m.def(
+      "decode_text_orientation",
+      [](const Contig& scores, float thresh) {
+        const float* p = floatData(scores, "decode_text_orientation");
+        return rcdl::decodeTextOrientation(p, static_cast<int>(elemCount(scores)), thresh);
+      },
+      "scores"_a, "thresh"_a = 0.9f,
+      "Decode a direction head's output ([1,2]) into a TextOrientation");
+
+  using PyTextAngleClassifier = BoundAngleClassifier;
+  nb::class_<PyTextAngleClassifier>(m, "TextAngleClassifier")
+      .def(
+          "__init__",
+          [](PyTextAngleClassifier* self, nb::handle engine_arg, float thresh,
+             const std::string& model_input, std::uint8_t pad, const std::string& backend,
+             int output_index) {
+            rcdl::Engine& engine = engineFrom(engine_arg);
+            new (self) PyTextAngleClassifier(engine, model_input, pad, backend, thresh,
+                                             output_index);
+          },
+          "engine"_a, "thresh"_a = 0.9f, "model_input"_a = "bgr888", "pad"_a = std::uint8_t(0),
+          "backend"_a = "auto", "output_index"_a = 0, nb::keep_alive<1, 2>())
+      .def(
+          "process",
+          [](PyTextAngleClassifier& p, const Contig& img, int w, int h, const std::string& fmt,
+             int wstride, int hstride) {
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, wstride, hstride);
+            nb::gil_scoped_release nogil;  // RGA letterbox -> NPU -> argmax
+            p.run(v);
+            return p.task.postprocess();
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a = "bgr888", "wstride"_a = 0, "hstride"_a = 0,
+          "Is this cropped text line upright or upside down?")
+      .def(
+          "process_frame",
+          [](PyTextAngleClassifier& p, const rcdl::VideoFrame& f) {
+            nb::gil_scoped_release nogil;
+            p.run(f.view());
+            return p.task.postprocess();
+          },
+          "frame"_a)
+      .def(
+          "postprocess",
+          [](const PyTextAngleClassifier& p) {
+            nb::gil_scoped_release nogil;
+            return p.task.postprocess();
+          },
+          "Decode the bound output as it stands (the caller ran preproc + infer)")
+      .def_prop_ro("threshold", [](const PyTextAngleClassifier& p) { return p.task.threshold(); })
+      .def_prop_ro("input_width", [](const PyTextAngleClassifier& p) { return p.in_w; })
+      .def_prop_ro("input_height", [](const PyTextAngleClassifier& p) { return p.in_h; })
+      .def_prop_ro("fit_width", [](const PyTextAngleClassifier& p) { return p.last_fit_w; },
+                   "Columns the last crop occupied; the rest of the input was padding")
+      .def_prop_ro("backend",
+                   [](const PyTextAngleClassifier& p) {
+                     return std::string(rcdl::backendName(p.last_backend));
+                   })
+      .def("describe", [](const PyTextAngleClassifier& p) { return p.task.describe(); });
 
   // --- face detection (RetinaFace) --------------------------------------------------
   nb::class_<rcdl::FaceDetection>(m, "FaceDetection")

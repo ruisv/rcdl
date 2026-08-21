@@ -186,11 +186,21 @@ pose — plus stereo disparity, which in BCDL is a pipeline rather than a head.
 Milestones follow that split, cheapest and most-broken first. Each still ends
 with a board-verified result and a pinned test.
 
-- **M7 — OCR stack refresh**
-  A textline angle classifier (`TextAngleClassifier`) and PP-OCRv5/v6 detection
-  and recognition. The angle classifier comes first because its absence is not a
-  missing feature but a wrong answer: a rotated line is currently decoded upside
-  down without complaint.
+- **M7 — OCR stack refresh** (angle classifier ✅, v5/v6 det+rec to do)
+  `TextAngleClassifier` came first because its absence was not a missing feature
+  but a wrong answer, and the measurement says so: of the 16 lines on the sample
+  page, every one rotated 180° comes back from the recogniser as the empty
+  string or a single stray bracket — the content gone, with nothing in the
+  result to say so. With the classifier in front, all of them read exactly as
+  they do upright. *Verified: 16/16 upright lines labelled upright and 16/16
+  rotated lines labelled rotated, at confidence 1.000 for every line but the
+  vertical strip, which both orientations score ~0.6 and the 0.9 flip gate
+  therefore leaves alone. The int8 build agrees with the Paddle fp32 original on
+  100% of labels on a held-out split of the calibration lines.*
+  Its preprocessing is **not** the letterbox the rest of the library uses — PP-OCR
+  fits the crop to the model's height and pads to the right, and a centred
+  letterbox costs 16/16 → 9/16 on the same lines (see
+  [`MODELS.md`](MODELS.md)). Still to do: PP-OCRv5/v6 detection and recognition.
 
 - **M8 — face recognition**
   An ArcFace-style identity embedding on top of the existing detector: the

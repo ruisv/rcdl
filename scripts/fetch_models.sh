@@ -31,6 +31,10 @@ REGISTRY=(
   "yolov8n-obb_rk3588.rknn|convert|yolov8n-obb_rk3588.rknn"
   "ppocrv4_det_rk3588.rknn|convert|ppocrv4_det_rk3588.rknn"
   "ppocrv4_rec_rk3588.rknn|convert|ppocrv4_rec_rk3588.rknn"
+  # Text-line direction (0/180). BGR in, 48x192, softmax in the graph. It goes
+  # between the detector and the recogniser: a CTC model fed an upside-down line
+  # reads out confident nonsense rather than failing. See docs/MODELS.md.
+  "ppocr_cls_rk3588.rknn|convert|ppocr_cls_rk3588.rknn"
   "ppseg_rk3588.rknn|convert|ppseg_rk3588.rknn"
   "retinaface_rk3588.rknn|convert|retinaface_rk3588.rknn"
   "resnet18_rk3588.rknn|convert|resnet18_rk3588.rknn"

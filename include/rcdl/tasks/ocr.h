@@ -24,6 +24,10 @@ class Engine;  // backend/engine.h — referenced by ref, not owned.
 //               for one already-cropped, already-deskewed text LINE. Collapse
 //               the best path with the CTC rule and look the surviving indices
 //               up in a character dictionary.
+//   orientation a two-class head says whether that line crop is upright or
+//               upside down, which the recogniser cannot tell you: a CTC model
+//               fed a 180-degree-rotated line does not fail, it reads out
+//               confident nonsense. See TextAngleClassifier.
 //
 // The middle step — crop each detected quadrilateral out of the ORIGINAL frame,
 // warp it upright, and letterbox it into the recogniser's input — is a host
@@ -314,6 +318,88 @@ class TextRecognizer {
   int out_idx_;
   int num_steps_ = 0;
   int num_classes_ = 0;
+};
+
+// ===========================================================================
+// Text-line orientation (0 deg / 180 deg)
+// ===========================================================================
+//
+// WHY THIS EXISTS, since it is easy to leave out: nothing else in the pipeline
+// notices an upside-down line. The detector finds the region either way — a
+// minimum-area rectangle has no top — and the recogniser reads whatever it is
+// given, confidently. A page photographed upside down, a rotated ID card, a
+// label read from the wrong side: without this head they decode to plausible,
+// wrong strings, with a good score, silently. That is why PP-OCR's own pipeline
+// puts a direction classifier between cropping and recognition.
+//
+// The head is a two-class classifier over the SAME crop the recogniser gets,
+// with classes {0 deg, 180 deg}. It cannot detect 90 deg: those come out of the
+// detector as tall quadrilaterals and are handled by the crop-and-warp step,
+// which rotates them upright — leaving exactly the 180 deg ambiguity this
+// resolves.
+
+/// How wide a line crop lands in a WxH model input under PP-OCR's own fit.
+///
+/// The rule, and it is not the letterbox the rest of the library uses: scale so
+/// the crop fills the input's HEIGHT, cap the width at the input's, anchor the
+/// result at the TOP-LEFT and leave the remainder as padding. Only a line
+/// narrower than the input's aspect ratio keeps its shape; a wide one — which a
+/// text line almost always is — is squashed to the full width.
+///
+/// It matters more than a preprocessing detail usually does. Feeding this head a
+/// CENTRED letterbox instead, measured on the 16 lines of the sample page,
+/// drops it from 16/16 orientations right to 9/16 upright and 11/16 rotated,
+/// with mean confidence 0.98 -> 0.78 — the model is looking at a thin strip of
+/// text between two thick bars, which is not what it was trained on. Nothing
+/// errors; the answers just get worse.
+///
+/// Returns the destination width in [1, dst_w]; the caller fills
+/// [width, dst_w) with the pad value.
+int ocrLineFitWidth(int src_w, int src_h, int dst_w, int dst_h);
+
+/// A text line's orientation verdict.
+struct TextOrientation {
+  int label = 0;         ///< 0 = upright, 1 = rotated by 180 degrees
+  float score = 0.0f;    ///< the winning class's value (a probability when the
+                         ///< export ends in softmax, which PP-OCR's does)
+  bool flip180 = false;  ///< label == 1 AND score > threshold: rotate the crop
+                         ///< before handing it to the recogniser
+};
+
+/// Decode a direction head's output into a verdict.
+///
+/// `scores` is `n` values ([1,2] with the batch dim dropped). The argmax is the
+/// label and its value the score; `flip180` is set when the label is 1 AND the
+/// score exceeds `thresh`.
+///
+/// THE THRESHOLD IS ASYMMETRIC ON PURPOSE, and it is the whole design of this
+/// head's use: flipping an upright line makes it unreadable, while leaving a
+/// rotated one alone is no worse than not having the classifier. So the gate
+/// applies to the flip decision only — PP-OCR's default of 0.9 means "flip when
+/// nearly certain", and `label` still reports what the model actually said.
+/// Returns {0, 0, false} for an empty buffer.
+TextOrientation decodeTextOrientation(const float* scores, int n, float thresh = 0.9f);
+
+/// Engine-bound 0/180-degree classifier for ONE already-cropped text line.
+///
+/// Postprocess-only, like TextRecognizer: the caller (or the Python layer) does
+/// the crop and the resize into the model's input, because a crop is a host
+/// image operation. Reads output[output_index] through outputAsFloat(), so an
+/// int8 export is dequantized like any other.
+class TextAngleClassifier {
+ public:
+  explicit TextAngleClassifier(Engine& engine, float thresh = 0.9f, int output_index = 0);
+
+  TextOrientation postprocess() const;
+
+  float threshold() const noexcept { return thresh_; }
+  /// "2 classes, flip above 0.90" — what the constructor resolved.
+  std::string describe() const;
+
+ private:
+  Engine& engine_;
+  float thresh_;
+  int out_idx_;
 };
 
 }  // namespace rcdl
