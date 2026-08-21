@@ -43,6 +43,7 @@
 #include "rcdl/tasks/optical_flow.h"
 #include "rcdl/tasks/promptable_seg.h"
 #include "rcdl/tasks/superres.h"
+#include "rcdl/tasks/wholebody.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
 #include "rcdl/tasks/ocr.h"
@@ -3745,4 +3746,115 @@ NB_MODULE(rcdl_py, m) {
                    })
       .def_prop_ro("input_width", &rcdl::PromptableSegmenter::inputWidth)
       .def_prop_ro("input_height", &rcdl::PromptableSegmenter::inputHeight);
+  // ===========================================================================
+  // Whole-body pose — tasks/wholebody.h
+  // ===========================================================================
+
+  nb::enum_<rcdl::BodyPart>(m, "BodyPart")
+      .value("BODY", rcdl::BodyPart::Body)
+      .value("FOOT", rcdl::BodyPart::Foot)
+      .value("FACE", rcdl::BodyPart::Face)
+      .value("LEFT_HAND", rcdl::BodyPart::LeftHand)
+      .value("RIGHT_HAND", rcdl::BodyPart::RightHand);
+
+  m.def("body_part", &rcdl::bodyPart, "i"_a,
+        "Which COCO-WholeBody region keypoint i belongs to");
+  m.def("body_part_name",
+        [](rcdl::BodyPart p) { return std::string(rcdl::bodyPartName(p)); }, "part"_a);
+  m.def(
+      "body_part_range",
+      [](rcdl::BodyPart p) {
+        int b = 0, e = 0;
+        rcdl::bodyPartRange(p, &b, &e);
+        return nb::make_tuple(b, e);
+      },
+      "part"_a, "[begin, end) keypoint indices of a region");
+
+  nb::class_<rcdl::CropRect>(m, "CropRect")
+      .def_ro("cx", &rcdl::CropRect::cx)
+      .def_ro("cy", &rcdl::CropRect::cy)
+      .def_ro("w", &rcdl::CropRect::w)
+      .def_ro("h", &rcdl::CropRect::h)
+      .def_prop_ro("x0", &rcdl::CropRect::x0)
+      .def_prop_ro("y0", &rcdl::CropRect::y0);
+
+  m.def("crop_geometry", &rcdl::cropGeometry, "x1"_a, "y1"_a, "x2"_a, "y2"_a, "in_w"_a = 192,
+        "in_h"_a = 256, "padding"_a = 1.25f,
+        "The rect the top-down model is actually shown: the box padded, then grown to the "
+        "model's aspect");
+
+  m.def(
+      "decode_simcc",
+      [](const Contig& sx, const Contig& sy, const rcdl::CropRect& crop, int in_w, int in_h,
+         float kpt_thresh, float split_ratio) {
+        auto dims = [](const Contig& a, const char* what) {
+          if (a.dtype() != nb::dtype<float>() || a.ndim() < 2 || a.ndim() > 3) {
+            throw std::invalid_argument(std::string("decode_simcc: ") + what +
+                                        " must be float32 [K,bins] or [1,K,bins]");
+          }
+          return std::pair<int, int>(static_cast<int>(a.shape(a.ndim() - 2)),
+                                     static_cast<int>(a.shape(a.ndim() - 1)));
+        };
+        const auto x = dims(sx, "simcc_x");
+        const auto y = dims(sy, "simcc_y");
+        if (x.first != y.first) {
+          throw std::invalid_argument("decode_simcc: the two tensors disagree on K");
+        }
+        rcdl::WholeBodyConfig cfg;
+        cfg.kpt_thresh = kpt_thresh;
+        cfg.split_ratio = split_ratio;
+        const std::vector<rcdl::Keypoint> kp = rcdl::decodeSimcc(
+            static_cast<const float*>(sx.data()), static_cast<const float*>(sy.data()), x.first,
+            x.second, y.second, crop, in_w, in_h, cfg);
+        std::vector<float> flat(kp.size() * 3);
+        for (std::size_t i = 0; i < kp.size(); ++i) {
+          flat[3 * i] = kp[i].x;
+          flat[3 * i + 1] = kp[i].y;
+          flat[3 * i + 2] = kp[i].score;
+        }
+        return ownedArray<float>(flat.data(), {kp.size(), 3});
+      },
+      "simcc_x"_a, "simcc_y"_a, "crop"_a, "in_w"_a = 192, "in_h"_a = 256,
+      "kpt_thresh"_a = 0.3f, "split_ratio"_a = 2.0f,
+      "SimCC pair -> (K, 3) x/y/score in SOURCE pixels; below-threshold joints keep their "
+      "score and come back at (-1,-1)");
+
+  nb::class_<rcdl::WholeBodyEstimator>(m, "WholeBodyEstimator")
+      .def(
+          "__init__",
+          [](rcdl::WholeBodyEstimator* self, nb::handle engine_arg, float kpt_thresh,
+             float padding, float split_ratio, std::uint8_t pad) {
+            rcdl::WholeBodyConfig cfg;
+            cfg.kpt_thresh = kpt_thresh;
+            cfg.padding = padding;
+            cfg.split_ratio = split_ratio;
+            cfg.pad = pad;
+            new (self) rcdl::WholeBodyEstimator(engineFrom(engine_arg), cfg);
+          },
+          "engine"_a, "kpt_thresh"_a = 0.3f, "padding"_a = 1.25f, "split_ratio"_a = 2.0f,
+          "pad"_a = std::uint8_t(114), nb::keep_alive<1, 2>())
+      .def(
+          "estimate",
+          [](rcdl::WholeBodyEstimator& e, const Contig& img, int w, int h,
+             const std::string& fmt, float x1, float y1, float x2, float y2) {
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, 0, 0);
+            std::vector<rcdl::Keypoint> kp;
+            {
+              nb::gil_scoped_release nogil;  // CPU crop + NPU
+              kp = e.estimate(v, x1, y1, x2, y2);
+            }
+            std::vector<float> flat(kp.size() * 3);
+            for (std::size_t i = 0; i < kp.size(); ++i) {
+              flat[3 * i] = kp[i].x;
+              flat[3 * i + 1] = kp[i].y;
+              flat[3 * i + 2] = kp[i].score;
+            }
+            return ownedArray<float>(flat.data(), {kp.size(), 3});
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a, "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+          "One person's box -> (K, 3) keypoints in source pixels")
+      .def_prop_ro("last_crop", &rcdl::WholeBodyEstimator::lastCrop, nb::rv_policy::copy)
+      .def_prop_ro("input_width", &rcdl::WholeBodyEstimator::inputWidth)
+      .def_prop_ro("input_height", &rcdl::WholeBodyEstimator::inputHeight)
+      .def_prop_ro("num_keypoints", &rcdl::WholeBodyEstimator::numKeypoints);
 }

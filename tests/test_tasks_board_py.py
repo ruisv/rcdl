@@ -1762,3 +1762,130 @@ def test_sam_refuses_an_encoder_that_takes_image_bytes(rcdl):
     dec = rcdl.Engine(bm.require_model(SAM_DECODER))
     with pytest.raises(Exception):
         rcdl.Engine(i8).prompt_segmenter(dec)
+
+
+# --------------------------------------------------------------------------- #
+# Whole-body pose — RTMW, 133 keypoints                                        #
+# --------------------------------------------------------------------------- #
+WHOLEBODY_MODEL = "rtmw_s_133_256x192_fp16_rk3588.rknn"
+
+
+def _biggest_person(rcdl, img):
+    det = rcdl.Engine(bm.require_model("yolov8n_rk3588.rknn")).detector()
+    people = [d for d in rcdl.detect(det, img)
+              if rcdl.coco_class_name(d.class_id) == "person"]
+    if not people:
+        pytest.skip("no person detected")
+    return max(people, key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1))
+
+
+def test_wholebody_agrees_with_the_plain_pose_head_on_the_body_joints(rcdl):
+    """The control that makes 133 keypoints mean something.
+
+    The first 17 of the whole-body layout ARE the COCO body joints, in order, so
+    a completely different model — yolov8n-pose, bottom-up, trained separately —
+    can be asked the same question. Two networks landing on the same shoulders
+    and wrists is evidence; a skeleton that merely looks like a person is not.
+    """
+    need(rcdl, "WholeBodyEstimator")
+    img = bm.load_bgr("bus.jpg")
+    person = _biggest_person(rcdl, img)
+
+    pose_model = bm.require_model("yolov8n-pose_rk3588.rknn")
+    poses = rcdl.estimate_pose(rcdl.Engine(pose_model).pose_estimator(), img)
+    if not poses:
+        pytest.skip("the pose head found nobody to compare against")
+    # The same person: the pose detection whose box overlaps the detector's most.
+    def overlap(p):
+        ix = max(0.0, min(p.box.x2, person.x2) - max(p.box.x1, person.x1))
+        iy = max(0.0, min(p.box.y2, person.y2) - max(p.box.y1, person.y1))
+        return ix * iy
+    ref = max(poses, key=overlap)
+    if overlap(ref) <= 0:
+        pytest.skip("the two heads found no person in common")
+
+    wb = rcdl.Engine(bm.require_model(WHOLEBODY_MODEL)).wholebody_estimator()
+    kp = rcdl.estimate_wholebody(wb, img, (person.x1, person.y1, person.x2, person.y2))
+    assert kp.shape == (133, 3)
+
+    diag = float(np.hypot(person.x2 - person.x1, person.y2 - person.y1))
+    errs = []
+    for i in range(17):
+        a, b = kp[i], ref.keypoints[i]
+        if kp[i, 2] < 0.3 or b.score < 0.5:
+            continue
+        errs.append(np.hypot(a[0] - b.x, a[1] - b.y))
+    print(f"\nwhole-body vs yolov8n-pose on {len(errs)} shared body joints: "
+          f"median {np.median(errs):.1f} px, max {max(errs):.1f} px "
+          f"(person diagonal {diag:.0f} px)")
+    assert len(errs) >= 10, "too few joints in common to compare"
+    assert np.median(errs) < 0.05 * diag, "the two heads disagree about where the body is"
+
+
+def test_wholebody_face_and_hands_are_where_a_body_puts_them(rcdl):
+    """133 points is only useful if the extra 116 are in the right places: the
+    face cluster on the head, each hand cluster at its own wrist. This is the
+    check that catches a transposed or mis-sliced layout, which a body-only
+    comparison cannot see."""
+    need(rcdl, "WholeBodyEstimator")
+    img = bm.load_bgr("bus.jpg")
+    person = _biggest_person(rcdl, img)
+    wb = rcdl.Engine(bm.require_model(WHOLEBODY_MODEL)).wholebody_estimator()
+    kp = rcdl.estimate_wholebody(wb, img, (person.x1, person.y1, person.x2, person.y2))
+
+    def centre(part):
+        b, e = rcdl.body_part_range(part)
+        sel = kp[b:e][kp[b:e, 2] >= 0.3]
+        if len(sel) == 0:
+            pytest.skip(f"no confident {rcdl.body_part_name(part)} keypoints")
+        return sel[:, :2].mean(axis=0), sel
+
+    face, face_pts = centre(rcdl.BodyPart.FACE)
+    lhand, _ = centre(rcdl.BodyPart.LEFT_HAND)
+    rhand, _ = centre(rcdl.BodyPart.RIGHT_HAND)
+    nose, l_wrist, r_wrist = kp[0, :2], kp[9, :2], kp[10, :2]
+    diag = float(np.hypot(person.x2 - person.x1, person.y2 - person.y1))
+    print(f"\nface centre {face.round(0)} vs nose {nose.round(0)}; "
+          f"hand centres {lhand.round(0)} / {rhand.round(0)} vs wrists "
+          f"{l_wrist.round(0)} / {r_wrist.round(0)} (diagonal {diag:.0f} px)")
+
+    assert np.hypot(*(face - nose)) < 0.12 * diag, "the face cluster is not on the head"
+    assert np.hypot(*(lhand - l_wrist)) < 0.15 * diag, "the left hand is not at the left wrist"
+    assert np.hypot(*(rhand - r_wrist)) < 0.15 * diag, "the right hand is not at the right wrist"
+    # And the face is a cluster, not a collapsed point: 68 landmarks spread over
+    # a head, which is what distinguishes a decode from a constant.
+    spread = float(np.linalg.norm(face_pts[:, :2] - face, axis=1).mean())
+    assert spread > 0.01 * diag, "the 68 face points collapsed onto one another"
+
+
+def test_wholebody_crop_padding_changes_what_the_model_sees(rcdl):
+    """The 1.25 padding is part of the model's contract, not a preference: it is
+    what keeps hands and feet inside the crop. Estimating the same person with no
+    padding must move joints — if it does not, the padding is being ignored."""
+    need(rcdl, "WholeBodyEstimator")
+    img = bm.load_bgr("bus.jpg")
+    person = _biggest_person(rcdl, img)
+    box = (person.x1, person.y1, person.x2, person.y2)
+    engine = rcdl.Engine(bm.require_model(WHOLEBODY_MODEL))
+
+    padded = rcdl.estimate_wholebody(engine.wholebody_estimator(padding=1.25), img, box)
+    tight = rcdl.estimate_wholebody(engine.wholebody_estimator(padding=1.0), img, box)
+    both = (padded[:, 2] >= 0.3) & (tight[:, 2] >= 0.3)
+    moved = np.hypot(padded[both, 0] - tight[both, 0], padded[both, 1] - tight[both, 1])
+    print(f"\npadding 1.25 vs 1.0: {both.sum()} joints in common, median move "
+          f"{np.median(moved):.2f} px, mean score {padded[:, 2].mean():.3f} vs "
+          f"{tight[:, 2].mean():.3f}")
+    assert np.median(moved) > 0.5, "the padding setting had no effect on the crop"
+    assert padded[:, 2].mean() >= tight[:, 2].mean() - 0.05, (
+        "the model's own trained padding scored materially worse than a tight crop")
+
+
+def test_wholebody_is_reproducible(rcdl):
+    need(rcdl, "WholeBodyEstimator")
+    img = bm.load_bgr("bus.jpg")
+    person = _biggest_person(rcdl, img)
+    wb = rcdl.Engine(bm.require_model(WHOLEBODY_MODEL)).wholebody_estimator()
+    box = (person.x1, person.y1, person.x2, person.y2)
+    a = rcdl.estimate_wholebody(wb, img, box)
+    b = rcdl.estimate_wholebody(wb, img, box)
+    np.testing.assert_array_equal(a, b)

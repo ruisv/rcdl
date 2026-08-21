@@ -266,10 +266,10 @@ with a board-verified result and a pinned test.
   second one applied.* All five heads of the generation are now in the registry.
 
 - **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅,
-  optical flow ✅, promptable segmentation ✅)
+  optical flow ✅, promptable segmentation ✅, whole-body pose ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test: open-vocabulary detection, whole-body pose,
-  anomaly detection, stereo disparity.
+  oracle + model + board test: open-vocabulary detection, anomaly detection,
+  stereo disparity.
   The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic and
   end-to-end driving) are a separate question — they need calibration data and
   sample frames this project does not currently carry.
@@ -311,6 +311,19 @@ with a board-verified result and a pinned test.
   where int8 manages 31.5 and over-sharpens past the original, for 1.6× the
   speed. XFeat's int8 build, measured the same way, is indistinguishable from
   its float one; neither result is a rule.
+
+  **Whole-body pose (RTMW)** is the same task as `tasks/pose.h` with the cost
+  model inverted: top-down, one inference per person (~25 ms), 133 keypoints
+  instead of 17 — the 68 face landmarks and 21 points per hand that sign
+  language, gesture and "what are the fingers doing" need and a body skeleton
+  cannot answer. *Verified against the plain pose head, which is the useful
+  control here because the first 17 of the whole-body layout ARE the COCO body
+  joints in order: median 5.2 px over 16 shared joints on a 541 px person, with
+  the other 116 checked structurally — the face cluster within 4 px of the nose,
+  each hand cluster at its own wrist.* Its int8 build is the third distinct
+  quantization story in this milestone: fine on easy crops, and on a hard one it
+  keeps 22 of 133 joints instead of 133. A 1-D argmax over 384 bins is a
+  decision, and quantization noise moves decisions.
 
   **Promptable segmentation (EdgeSAM)** is the first head with no classes at
   all: it takes a click or a box and returns the mask of whatever is there, which

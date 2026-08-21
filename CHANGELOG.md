@@ -321,6 +321,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not model fp16 arithmetic, and a uniform shift cannot see the difference.*
   Each GridSample sits between two NPU subgraphs, so a frame costs about 1.4 s:
   this head is correct, not fast.
+- `tasks/wholebody` — top-down whole-body pose: one person's box in, the
+  COCO-WholeBody 133 keypoints out (17 body, 6 feet, 68 face, 21 per hand).
+  `cropGeometry` (the box padded by 1.25 and then GROWN to the model's aspect,
+  never cropped to fit — that is where the hands and feet are), `decodeSimcc`
+  (a 1-D argmax per axis at two bins per input pixel), `bodyPart`/`bodyPartRange`
+  and `WholeBodyEstimator`. With `rtmw_s_133_256x192_fp16_rk3588.rknn`,
+  `wholebody_demo` and Python bindings (`Engine.wholebody_estimator()`,
+  `estimate_wholebody`, `crop_geometry`, `decode_simcc`, `body_part*`).
+  The cost model is the inverse of `tasks/pose.h`'s: one inference per person
+  (~25 ms) rather than one per frame, so a detector runs first.
+  *Verified against the plain pose head — the first 17 of the layout are the COCO
+  body joints in order, so a separately-trained bottom-up model answers the same
+  question: median 5.2 px over 16 shared joints on a 541 px person. The other 116
+  are checked structurally, since a mis-sliced layout would pass a body-only
+  comparison: the 68 face landmarks land within 4 px of the nose and each hand
+  cluster at its own wrist. Float on measurement — the int8 build matches on easy
+  crops (median 1.1 px) and keeps 22 of 133 joints on a hard one.*
 - `tasks/promptable_seg` — SAM-family segmentation: prompt with a click or a box,
   get the mask of whatever is there, with no class list anywhere. `encodeBoxPrompt`
   / `encodePointPrompt` (SAM's labels: 2 and 3 for a box's corners, 1/0 for a

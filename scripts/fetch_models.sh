@@ -88,6 +88,12 @@ REGISTRY=(
   # rather than shipping as a trap. See docs/MODELS.md.
   "edge_sam_3x_encoder_fp16_rk3588.rknn|convert|edge_sam_3x_encoder_fp16_rk3588.rknn"
   "edge_sam_3x_decoder_fp16_rk3588.rknn|convert|edge_sam_3x_decoder_fp16_rk3588.rknn"
+  # Whole-body pose (RTMW): 133 keypoints for ONE person's box, top-down, so a
+  # detector runs first and this runs once per person. Float on measurement —
+  # the int8 build keeps easy crops and drops 111 of 133 joints on a hard one.
+  # Input is float32 in 0..255 (ImageNet mean/std folded in); the head is SimCC,
+  # two bins per input pixel. See docs/MODELS.md.
+  "rtmw_s_133_256x192_fp16_rk3588.rknn|convert|rtmw_s_133_256x192_fp16_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

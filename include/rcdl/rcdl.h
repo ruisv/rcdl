@@ -39,6 +39,7 @@
 #include "rcdl/tasks/optical_flow.h"
 #include "rcdl/tasks/promptable_seg.h"
 #include "rcdl/tasks/superres.h"
+#include "rcdl/tasks/wholebody.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"
 #include "rcdl/backend/engine_pool.h"

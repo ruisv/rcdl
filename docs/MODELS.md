@@ -64,6 +64,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `neuflow_v2_512x384_fp16_rk3588.rknn` | dense optical flow | 512×384 ×2 **f32** | **bgr** | `[1,2,384,512]` f16 NCHW, pixels (+u right, +v down). Inputs are 0..255 BGR floats. **Needs a custom operator** — see below |
 | `edge_sam_3x_encoder_fp16_rk3588.rknn` | promptable seg — encoder | 1024×1024 **f32** | rgb | `[1,256,64,64]` f16 embedding. Input is float32 in 0..255; SAM's mean/std are folded into the `.rknn` |
 | `edge_sam_3x_decoder_fp16_rk3588.rknn` | promptable seg — decoder | embedding + 2 prompt points | — | `scores[1,4]`, `masks[1,4,256,256]` f16 logits. The embedding input is **NHWC** where the encoder's output is NCHW |
+| `rtmw_s_133_256x192_fp16_rk3588.rknn` | whole-body pose (133 kpts) | 192×256 **f32** | rgb | `simcc_x[1,133,384]` + `simcc_y[1,133,512]` f16. Top-down: one person per inference. Input is float32 in 0..255 |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -459,6 +460,36 @@ with yolov8n's bus box, EdgeSAM's mask agrees with yolov8n-seg's bus mask at
 **IoU 0.944**, while filling only 74% of the prompt box — so it is segmenting the
 bus, not returning the rectangle it was given.
 
+**Whole-body pose is top-down, and its two conventions are both invisible in the
+tensor.** RTMW is handed one person's box and returns the COCO-WholeBody 133 (17
+body, 6 feet, 68 face, 21 per hand) as a SimCC pair — two 1-D distributions per
+joint rather than a heatmap.
+
+* **The crop** is the box padded by **1.25** and then grown to the model's 3:4
+  aspect on whichever axis is short — never cropped to fit, because that is
+  exactly where the hands and feet are. Measured on the same person, dropping the
+  padding to 1.0 moves the median joint 1.7 px and costs score (0.794 → 0.777).
+* **The split ratio is 2**: SimCC bins are two per input pixel. Decoding as one
+  puts the whole skeleton at twice its offset inside the crop — still a person,
+  smaller and in the corner.
+
+**Float again, and for a third distinct reason.** The int8 build agrees with the
+float one on easy crops (median 1.1–1.2 px) and collapses on hard ones: a
+backlit person keeps **22 of 133** joints above threshold instead of 133, and a
+partly-occluded one 65 of 131, with 95th-percentile errors of 10–70 px. A 1-D
+argmax over 384 bins is a *decision*, and quantization noise moves decisions —
+the same shape of failure as the semantic-segmentation argmax, not the graceful
+blur that quantization gives a regression head.
+
+The check that makes 133 points mean something is the plain pose head: the first
+17 of the whole-body layout are the COCO body joints in the same order, so
+yolov8n-pose — bottom-up, separately trained — answers the same question.
+Measured on the largest person in `bus.jpg`: **median 5.2 px over 16 shared
+joints on a 541 px person** (~1% of the diagonal). The other 116 are checked
+structurally: the 68 face landmarks cluster within 4 px of the nose and each hand
+cluster sits at its own wrist, which is what catches a mis-sliced layout that a
+body-only comparison cannot see.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -484,6 +515,7 @@ RK3588S, single-frame latency unless stated:
 | NeuFlow v2 512×384, two frames → a dense field | ~1.4 s, nearly all of it the nine CPU GridSample round trips |
 | EdgeSAM 1024×1024, encode a frame | 350–450 ms |
 | EdgeSAM, one prompt against that embedding | 140–165 ms |
+| RTMW whole-body, one person (crop + 133 keypoints) | 23–47 ms |
 
 ## Adding a model
 

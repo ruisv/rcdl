@@ -204,6 +204,36 @@ wants. `float_inputs=[0]` above is not optional: see the Inference section.
 
 ---
 
+## Whole-body pose
+
+```python
+det = rcdl.Engine("models/yolov8n_rk3588.rknn").detector()
+wb  = rcdl.Engine("models/rtmw_s_133_256x192_fp16_rk3588.rknn").wholebody_estimator()
+
+for d in rcdl.detect(det, frame):
+    if rcdl.coco_class_name(d.class_id) != "person":
+        continue
+    kp = rcdl.estimate_wholebody(wb, frame, (d.x1, d.y1, d.x2, d.y2))   # (133, 3)
+    b, e = rcdl.body_part_range(rcdl.BodyPart.LEFT_HAND)                # 91, 112
+    fingers = kp[b:e]
+```
+
+Top-down: **one inference per person** (~25 ms), so a detector runs first — the
+opposite cost model to `pose_estimator()`, which gives 17 joints for everybody in
+one pass. Use this one when the face and the fingers matter.
+
+`kp[i]` is `(x, y, score)` in source pixels; a joint below `kpt_thresh` keeps its
+score and comes back at `(-1, -1)` rather than as a guess. `rcdl.body_part(i)`
+and `rcdl.body_part_range(part)` slice the 133 into body / feet / face / hands,
+and the first 17 are the COCO body joints in the usual order.
+
+The pieces are separately available: `rcdl.crop_geometry(x1, y1, x2, y2)` is the
+rect the model is actually shown (the box padded by 1.25, then grown to the
+model's aspect), and `rcdl.decode_simcc(simcc_x, simcc_y, crop)` turns raw
+outputs into keypoints. Both conventions are load-bearing — see `docs/MODELS.md`.
+
+---
+
 ## Promptable segmentation
 
 ```python

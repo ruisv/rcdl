@@ -50,8 +50,11 @@ from rcdl_py import (
     PoseConfig,
     PoseDetection,
     PoseEstimator,
+    BodyPart,
+    CropRect,
     PromptMask,
     PromptableSegmenter,
+    WholeBodyEstimator,
     RotatedBox,
     SegMask,
     SuperResConfig,
@@ -90,7 +93,12 @@ from rcdl_py import (
     similarity_transform,
     decode_instance_seg,
     decode_obb,
+    body_part,
+    body_part_name,
+    body_part_range,
+    crop_geometry,
     decode_pose,
+    decode_simcc,
     encode_box_prompt,
     encode_point_prompt,
     mask_from_logits,
@@ -291,6 +299,16 @@ __all__ = [
     "decode_xfeat",
     "match_features",
     "extract_features",
+    # tasks: whole-body pose
+    "BodyPart",
+    "CropRect",
+    "WholeBodyEstimator",
+    "body_part",
+    "body_part_name",
+    "body_part_range",
+    "crop_geometry",
+    "decode_simcc",
+    "estimate_wholebody",
     # tasks: promptable segmentation
     "PromptMask",
     "PromptableSegmenter",
@@ -516,6 +534,15 @@ class Engine:
         than running if it was not.
         """
         return FeatureExtractor(self._e, **kwargs)
+
+    def wholebody_estimator(self, **kwargs) -> WholeBodyEstimator:
+        """A WholeBodyEstimator driving this Engine (133 keypoints, top-down).
+
+        Keyword arguments: ``kpt_thresh``, ``padding`` (box padding before the
+        aspect fix), ``split_ratio``, ``pad``. One inference per person, so a
+        detector runs first — see :func:`estimate_wholebody`.
+        """
+        return WholeBodyEstimator(self._e, **kwargs)
 
     def prompt_segmenter(self, decoder: "Engine", **kwargs) -> PromptableSegmenter:
         """A PromptableSegmenter over this Engine (the SAM encoder) and a decoder.
@@ -783,6 +810,15 @@ def extract_features(extractor: FeatureExtractor, img) -> FeatureSet:
     if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
         raise ValueError("extract_features: expected an HxWx3 uint8 image")
     return extractor.extract(a)
+
+
+def estimate_wholebody(estimator: WholeBodyEstimator, img, box, fmt: str = "bgr888") -> np.ndarray:
+    """133 keypoints for one person's ``box`` = (x1, y1, x2, y2) -> (K, 3) array.
+
+    One inference per person: loop the boxes, not the frames.
+    """
+    flat, w, h = _as_buffer(img, fmt)
+    return estimator.estimate(flat, w, h, fmt, *box)
 
 
 def prompt_mask(segmenter: PromptableSegmenter, img, box=None, point=None,
