@@ -232,11 +232,20 @@ with a board-verified result and a pinned test.
   use ALIGNED crops (a same-shaped model calibrated on centre crops is a
   different model, with figures that do not transfer).
 
-- **M9 — YOLO generation refresh**
-  A current YOLO family across detection, classification, pose, instance seg and
-  OBB, replacing the v8/11 builds. Contingent on the toolkit converting those
-  exports cleanly; the decoders already resolve head layout from the model, so
-  the work is conversion and re-measurement rather than new code.
+- **M9 — YOLO generation refresh** (detection ✅, the other four heads to do)
+  The premise held exactly: **YOLO26n detection required no code at all.** Its
+  head has no DFL, so the box branch is 4 channels instead of 64, and
+  `resolveYoloHead()` reads that off the model's own signature and switches to
+  the plain-LTRB path by itself. *Verified: all three generations return the
+  same 1 bus + 4 people on `bus.jpg`; postprocessing drops from 8.8 ms (v8n) and
+  12.9 ms (11n) to 4.9 ms because there is no DFL to reduce — while inference
+  does not improve, 36.5 ms against 23.6 ms for v8n on this NPU.* The export has
+  two traps, both of which yield a plausible model: an NMS-free head carries a
+  second set of branches and only the `one2one_*` pair is the deployed one, and
+  an ultralytics too old to know the architecture loads the checkpoint anyway
+  and predicts confident nonsense. Both are written up in
+  [`MODELS.md`](MODELS.md). Classification, pose, instance seg and OBB need the
+  same treatment, one export patch each.
 
 - **M10 and beyond — new task heads**
   Ported in BCDL's order where the maths carries over, each as decoder + numpy

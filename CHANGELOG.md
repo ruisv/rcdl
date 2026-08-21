@@ -221,6 +221,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1.3–7.3 px mean, the detector re-finds every aligned crop at 0.99–1.00, and
   the eyes and mouth corners land on the template's rows.* The identity model
   itself is not in the registry — see ROADMAP M8 for the data it needs first.
+- `yolo26n_rk3588.rknn` — a current-generation detector, added with **no
+  decoder changes**, which is what the head-resolution design was for: YOLO26's
+  box branch has 4 channels instead of 64 (no DFL), and `resolveYoloHead()`
+  switches to the plain-LTRB path from the model's signature alone. All three
+  generations now return the same 1 bus + 4 people on `bus.jpg`, pinned by a
+  cross-generation test that also asserts the resolved layout, and
+  postprocessing drops to 4.9 ms against 8.8 (v8n) and 12.9 (11n) — inference
+  does not improve, at 36.5 ms against 23.6.
 
 ### Fixed
 

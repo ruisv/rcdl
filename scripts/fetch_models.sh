@@ -26,6 +26,10 @@ mkdir -p "${DEST}"
 REGISTRY=(
   "yolov8n_rk3588.rknn|convert|yolov8n_rk3588.rknn"
   "yolo11n_rk3588.rknn|convert|yolo11n_rk3588.rknn"
+  # YOLO26n: NMS-free head, and — the part that matters to the decoder — NO DFL,
+  # so the box branch is 4 channels instead of 64 and postprocessing is half the
+  # cost. Exported from the one2one branch (see docs/MODELS.md).
+  "yolo26n_rk3588.rknn|convert|yolo26n_rk3588.rknn"
   "yolov8n-pose_rk3588.rknn|convert|yolov8n-pose_rk3588.rknn"
   "yolov8n-seg_rk3588.rknn|convert|yolov8n-seg_rk3588.rknn"
   "yolov8n-obb_rk3588.rknn|convert|yolov8n-obb_rk3588.rknn"

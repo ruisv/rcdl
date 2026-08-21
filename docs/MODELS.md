@@ -40,6 +40,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 |---|---|---|---|---|
 | `yolov8n_rk3588.rknn` | detection | 640×640 u8 | rgb | 9 outputs: per scale `box[1,64,H,W]`, `cls[1,80,H,W]`, `sum[1,1,H,W]`, NCHW. **Sigmoid in-graph.** |
 | `yolo11n_rk3588.rknn` | detection | 640×640 u8 | rgb | same as yolov8n |
+| `yolo26n_rk3588.rknn` | detection | 640×640 u8 | rgb | 9 outputs, same shape as yolov8n except the box branch is **4 channels, not 64: this head has no DFL**. Exported from the NMS-free head's one2one branch |
 | `yolov8n-seg_rk3588.rknn` | instance seg | 640×640 u8 | rgb | 13 outputs: per scale `box(64)`, `cls(80)`, `sum(1)`, `mc(32)` + `proto[1,32,160,160]`, NCHW |
 | `yolov8n-pose_rk3588.rknn` | pose | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,65,H,W]` = 64 DFL + 1 class, plus `keypoints[1,17,3,8400]` f16. **Sigmoid applied on the CPU.** |
 | `yolov8n-obb_rk3588.rknn` | oriented boxes | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,79,H,W]` = 64 DFL + 15 DOTA classes, plus `angle[1,1,8400]` (sigmoid in-graph; decode as `(a − 0.25)·π`). **Class sigmoid on the CPU.** |
@@ -53,6 +54,38 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `depth_anything_v2_vits_308_rk3588.rknn` | monocular depth | 308×308 u8 | rgb | `[1,308,308]` int8 — **relative inverse depth (disparity, big = near)**, no activation. ImageNet mean/std baked into the `.rknn` preprocessing, so the NPU takes raw u8 RGB |
 | `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
 | `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
+
+**YOLO26 needs no decoder changes, and that is the whole point of resolving the
+head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
+carry 64, because the DFL is gone; `resolveYoloHead()` reads that off the
+signature and reports `plain LTRB` instead of `DFL reg_max=16`. Measured on
+`bus.jpg`, all three generations return the same five objects:
+
+| model | detections | infer | postproc |
+|---|---|---|---|
+| YOLOv8n | 1 bus + 4 people, top score 0.887 | 23.6 ms | 8.8 ms |
+| YOLO11n | 1 bus + 4 people, top score 0.948 | 35.3 ms | 12.9 ms |
+| YOLO26n | 1 bus + 4 people, top score 0.924 | 36.5 ms | **4.9 ms** |
+
+Postprocessing halves because there is no DFL to reduce — 8400 cells no longer
+need a 4×16 softmax-and-sum each. Inference does **not** improve: YOLO11n and
+YOLO26n both run slower than YOLOv8n on this NPU despite fewer FLOPs, which is
+worth knowing before treating a newer generation as an upgrade.
+
+Two things about the export, both of which produce a plausible-looking model when
+got wrong:
+
+* An NMS-free head (`end2end = True`) carries **two** sets of branches — the
+  one2many `cv2`/`cv3` used in training and the `one2one_*` pair the model
+  actually infers with. Exporting the former gives boxes from a head the
+  deployed model does not use. RCDL's build takes the one2one branch and still
+  runs NMS, which is a no-op on a duplicate-free head and costs nothing.
+* The first attempt here was converted with an **ultralytics too old to know
+  YOLO26** (8.3.167). It loaded the checkpoint without complaint into a
+  v8-shaped graph, and both PyTorch and the resulting `.rknn` confidently
+  reported a *refrigerator* on `bus.jpg`. The conversion chain was correct
+  throughout; the source model was not. Check the framework can run the weights
+  before converting them.
 
 **PP-OCRv5: the detector ships, the recogniser cannot.** Both were converted
 from the PaddleOCR 3.x mobile exports with the same recipes used for v4.

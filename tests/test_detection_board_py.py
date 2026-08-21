@@ -18,6 +18,8 @@ import pytest
 import board_models as bm
 
 DET_MODELS = ("yolov8n_rk3588.rknn", "yolo11n_rk3588.rknn", "yolov8n.rknn", "yolo11n.rknn")
+# Every detection generation staged here, for the cross-generation test below.
+ALL_DET_MODELS = ("yolov8n_rk3588.rknn", "yolo11n_rk3588.rknn", "yolo26n_rk3588.rknn")
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +61,33 @@ def test_bus_jpg_finds_one_bus_and_four_people(rcdl_mod, pipeline, bus):
         print(f"  {name:<12} {d.score:.3f}  [{d.x1:7.1f} {d.y1:7.1f} {d.x2:7.1f} {d.y2:7.1f}]")
     assert counts.get("bus", 0) == 1, f"expected exactly one bus, got {counts}"
     assert counts.get("person", 0) == 4, f"expected four people, got {counts}"
+
+
+@pytest.mark.parametrize("model_name", ALL_DET_MODELS)
+def test_every_yolo_generation_reads_the_same_scene(rcdl_mod, bus, model_name):
+    """One bus and four people, whatever generation of the head produced them.
+
+    The decoders resolve their layout from the model's own output signature, and
+    this is where that claim gets tested rather than asserted: YOLOv8n and
+    YOLO11n carry a DFL box branch (64 channels, reduced on the CPU) while
+    YOLO26n has none at all (4 channels, an NMS-free head exported from its
+    one2one branch). Both shapes must decode to the same five objects with no
+    configuration from the caller — and the head layout string is checked too,
+    because "it found five objects" would also pass if the decoder had guessed
+    the shape and been lucky.
+    """
+    path = bm.find_model(model_name)
+    if path is None:
+        pytest.skip(f"{model_name} is not staged")
+    pipe = rcdl_mod.Engine(path).detector(model_input="rgb888")
+    dets = rcdl_mod.detect(pipe, bus, "bgr888")
+    names = sorted(rcdl_mod.coco_class_name(d.class_id) for d in dets)
+    assert names == ["bus", "person", "person", "person", "person"], (
+        f"{model_name} read the scene as {names}")
+
+    layout = pipe.head_layout
+    expect_dfl = "reg_max=16" if "yolo26" not in model_name else "plain LTRB"
+    assert expect_dfl in layout, f"{model_name}: expected {expect_dfl} in\n{layout}"
 
 
 def test_boxes_are_inside_the_source_image(rcdl_mod, pipeline, bus):
