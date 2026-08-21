@@ -48,13 +48,84 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
 | `resnet18_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]`, softmax on the CPU |
+| `depth_anything_v2_vits_308_rk3588.rknn` | monocular depth | 308×308 u8 | rgb | `[1,308,308]` int8 — **relative inverse depth (disparity, big = near)**, no activation. ImageNet mean/std baked into the `.rknn` preprocessing, so the NPU takes raw u8 RGB |
+| `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
+| `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
 
 **RetinaFace wants BGR.** The vendor's Python demo converts BGR→RGB before
 inference, but the converted `.rknn` does not behave that way: fed RGB it finds
-only one of the two faces in `zidane.jpg` (the second peaks at 0.089, below any
-usable threshold); fed BGR it finds both at 0.995 and 0.947. It does not error
+only one of the two faces in `zidane.jpg` (the second peaks at 0.129, below any
+usable threshold); fed BGR it finds both at 0.995 and 0.949. It does not error
 and the landmarks do not scatter — it just silently loses most of the recall.
 This is exactly the class of thing the "input channel order" column exists for.
+
+**OSNet crops are squashed, never letterboxed.** A ReID tower is trained on
+detection crops resized straight to 128×256, aspect ratio thrown away. Feeding
+it an aspect-preserving letterbox instead puts grey bars in an input that has
+never seen any, and the failure is quiet: the vectors still come out unit-length
+and still look like embeddings, they are just less separable. `ImageEmbedder`
+squashes for this reason and returns no `LetterboxInfo` — an embedding has no
+coordinates, so there is no geometry to invert.
+
+Measured on the four people in `bus.jpg`, int8, 13.5 ms per crop (9.9 ms of it
+NPU):
+
+| Pair | Cosine |
+|---|---|
+| Different people | 0.38 – 0.47 |
+| Same person, crop 4% tighter | 0.960 |
+| Same person, from a 2× upscaled frame | 0.993 |
+
+Against the fp32 ONNX on the same crops, the int8 vectors land at cosine 0.9922
+(min 0.9874) and preserve the pairwise-similarity structure (Pearson 0.9928,
+largest single similarity shifted by 0.027). As the header in `tasks/embedding.h`
+warns, an int8 embedding is coarser than the float model's, so **any similarity
+threshold must be measured with the same quantized model** rather than taken
+from a paper.
+
+**Depth-Anything-V2-Small emits disparity, not depth.** The head is relative
+*inverse* depth: large values are near, the scale is arbitrary, and the only
+sensible presentation is the per-frame min-max normalise `DepthConfig::normalize`
+does by default. `DepthConfig::inverse` turns it back into a depth if you want
+one; leave it off for visualisation, because disparity is what the network was
+trained to be smooth in. There is no metric build of this model — do not read
+its output as distance.
+
+**The 308×308 build beats the native 518×518 one on both axes.** This is
+counter-intuitive enough to be worth the measurement. Against the untouched fp32
+ONNX run on the *identical* letterboxed input:
+
+| Build | Frame (end to end) | NPU / CPU split | cosine vs fp32 | Spearman | normalised MAE |
+|---|---|---|---|---|---|
+| 518×518 | 963 ms | 681 / 252 ms | 0.9839 | 0.9717 | 0.080 |
+| **308×308** | **330 ms** | **142 / 108 ms** | **0.9894** | **0.9951** | **0.059** |
+
+The speed comes from ViT attention, which is quadratic in token count
+(37² → 22² patches). The *accuracy* is the surprise: fewer, larger patches
+quantize better here, so the smaller build is the one the tests and examples
+use. The 518 build stays in the registry for anyone who needs the native
+resolution.
+
+Two further measured facts about this model:
+
+* **A quarter of the frame is CPU, and it is the DPT head's upsamples.** Five
+  `Resize` layers run on the CPU because they are `mode=linear` with
+  `coordinate_transformation_mode=align_corners`, which RKNPU2 has no NPU
+  implementation for. Rewriting them to `half_pixel` in the ONNX does move four
+  of the five onto the NPU (330 → 290 ms), but it costs real accuracy —
+  cosine 0.9894 → 0.9742, Spearman 0.9951 → 0.9648 — so **it is not what ships**.
+  The fifth resize is a 1.75× scale that is structural to the DPT head at any
+  input size, and no NPU path exists for it.
+* **int8 compresses the top of the range.** On `bus.jpg` the fp32 reference
+  spans [0.06, 8.51] where the NPU gives [0.00, 6.68]. Rank order is what
+  survives quantization (Spearman 0.995), absolute values are not — another
+  reason the decoder normalises per frame.
+
+**The letterbox padding gets a depth too.** The model sees a square canvas, so a
+non-square frame arrives padded, and the network happily predicts depth for the
+grey bars. `DepthEstimator::postprocess(lb)` projects only the real image region
+back onto the frame, which is why the normalised map does not reach 1.0 when the
+brightest disparity landed in the padding.
 
 **Note the pose and OBB exports differ structurally from detection**: they
 concatenate the box and class channels into one tensor per scale, and they do
@@ -80,6 +151,9 @@ RK3588S, single-frame latency unless stated:
 | JPEG decode (810×1080) | 4.1 ms; matches libjpeg to 0.02 mean luma |
 | YOLOv8n 640, full VPU → RGA → NPU → overlay → VPU per frame | 26.9 ms (37.2 fps); post-processing is 4.1 ms of that, down from 29.9 ms before the score-sum pre-filter |
 | PP-LiteSeg 2048×1024 → 512×512 → full-res label map | 77 ms (dominated by the CPU upscale of the label map, not the NPU) |
+| Depth-Anything-V2-Small 308×308, frame → depth in source pixels | 330 ms (142 ms NPU, 108 ms CPU — the CPU part is the DPT head's `align_corners` upsamples, see above) |
+| Same at the native 518×518 | 963 ms |
+| OSNet x0.25 ReID, detection box → 512-d vector | 13.5 ms per crop (9.9 ms NPU) |
 
 ## Adding a model
 

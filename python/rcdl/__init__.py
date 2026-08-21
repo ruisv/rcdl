@@ -97,6 +97,7 @@ from rcdl_py import (
     BoostConfig,
     ByteTrackConfig,
     ByteTracker,
+    TrackingPipeline,
     JpegDecoder,
     JpegEncoder,
     Track,
@@ -141,6 +142,8 @@ __all__ = [
     "JpegDecoder",
     "decode_video",
     "ByteTracker",
+    "TrackingPipeline",
+    "track",
     "ByteTrackConfig",
     "BoostConfig",
     "Track",
@@ -365,6 +368,21 @@ class Engine:
         """
         return DetectionPipeline(self._e, **kwargs)
 
+    def tracker(self, reid: "Engine | None" = None, **kwargs) -> TrackingPipeline:
+        """A TrackingPipeline driving this Engine (detect + ByteTrack).
+
+        Pass ``reid`` — a second :class:`Engine` holding an appearance model —
+        to associate on geometry AND appearance, which is what holds identities
+        through the occlusions motion alone loses. Its input shape supplies the
+        crop size; ``reid_min_score`` and ``reid_max_crops`` bound how many
+        crops a frame may embed, because that is what makes frame time scale
+        with crowd size.
+
+        The remaining keyword arguments are :meth:`detector`'s, plus
+        ``track_config`` (a :class:`ByteTrackConfig`).
+        """
+        return TrackingPipeline(self._e, None if reid is None else reid._e, **kwargs)
+
     def classifier(self, **kwargs) -> Classifier:
         """A Classifier driving this Engine (RGA centre-crop -> NPU -> top-k).
 
@@ -573,6 +591,13 @@ def detect(pipeline: DetectionPipeline, img, fmt: str = "bgr888"):
 # detection pipeline, because a numpy array cannot express a padded row stride
 # or a semi-planar YUV layout. These wrappers do the flattening so callers stay
 # in HxWxC numpy land, exactly as `detect()` does.
+
+
+def track(pipeline: TrackingPipeline, img, fmt: str = "bgr888"):
+    """Detect and associate one numpy frame. Returns this frame's Tracks, each
+    with a stable ``track_id``, in source pixels."""
+    flat, w, h = _as_buffer(img, fmt)
+    return pipeline.process(flat, w, h, fmt)
 
 
 def classify(classifier: Classifier, img, fmt: str = "bgr888"):

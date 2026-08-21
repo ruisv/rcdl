@@ -34,6 +34,15 @@ REGISTRY=(
   "ppseg_rk3588.rknn|convert|ppseg_rk3588.rknn"
   "retinaface_rk3588.rknn|convert|retinaface_rk3588.rknn"
   "resnet18_rk3588.rknn|convert|resnet18_rk3588.rknn"
+  # Monocular depth. The 308x308 build is the one the tests use: it is 2.9x
+  # faster than the native 518x518 build AND closer to the fp32 reference
+  # (see docs/MODELS.md). The 518 build is kept for the native-resolution case.
+  "depth_anything_v2_vits_308_rk3588.rknn|convert|depth_anything_v2_vits_308_rk3588.rknn"
+  "depth_anything_v2_vits_rk3588.rknn|convert|depth_anything_v2_vits_rk3588.rknn"
+  # Person ReID appearance vectors — what ImageEmbedder/EmbeddingBank and the
+  # ReID side of ByteTrack consume. 512-d, crops squashed to 128x256 (NOT
+  # letterboxed); see docs/MODELS.md.
+  "osnet_x0_25_msmt17_rk3588.rknn|convert|osnet_x0_25_msmt17_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

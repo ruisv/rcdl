@@ -87,7 +87,8 @@ Each milestone ends with a board-verified result and a pinned test.
   *Verified: the async pipeline returns results field-identical to the
   synchronous one, in submission order, at 481 fps against 99 fps — a 4.86x
   speed-up on three pinned contexts. `TrackingPipeline` holds stable ids across
-  a panning sequence — 3 objects, 3 ids, no churn over 24 frames — and takes a
+  a panning sequence — 4 objects, 4 distinct ids over 14 frames, three of them
+  alive for all 14 — in BOTH its geometry-only and its ReID mode, and takes a
   decoded `VideoFrame` without copying it.* `AsyncVideoDetectionPipeline` is not
   built as a class; `video_det_demo` covers the VPU → RGA → NPU → overlay → VPU
   path as an example.
@@ -96,10 +97,14 @@ Each milestone ends with a board-verified result and a pinned test.
   Port the BCDL task heads that map cleanly: classification, pose, instance
   seg, OBB, semantic seg, depth, OCR (DBNet + CTC), embedding/ReID, face. Each:
   pure-function decoder + numpy test + board test + one `.rknn` in the model
-  registry. *Verified against real models: instance seg agrees with detection on
-  `bus.jpg` (1 bus + 4 people) with plausible mask coverage; PP-LiteSeg resolves
-  a Cityscapes street into 11 classes; pose lands all 17 keypoints on the right
-  body parts; OBB finds 4 planes and ~24 vehicles at a consistent angle.*
+  registry. *Verified against real models, and every one of these is now an
+  assertion in the suite rather than a note: instance seg agrees with detection
+  on `bus.jpg` (1 bus + 4 people) with plausible mask coverage; PP-LiteSeg
+  resolves a Cityscapes street into 11 classes; every pose keypoint the model is
+  confident about lands inside its own person's box; OBB finds 4 planes, 26 large
+  vehicles and 3 ships, with the parked vehicles sharing an orientation
+  (concentration 0.93); RetinaFace returns both faces with landmarks ordered
+  eyes → nose → mouth; PP-OCRv4 reads all 15 text lines exactly.*
   *The native NC1HWC2 output path was benchmarked and **rejected**: binding
   outputs with `RKNN_QUERY_NATIVE_OUTPUT_ATTR` instead of the standard attrs is
   within noise on YOLOv8n and ResNet-18 (−1%) and **23.6% slower** on
@@ -109,8 +114,8 @@ Each milestone ends with a board-verified result and a pinned test.
 
   Dynamic-shape inputs (`rknn_set_input_shapes`) are **not implemented, and not
   for lack of trying**: whether a model accepts them is fixed at conversion
-  time, and querying `RKNN_QUERY_INPUT_DYNAMIC_RANGE` on all ten models in the
-  registry returns `-6` on every one — none was built with `dynamic_input`.
+  time, and querying `RKNN_QUERY_INPUT_DYNAMIC_RANGE` on every model in the
+  registry returns `-6` — none was built with `dynamic_input`.
   Adding the API without a model that exercises it would ship untested code, so
   it waits for the model-zoo side to produce one.
 
@@ -119,9 +124,19 @@ Each milestone ends with a board-verified result and a pinned test.
   export. The decoders read the model's own signature and handle both shapes —
   see `docs/MODELS.md`.
 
+  Two heads shipped a decoder, a numpy oracle and **no model to run** for longer
+  than they should have — monocular depth and embedding/ReID. Both now have one
+  (Depth-Anything-V2-Small and OSNet x0.25), each checked against its untouched
+  fp32 ONNX on the identical input rather than merely against itself, so all ten
+  heads in `src/tasks/` have a model *and* an on-board assertion. The lesson is
+  recorded because it is the reusable part: **audit `src/tasks/` against the
+  registry head by head — a hand-kept model list will not show you its own
+  holes.**
+
 - **M5 — Python surface + docs** ✅
-  nanobind coverage of the engine, preprocessing, codecs, tracking and the task
-  heads (GIL released around anything that touches hardware);
+  nanobind coverage of the engine, preprocessing, codecs, tracking (including
+  `TrackingPipeline` itself, via `Engine.tracker(reid=...)`) and the task heads
+  (GIL released around anything that touches hardware);
   [`API.md`](API.md), [`CPP_API.md`](CPP_API.md), [`MODELS.md`](MODELS.md),
   [`RGA.md`](RGA.md).
 
@@ -132,6 +147,75 @@ Each milestone ends with a board-verified result and a pinned test.
   *The pip wheel is done and validated on the board: the installed package —
   not the build tree — reports RGA and MPP available and runs detection end to
   end. The conda recipes live in a separate feedstock and are still to do.*
+
+### Model and task breadth — where RCDL stands against BCDL
+
+M0–M6 ported the *architecture*. They did not port the *catalogue*, and the gap
+is worth stating plainly rather than leaving a reader to discover it: BCDL grew
+its task surface over a dozen further milestones, and RCDL is at the end of the
+equivalent of its M5.
+
+| | BCDL | RCDL |
+|---|---|---|
+| Task heads in `src/tasks/` | 22 | **10** |
+| Models in the registry | ~38 | **13** |
+| Pipeline classes | 5 | 3 |
+
+The ten RCDL has are the core CV set — detection, classification, pose, instance
+and semantic segmentation, oriented boxes, OCR, face detection, monocular depth,
+embedding/ReID — each with a model and a board test. What is missing splits into
+two kinds, and they are not equally hard.
+
+**Same head, older or thinner model.** Cheap: the decoder already exists.
+* OCR is PP-OCRv4 det + rec against BCDL's v5/v6 stacks, and has **no textline
+  angle classifier at all** — so rotated text decodes wrong today, silently.
+* Face is detection only. BCDL pairs SCRFD with ArcFace for identity.
+* Embedding is person ReID only; there is no image-text tower.
+* Semantic segmentation has one model where BCDL has three.
+* Detection, classification, pose, instance seg and OBB sit a YOLO generation
+  behind.
+
+**Heads RCDL does not have.** Each is a decoder plus a model plus tests:
+anomaly detection, RGB-D depth refinement, end-to-end driving, sparse local
+features, lidar 3-D detection, monocular 3-D, open-vocabulary detection, optical
+flow, panoptic driving, promptable segmentation, super-resolution, whole-body
+pose — plus stereo disparity, which in BCDL is a pipeline rather than a head.
+
+Milestones follow that split, cheapest and most-broken first. Each still ends
+with a board-verified result and a pinned test.
+
+- **M7 — OCR stack refresh**
+  A textline angle classifier (`TextAngleClassifier`) and PP-OCRv5/v6 detection
+  and recognition. The angle classifier comes first because its absence is not a
+  missing feature but a wrong answer: a rotated line is currently decoded upside
+  down without complaint.
+
+- **M8 — face recognition**
+  An ArcFace-style identity embedding on top of the existing detector: the
+  5-point similarity transform that produces an aligned 112×112 crop, then the
+  same embed-and-compare path ReID already uses. Note that the aligned-crop
+  calibration is what the accuracy figures depend on — a same-shaped model
+  calibrated on centre crops is a different model.
+
+- **M9 — YOLO generation refresh**
+  A current YOLO family across detection, classification, pose, instance seg and
+  OBB, replacing the v8/11 builds. Contingent on the toolkit converting those
+  exports cleanly; the decoders already resolve head layout from the model, so
+  the work is conversion and re-measurement rather than new code.
+
+- **M10 and beyond — new task heads**
+  Ported in BCDL's order where the maths carries over, each as decoder + numpy
+  oracle + model + board test: optical flow, super-resolution, open-vocabulary
+  detection, promptable segmentation, whole-body pose, anomaly detection, stereo
+  disparity. The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic
+  and end-to-end driving) are a separate question — they need calibration data
+  and sample frames this project does not currently carry.
+
+- **Pipeline debt** — `AsyncVideoDetectionPipeline` as a class rather than only
+  `video_det_demo`. `AsyncDetectionPipeline` already exposes the
+  `acquireSlot` / `letterboxIntoSlot` / `commitSlot` split that exists precisely
+  so a video stage need not hold a recycled frame while waiting for capacity;
+  that is where it connects.
 
 - **Later** — camera (V4L2/rkaiq) source, RK3576 / RK356x validation, LLM/VLM
   via `rknn-llm` (separate project, as BLLM is to BCDL), ROS 2 nodes.

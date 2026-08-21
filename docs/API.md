@@ -147,6 +147,38 @@ association (`update(dets, embeddings)`, one entry per detection, empty entries
 meaning geometry-only). `rcdl.reid_preprocess`, `rcdl.normalize_embedding` and
 `rcdl.cosine_similarity` are the primitives.
 
+`TrackingPipeline` is detect-and-track as one object, which is what most callers
+want — it is `tracker.update(det.process(...))` with the buffers reused:
+
+```python
+det = rcdl.Engine("yolov8n_rk3588.rknn")
+tracks = det.tracker()                       # geometry only
+for frame in rcdl.decode_video("clip.h264"):
+    for t in tracks.process_frame(frame):    # zero-copy: RGA reads the VPU buffer
+        print(t.track_id, t.x1, t.y1, t.x2, t.y2)
+```
+
+Hand it a second Engine holding an appearance model and association gains a ReID
+term, which is what holds identities through the occlusions and crossings that
+motion alone loses:
+
+```python
+reid = rcdl.Engine("osnet_x0_25_msmt17_rk3588.rknn")
+tracks = det.tracker(reid=reid, reid_min_score=0.5, reid_max_crops=32)
+for t in rcdl.track(tracks, frame_bgr):
+    ...
+print(tracks.last_embed_count)   # crops embedded on that frame
+```
+
+`reid_min_score` and `reid_max_crops` are cost knobs with teeth: the appearance
+model runs **once per crop**, so on a crowded frame it, not the detector, sets
+the frame time. `last_embed_count` is the term to watch. The crop size comes
+from the ReID Engine's own input shape, and crops are squashed to it rather than
+letterboxed — see `docs/MODELS.md`.
+
+With ReID on, `process_frame` maps the decoded frame so the CPU can read the
+crops; geometry-only tracking never touches it.
+
 ---
 
 ## Errors

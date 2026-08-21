@@ -29,6 +29,7 @@
 #include "rcdl/media/video_codec.h"
 #include "rcdl/media/video_frame.h"
 #include "rcdl/pipeline/detection_pipeline.h"
+#include "rcdl/pipeline/tracking_pipeline.h"
 #include "rcdl/preproc/image.h"
 #include "rcdl/preproc/letterbox.h"
 #include "rcdl/preproc/rga.h"
@@ -1301,6 +1302,79 @@ NB_MODULE(rcdl_py, m) {
           },
           "affine"_a, "Warp every tracklet by a previous->current 2x3 affine before update()")
       .def("reset", &rcdl::ByteTracker::reset);
+
+  // TrackingPipeline — detection + ByteTrack (+ optional ReID) in one object.
+  // Bound after ByteTracker because it is the composition of it and
+  // DetectionPipeline, and because `reid` being optional is the whole point:
+  // pass a second Engine and association gains an appearance term.
+  nb::class_<rcdl::TrackingPipeline>(m, "TrackingPipeline")
+      .def(
+          "__init__",
+          [](rcdl::TrackingPipeline* self, nb::handle engine_arg, nb::handle reid_arg,
+             const std::string& model_input, float conf_thresh, float iou_thresh, int max_dets,
+             int num_classes, bool apply_sigmoid, std::uint8_t pad, const std::string& backend,
+             const rcdl::ByteTrackConfig& track_cfg, float reid_min_score, int reid_max_crops) {
+            rcdl::Engine& engine = engineFrom(engine_arg);
+            rcdl::PipelineConfig cfg;
+            cfg.model_input = formatFromName(model_input);
+            cfg.pad_value = pad;
+            cfg.backend = backendFromName(backend);
+            cfg.detect.conf_thresh = cfg.ltrb.conf_thresh = conf_thresh;
+            cfg.detect.iou_thresh = cfg.ltrb.iou_thresh = iou_thresh;
+            cfg.detect.max_dets = cfg.ltrb.max_dets = max_dets;
+            cfg.detect.num_classes = cfg.ltrb.num_classes = num_classes;
+            cfg.detect.apply_sigmoid = cfg.ltrb.apply_sigmoid = apply_sigmoid;
+            if (reid_arg.is_none()) {
+              new (self) rcdl::TrackingPipeline(engine, cfg, track_cfg);
+              return;
+            }
+            rcdl::TrackingReidConfig rcfg;
+            rcfg.min_score = reid_min_score;
+            rcfg.max_crops = reid_max_crops;
+            new (self) rcdl::TrackingPipeline(engine, engineFrom(reid_arg), cfg, track_cfg, rcfg);
+          },
+          "engine"_a, "reid"_a = nb::none(), "model_input"_a = "rgb888", "conf_thresh"_a = 0.25f,
+          "iou_thresh"_a = 0.45f, "max_dets"_a = 300, "num_classes"_a = 80,
+          "apply_sigmoid"_a = false, "pad"_a = std::uint8_t(114), "backend"_a = "auto",
+          "track_config"_a = rcdl::ByteTrackConfig(), "reid_min_score"_a = 0.5f,
+          "reid_max_crops"_a = 32,
+          // Both Engines must outlive the pipeline: it holds them by reference.
+          nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
+      .def(
+          "process",
+          [](rcdl::TrackingPipeline& p, const Contig& img, int w, int h, const std::string& fmt,
+             int wstride, int hstride) {
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, wstride, hstride);
+            nb::gil_scoped_release nogil;  // preproc + NPU infer + decode + assoc (+ ReID)
+            return p.process(v);
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a = "bgr888", "wstride"_a = 0, "hstride"_a = 0,
+          "Detect and associate one frame; returns this frame's Tracks in source pixels")
+      .def(
+          "process_frame",
+          [](rcdl::TrackingPipeline& p, rcdl::VideoFrame& f) {
+            nb::gil_scoped_release nogil;
+            return p.process(f);
+          },
+          "frame"_a,
+          "Track on a decoded VideoFrame. With ReID on, the frame is mapped so the "
+          "CPU can read the crops; geometry-only tracking never touches it")
+      .def("reset", &rcdl::TrackingPipeline::reset,
+           "Drop every tracklet and restart ids at 1 (e.g. on a stream cut)")
+      .def_prop_ro("last_detections", &rcdl::TrackingPipeline::lastDetections,
+                   "This frame's detections BEFORE association")
+      .def_prop_ro("has_reid", &rcdl::TrackingPipeline::hasReid)
+      .def_prop_ro("last_embed_count", &rcdl::TrackingPipeline::lastEmbedCount,
+                   "Crops embedded on the last frame (0 without ReID) — this is the term "
+                   "that makes frame time scale with crowd size")
+      .def_prop_ro("letterbox", [](const rcdl::TrackingPipeline& p) {
+        return lbToTuple(p.lastLetterbox());
+      })
+      .def_prop_ro("profile", [](const rcdl::TrackingPipeline& p) {
+        const auto& s = p.profile();
+        return nb::make_tuple(s.preprocPerFrame(), s.inferPerFrame(), s.postprocPerFrame(),
+                              s.frames);
+      }, "(preproc_ms, infer_ms, postproc_ms, frames) of the DETECTION half, per frame");
 
   m.def(
       "normalize_embedding",

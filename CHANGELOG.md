@@ -133,6 +133,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - pip wheel via scikit-build-core, validated on the board: the installed
   package (not the build tree) reports RGA and MPP available and runs detection
   end to end.
+- **Monocular depth now has a model.** `DepthEstimator` had a decoder, a numpy
+  oracle and no network to run: Depth-Anything-V2-Small (ViT-S, DPT head) is
+  converted to int8 at 308×308 and 518×518 and registered in
+  `scripts/fetch_models.sh`. Verified against the untouched fp32 ONNX on the
+  identical letterboxed input — cosine 0.9894, Spearman 0.9951 — and the
+  308×308 build turns out to be both 2.9× faster and *more* accurate than the
+  network's native 518×518 resolution. See `docs/MODELS.md` for the numbers,
+  the disparity-not-depth convention, and why the `align_corners` upsamples in
+  the DPT head stay on the CPU.
+- **`TrackingPipeline` is now bound to Python** — `Engine.tracker(reid=...)`,
+  `rcdl.track()`, `process_frame()` for the zero-copy video path, plus
+  `has_reid` / `last_embed_count` / `letterbox` / `profile`. It was the one
+  pipeline class the module did not expose, which is also why its ReID half had
+  never been exercised: `ByteTracker` alone left the caller to write the crop,
+  embed and association loop by hand.
+- **Appearance embeddings now have a model too.** `ImageEmbedder`,
+  `EmbeddingBank` and the ReID side of the tracker had the same problem depth
+  did — a decoder, a numpy oracle and nothing to run. OSNet x0.25 (MSMT17
+  person ReID, 512-d) is converted to int8, calibrated on person crops cut from
+  COCO images by the project's own detector, and registered. On `bus.jpg` it
+  scores 0.960 / 0.993 for the same person re-cropped and rescaled against
+  0.38–0.47 for different people, and matches the fp32 ONNX at cosine 0.9922.
+- **On-board assertions for pose, OBB, OCR, faces, depth and ReID**
+  (`tests/test_tasks_board_py.py`, 23 end-to-end tests). These five heads
+  previously had numpy oracles only, which pin the decode maths but cannot see
+  a changed *model contract* — a fused output layout, a channel order, an
+  activation applied in the wrong place. Every one of this project's silent
+  failures so far has been in that gap. The new tests pin what the hardware
+  actually returns: pose keypoints must fall inside their own person's box,
+  parked vehicles in the DOTA scene must share an orientation and rotated NMS
+  must leave no duplicates, RetinaFace landmarks must be ordered eyes → nose →
+  mouth, the OCR lines must match exact strings, and the depth map must put the
+  road nearer than the sky and stay consistent when the letterbox padding
+  changes. ReID is checked on the property a tracker depends on — the margin
+  between same-person and different-person similarity — and through
+  `EmbeddingBank` retrieval end to end. Tracking is checked on a synthetic pan,
+  where the right answer is knowable — every object is present in every frame,
+  so any id beyond the object count is association failing rather than the
+  scene changing — in both the geometry-only and ReID modes.
 
 ### Fixed
 
