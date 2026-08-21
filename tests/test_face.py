@@ -557,3 +557,110 @@ def test_face_detector_on_the_board(cxx, model_path):
     layout = det.layout
     assert len(det.priors) == layout.num_priors
     assert len(ref_priors(layout.input_w, layout.input_h)) == layout.num_priors
+
+
+# --------------------------------------------------------------------------- #
+# Alignment — the 5-point similarity transform recognition depends on          #
+# --------------------------------------------------------------------------- #
+ARCFACE_112 = np.array([[38.2946, 51.6963],
+                        [73.5318, 51.5014],
+                        [56.0252, 71.7366],
+                        [41.5493, 92.3655],
+                        [70.7299, 92.2041]], dtype=np.float64)
+
+
+def ref_similarity(src, dst):
+    """The oracle for `rcdl::similarityTransform`, as a (2,3) affine.
+
+    A 2-D similarity is one complex multiplication, so the least-squares fit is
+    a single quotient over the centred points. Written this way rather than with
+    an SVD because the SVD form can return a REFLECTION unless the determinant
+    is checked, and a mirrored face is a perfectly good fit to five points.
+    """
+    src = np.asarray(src, dtype=np.float64).reshape(5, 2)
+    dst = np.asarray(dst, dtype=np.float64).reshape(5, 2)
+    sc, dc = src.mean(0), dst.mean(0)
+    z = (src - sc)[:, 0] + 1j * (src - sc)[:, 1]
+    w = (dst - dc)[:, 0] + 1j * (dst - dc)[:, 1]
+    den = float((z * z.conj()).sum().real)
+    c = (w * z.conj()).sum() / den if den > 1e-12 else complex(1.0, 0.0)
+    a, b = c.real, c.imag
+    m = np.array([[a, -b, 0.0], [b, a, 0.0]])
+    m[:, 2] = dc - m[:, :2] @ sc
+    return m
+
+
+def apply_affine(m, pts):
+    pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+    return pts @ np.asarray(m)[:, :2].T + np.asarray(m)[:, 2]
+
+
+def test_alignment_is_exact_when_the_face_is_a_similarity_of_the_template():
+    """A rotated, scaled, shifted copy of the template must map back onto it exactly.
+
+    This is the only case with a knowable answer, and it is the one that catches
+    a transposed matrix, a swapped sign on the rotation, or degrees-for-radians:
+    all of those still produce a plausible-looking crop.
+    """
+    for angle, scale, tx, ty in [(0.0, 1.0, 0, 0), (0.35, 2.5, -40, 17),
+                                 (-1.2, 0.4, 300, 200), (np.pi, 1.7, 5, -9)]:
+        c, s = np.cos(angle) * scale, np.sin(angle) * scale
+        r = np.array([[c, -s], [s, c]])
+        src = ARCFACE_112 @ r.T + np.array([tx, ty])
+        m = ref_similarity(src, ARCFACE_112)
+        back = apply_affine(m, src)
+        assert np.allclose(back, ARCFACE_112, atol=1e-6), f"angle={angle} scale={scale}"
+
+
+def test_alignment_never_mirrors_a_face():
+    """A mirrored set of landmarks must NOT be un-mirrored by the transform.
+
+    A reflection fits five points just as well as a rotation, and an alignment
+    that silently mirrors would hand the identity model a face that is not the
+    one in the picture. The similarity form cannot express a reflection: its
+    matrix is [[a,-b],[b,a]], whose determinant a²+b² is never negative.
+    """
+    mirrored = ARCFACE_112.copy()
+    mirrored[:, 0] = 112.0 - mirrored[:, 0]
+    m = ref_similarity(mirrored, ARCFACE_112)
+    det = m[0, 0] * m[1, 1] - m[0, 1] * m[1, 0]
+    assert det > 0, f"the fit reflected: determinant {det}"
+    # And it does not fit well, which is the honest consequence: a mirrored face
+    # cannot be aligned by a similarity, so the residual is large.
+    residual = np.abs(apply_affine(m, mirrored) - ARCFACE_112).max()
+    assert residual > 5.0, f"a mirrored face aligned suspiciously well (residual {residual})"
+
+
+def test_alignment_of_coincident_points_is_a_translation_not_a_crash():
+    pts = np.tile([50.0, 50.0], (5, 1))
+    m = ref_similarity(pts, ARCFACE_112)
+    assert np.all(np.isfinite(m))
+    assert np.allclose(apply_affine(m, pts), ARCFACE_112.mean(0), atol=1e-6)
+
+
+def test_template_scales_each_axis_on_its_own(cxx):
+    """A non-square output must scale x by w/112 and y by h/112, not by one factor.
+
+    Scaling both axes by the same number on a non-square crop tilts every face,
+    which is exactly the kind of thing that costs accuracy without erroring.
+    """
+    if cxx is None or not hasattr(cxx, "arcface_template"):
+        pytest.skip("compiled module without arcface_template")
+    got = np.asarray(cxx.arcface_template(224, 112))
+    expect = ARCFACE_112 * np.array([2.0, 1.0])
+    assert np.allclose(got, expect, atol=1e-4)
+    assert np.allclose(np.asarray(cxx.arcface_template()), ARCFACE_112, atol=1e-4)
+
+
+def test_alignment_matches_cxx(cxx):
+    if cxx is None or not hasattr(cxx, "similarity_transform"):
+        pytest.skip("compiled module without similarity_transform")
+    rng = np.random.default_rng(11)
+    for _ in range(64):
+        src = (ARCFACE_112 + rng.normal(scale=6.0, size=(5, 2))) * rng.uniform(0.3, 4.0)
+        src += rng.uniform(-200, 200, size=2)
+        got = np.asarray(cxx.similarity_transform(src.astype(np.float32).reshape(-1),
+                                                  ARCFACE_112.astype(np.float32).reshape(-1)))
+        assert np.allclose(got, ref_similarity(src, ARCFACE_112), atol=1e-3)
+        got2 = np.asarray(cxx.face_align_transform(src.astype(np.float32).reshape(-1), 112, 112))
+        assert np.allclose(got2, got, atol=1e-6)

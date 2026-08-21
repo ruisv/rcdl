@@ -211,6 +211,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leak into every call site. (The only int16 model built so far cannot run on
   this driver, which is how the mapping came to be needed and why it is not
   demonstrated end to end.)
+- `similarityTransform()` / `faceAlignTransform()` / `arcFaceTemplate()` — the
+  5-point face alignment an identity embedding is computed on. Written as a
+  single complex quotient rather than a Procrustes SVD, because that form
+  **cannot represent a reflection**: a mirrored fit matches five landmarks as
+  well as the correct one and would silently embed the wrong face. Bound in
+  Python (`face_align_transform`, feed the (2,3) result to `cv2.warpAffine`).
+  *Verified on the four faces in the sample images: the fit's own residual is
+  1.3–7.3 px mean, the detector re-finds every aligned crop at 0.99–1.00, and
+  the eyes and mouth corners land on the template's rows.* The identity model
+  itself is not in the registry — see ROADMAP M8 for the data it needs first.
 
 ### Fixed
 

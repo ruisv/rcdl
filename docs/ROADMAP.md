@@ -211,12 +211,26 @@ with a board-verified result and a pinned test.
   the deployed recogniser, and the search for a newer one that survives float16
   moves to the model-zoo side. The numbers are in [`MODELS.md`](MODELS.md).
 
-- **M8 — face recognition**
-  An ArcFace-style identity embedding on top of the existing detector: the
-  5-point similarity transform that produces an aligned 112×112 crop, then the
-  same embed-and-compare path ReID already uses. Note that the aligned-crop
-  calibration is what the accuracy figures depend on — a same-shaped model
-  calibrated on centre crops is a different model.
+- **M8 — face recognition** (alignment ✅, identity model blocked on data)
+  The geometry half is done and is the half that is easy to get subtly wrong:
+  `similarityTransform` / `faceAlignTransform` map a detection's five landmarks
+  onto the ArcFace template, in the closed form that **cannot produce a
+  reflection** — a mirrored "alignment" fits five points just as well as a
+  rotation and would hand the identity model a face that is not the one in the
+  picture. *Verified on all four faces in this project's images: the transform's
+  own residual is 1.3–7.3 px mean (five points, four degrees of freedom — the
+  worst is the turned head), RetinaFace re-finds every aligned crop at 0.99–1.00,
+  and the re-detected eyes and mouths land within a few pixels of the template's
+  rows.* With an aligned crop in hand, the identity model is the existing
+  `ImageEmbedder` path unchanged — crop, embed, compare by cosine.
+
+  The model itself waits on **data this repository does not have**. Its four
+  faces cannot calibrate an int8 ArcFace, and — the harder problem — they cannot
+  validate one: there is no pair of pictures of the same person, so nothing here
+  can distinguish a working identity model from a broken one. What is needed is
+  a handful of identities with two or more images each, and the calibration must
+  use ALIGNED crops (a same-shaped model calibrated on centre crops is a
+  different model, with figures that do not transfer).
 
 - **M9 — YOLO generation refresh**
   A current YOLO family across detection, classification, pose, instance seg and

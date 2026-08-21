@@ -211,4 +211,57 @@ class FaceDetector {
   std::vector<PriorBox> priors_;
 };
 
+// ===========================================================================
+// Face alignment — the 5-point similarity transform recognition depends on
+// ===========================================================================
+//
+// An identity embedding is not computed on the detector's box. Every ArcFace-
+// style model is trained on a crop in a FIXED canonical pose: the five landmarks
+// are mapped onto a template, so the eyes sit on the same pixels for every face
+// the network ever sees. Skip that and hand it the bounding box instead and it
+// still returns a 512-d vector, still unit length, still comparable — and the
+// cosine between two pictures of one person collapses towards the cosine
+// between two different people. Nothing in the output says the crop was wrong.
+//
+// So alignment is part of the task, not a preprocessing nicety, and it is the
+// part this header owns. The warp itself is a host image operation (cv2, RGA,
+// whatever the caller has) and stays with the caller, exactly as the OCR crop
+// does; what lives here is the geometry.
+
+/// The canonical 5-point template ArcFace-family models are trained on, written
+/// as x0,y0..x4,y4 in the order the detector produces: left eye, right eye,
+/// nose, left mouth corner, right mouth corner.
+///
+/// The reference values are for a 112x112 crop; `out_w`/`out_h` scale them, so
+/// a 128x128 model gets the same pose at a different size. (`x` is scaled by
+/// out_w/112 and `y` by out_h/112 — the template is not square-symmetric, and
+/// scaling both axes by one factor would tilt every face on a non-square crop.)
+void arcFaceTemplate(float out[10], int out_w = 112, int out_h = 112);
+
+/// Least-squares SIMILARITY transform (rotation + uniform scale + translation)
+/// taking `src` five points onto `dst` five points. Writes a row-major 2x3
+/// affine matrix: [m0 m1 m2; m3 m4 m5], so x' = m0*x + m1*y + m2.
+///
+/// Closed form, and worth knowing why no SVD appears: a 2-D similarity is
+/// exactly a multiplication by one complex number, so the least-squares fit is
+/// c = sum(w_i * conj(z_i)) / sum(|z_i|^2) over the centred points, and the
+/// matrix is [[a, -b], [b, a]] with c = a + bi. That formulation cannot produce
+/// a REFLECTION, which is the right constraint here — a reflected "alignment"
+/// would mirror the face and still look like a plausible fit to five points,
+/// and the general Procrustes solution needs an explicit determinant check to
+/// avoid it. Degenerate input (all five points coincident) yields the identity
+/// scaled to nothing but a translation, rather than a division by zero.
+void similarityTransform(const float src[10], const float dst[10], float m[6]);
+
+/// The transform that maps a detection's landmarks onto the ArcFace template at
+/// `out_w` x `out_h` — `similarityTransform` against `arcFaceTemplate`.
+/// `landmarks` is the flat x0,y0..x4,y4 form of FaceDetection::landmarks.
+void faceAlignTransform(const float landmarks[10], int out_w, int out_h, float m[6]);
+
+/// Flatten FaceDetection::landmarks into the x0,y0..x4,y4 form the two functions
+/// above take. Throws rcdl::Error unless there are exactly five of them, because
+/// a detector that produced fewer would otherwise align against uninitialised
+/// memory.
+void faceLandmarkArray(const FaceDetection& face, float out[10]);
+
 }  // namespace rcdl

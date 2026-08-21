@@ -385,4 +385,95 @@ std::vector<FaceDetection> FaceDetector::postprocess(const LetterboxInfo& lb) co
   return decodeFaces(loc, loc_shape, conf, conf_shape, landm, landm_shape, priors_, cfg_, lb);
 }
 
+// ===========================================================================
+// Face alignment — the 5-point similarity transform
+// ===========================================================================
+
+namespace {
+
+// insightface's arcface_dst, the template every ArcFace-family model in common
+// use was trained against, for a 112x112 crop: left eye, right eye, nose, left
+// mouth corner, right mouth corner.
+constexpr float kArcFaceDst112[10] = {
+    38.2946f, 51.6963f,   // left eye
+    73.5318f, 51.5014f,   // right eye
+    56.0252f, 71.7366f,   // nose
+    41.5493f, 92.3655f,   // left mouth corner
+    70.7299f, 92.2041f,   // right mouth corner
+};
+
+}  // namespace
+
+void arcFaceTemplate(float out[10], int out_w, int out_h) {
+  RCDL_REQUIRE(out != nullptr, "arcFaceTemplate: null output");
+  RCDL_REQUIRE(out_w > 0 && out_h > 0, "arcFaceTemplate: output size must be positive");
+  const float sx = static_cast<float>(out_w) / 112.0f;
+  const float sy = static_cast<float>(out_h) / 112.0f;
+  for (int i = 0; i < 5; ++i) {
+    out[2 * i] = kArcFaceDst112[2 * i] * sx;
+    out[2 * i + 1] = kArcFaceDst112[2 * i + 1] * sy;
+  }
+}
+
+void similarityTransform(const float src[10], const float dst[10], float m[6]) {
+  RCDL_REQUIRE(src != nullptr && dst != nullptr && m != nullptr,
+               "similarityTransform: null argument");
+  double sx = 0, sy = 0, dx = 0, dy = 0;
+  for (int i = 0; i < 5; ++i) {
+    sx += src[2 * i];
+    sy += src[2 * i + 1];
+    dx += dst[2 * i];
+    dy += dst[2 * i + 1];
+  }
+  sx /= 5.0;
+  sy /= 5.0;
+  dx /= 5.0;
+  dy /= 5.0;
+
+  // One complex multiply IS a 2-D similarity, so the least-squares fit is a
+  // single quotient: c = Σ w_i·conj(z_i) / Σ|z_i|², with z the centred source
+  // and w the centred target. No SVD, and — the reason to prefer this form —
+  // no reflection is representable, so an alignment can never come back
+  // mirrored the way an unguarded Procrustes solution can.
+  double num_r = 0, num_i = 0, den = 0;
+  for (int i = 0; i < 5; ++i) {
+    const double zx = src[2 * i] - sx;
+    const double zy = src[2 * i + 1] - sy;
+    const double wx = dst[2 * i] - dx;
+    const double wy = dst[2 * i + 1] - dy;
+    num_r += wx * zx + wy * zy;   // Re(w · conj(z))
+    num_i += wy * zx - wx * zy;   // Im(w · conj(z))
+    den += zx * zx + zy * zy;
+  }
+  // All five points coincident: there is no scale or rotation to recover, so
+  // fall back to the translation that maps one centroid onto the other.
+  double a = 1.0, b = 0.0;
+  if (den > 1e-12) {
+    a = num_r / den;
+    b = num_i / den;
+  }
+  m[0] = static_cast<float>(a);
+  m[1] = static_cast<float>(-b);
+  m[2] = static_cast<float>(dx - (a * sx - b * sy));
+  m[3] = static_cast<float>(b);
+  m[4] = static_cast<float>(a);
+  m[5] = static_cast<float>(dy - (b * sx + a * sy));
+}
+
+void faceAlignTransform(const float landmarks[10], int out_w, int out_h, float m[6]) {
+  float tpl[10];
+  arcFaceTemplate(tpl, out_w, out_h);
+  similarityTransform(landmarks, tpl, m);
+}
+
+void faceLandmarkArray(const FaceDetection& face, float out[10]) {
+  RCDL_REQUIRE(out != nullptr, "faceLandmarkArray: null output");
+  RCDL_REQUIRE(face.landmarks.size() == 5,
+               "faceLandmarkArray: alignment needs exactly five landmarks");
+  for (int i = 0; i < 5; ++i) {
+    out[2 * i] = face.landmarks[static_cast<std::size_t>(i)].first;
+    out[2 * i + 1] = face.landmarks[static_cast<std::size_t>(i)].second;
+  }
+}
+
 }  // namespace rcdl

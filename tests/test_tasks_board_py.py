@@ -475,6 +475,64 @@ def test_ocr_recognizes_the_sample_text(rcdl):
     assert "YM-X-3011" in joined, "the Latin/digit part of the dictionary is off"
 
 
+def test_face_alignment_puts_every_face_in_the_same_pose(rcdl):
+    """Warp each detected face onto the ArcFace template and check where it lands.
+
+    Identity embeddings are computed on an ALIGNED crop, never on the detector's
+    box: the model is trained with the eyes on fixed pixels, and handing it a
+    plain crop still returns a unit-length 512-d vector that is simply worse at
+    telling people apart. So the alignment has to be checked, and it can be —
+    against the detector itself. Warp, re-detect inside the 112x112 result, and
+    see whether the landmarks arrive where the template says.
+
+    Measured on the four faces this project's images contain (two in `zidane.jpg`
+    at 1.00/0.95, two in `bus.jpg` at 0.85/0.70):
+
+      * the transform's own residual is 1.3-7.3 px mean — five points and four
+        degrees of freedom, so a turned head cannot fit exactly, and the largest
+        residual is indeed the turned face;
+      * RetinaFace re-finds every aligned crop at 0.99-1.00;
+      * the re-detected eyes land at y 52-62 and mouths at y 94-97, against the
+        template's 51.6 and 92.3. That band is the assertion: it is loose enough
+        for the detector's own error on a 112x112 upscale of a 36x49 face, and
+        tight enough that a mirrored, rotated or transposed transform fails it.
+    """
+    need(rcdl, "FaceDetector", "face_align_transform")
+    import cv2
+    model = bm.require_model("retinaface_rk3588.rknn")
+    det = rcdl.Engine(model).face_detector(model_input="bgr888")
+    tpl = np.asarray(rcdl.arcface_template(112, 112))
+
+    checked = 0
+    for name in ("zidane.jpg", "bus.jpg"):
+        img = bm.load_bgr(name)
+        for face in [f for f in rcdl.detect_faces(det, img, "bgr888") if f.score > 0.5]:
+            lm = np.asarray(face.landmarks, dtype=np.float32)
+            assert lm.shape == (5, 2)
+            m = np.asarray(rcdl.face_align_transform(lm.reshape(-1), 112, 112))
+            assert m[0, 0] * m[1, 1] - m[0, 1] * m[1, 0] > 0, "the alignment mirrored the face"
+
+            residual = np.linalg.norm(lm @ m[:, :2].T + m[:, 2] - tpl, axis=1)
+            assert residual.max() < 15.0, (
+                f"{name}: the transform does not fit its own landmarks (max {residual.max():.1f} px)")
+
+            crop = cv2.warpAffine(img, m, (112, 112))
+            found = [g for g in rcdl.detect_faces(det, crop, "bgr888") if g.score > 0.3]
+            assert found, f"{name}: no face left in the aligned crop"
+            g = max(found, key=lambda g: g.score)
+            assert g.score > 0.9, f"{name}: the aligned crop only scores {g.score:.2f}"
+
+            got = np.asarray(g.landmarks, dtype=np.float32)
+            for eye in (got[0], got[1]):
+                assert abs(eye[1] - tpl[0][1]) < 15, f"{name}: an eye landed at y={eye[1]:.1f}"
+            for mouth in (got[3], got[4]):
+                assert abs(mouth[1] - tpl[3][1]) < 15, f"{name}: a mouth corner at y={mouth[1]:.1f}"
+            assert got[:2, 1].mean() < got[3:, 1].mean() - 20, (
+                f"{name}: the eyes are not above the mouth — the crop is upside down")
+            checked += 1
+    assert checked == 4, f"expected the four faces these images contain, aligned {checked}"
+
+
 def _ocr_line_crops(rcdl, img):
     """Every text line of the sample page, cropped and warped upright."""
     det = rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector()

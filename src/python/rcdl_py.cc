@@ -383,6 +383,17 @@ std::pair<int, int> mapHW(const Contig& a, const char* what) {
   return {dims[0], dims[1]};
 }
 
+// 5 landmarks as (5, 2) or a flat (10,) float32 array — the order the detector
+// produces: left eye, right eye, nose, left mouth corner, right mouth corner.
+void quadOrFive(const Contig& a, float out[10], const char* what) {
+  if (elemCount(a) != 10) {
+    throw std::invalid_argument(std::string(what) +
+                                ": expected 5 points — a (5, 2) or (10,) float32 array");
+  }
+  const float* p = floatData(a, what);
+  std::copy(p, p + 10, out);
+}
+
 // 4 corners as (4, 2) or a flat (8,) float32 array — TL, TR, BR, BL.
 void quadFromArray(const Contig& a, float out[8], const char* what) {
   if (elemCount(a) != 8) {
@@ -3140,6 +3151,41 @@ NB_MODULE(rcdl_py, m) {
       "channels-first transposes — into FaceDetections in source pixels");
 
   using PyFaceDetector = BoundTask<rcdl::FaceDetector>;
+  m.def(
+      "arcface_template",
+      [](int out_w, int out_h) {
+        float tpl[10];
+        rcdl::arcFaceTemplate(tpl, out_w, out_h);
+        return ownedArray<float>(tpl, {5, 2});
+      },
+      "out_w"_a = 112, "out_h"_a = 112,
+      "The canonical 5-point pose ArcFace-family models are trained on, as (5,2)");
+
+  m.def(
+      "similarity_transform",
+      [](const Contig& src, const Contig& dst) {
+        float s[10], d[10], m6[6];
+        quadOrFive(src, s, "similarity_transform src");
+        quadOrFive(dst, d, "similarity_transform dst");
+        rcdl::similarityTransform(s, d, m6);
+        return ownedArray<float>(m6, {2, 3});
+      },
+      "src"_a, "dst"_a,
+      "Least-squares similarity (rotation + uniform scale + translation) mapping five "
+      "source points onto five target points, as a (2,3) affine matrix");
+
+  m.def(
+      "face_align_transform",
+      [](const Contig& landmarks, int out_w, int out_h) {
+        float l[10], m6[6];
+        quadOrFive(landmarks, l, "face_align_transform landmarks");
+        rcdl::faceAlignTransform(l, out_w, out_h, m6);
+        return ownedArray<float>(m6, {2, 3});
+      },
+      "landmarks"_a, "out_w"_a = 112, "out_h"_a = 112,
+      "The (2,3) affine that warps a face's five landmarks onto the ArcFace template — "
+      "feed it to cv2.warpAffine to get the crop an identity model expects");
+
   nb::class_<PyFaceDetector>(m, "FaceDetector")
       .def(
           "__init__",
