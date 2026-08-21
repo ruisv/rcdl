@@ -265,7 +265,8 @@ with a board-verified result and a pinned test.
   in-graph softmax and 0.003 — same argmax, meaningless confidence — with a
   second one applied.* All five heads of the generation are now in the registry.
 
-- **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅)
+- **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅,
+  optical flow ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
   oracle + model + board test: open-vocabulary detection, promptable
   segmentation, whole-body pose, anomaly detection, stereo disparity.
@@ -311,15 +312,26 @@ with a board-verified result and a pinned test.
   speed. XFeat's int8 build, measured the same way, is indistinguishable from
   its float one; neither result is a rule.
 
-  **Optical flow is blocked on the runtime, not on the maths.** NeuFlow v2
-  converts and the toolkit's simulator reproduces the float ONNX to 0.03 px on
-  known shifts — but the correlation lookups are `GridSample`, which librknnrt
-  2.3.2 does not implement on the NPU *or* on its CPU fallback path. The toolkit
-  lowers it to a generic CPU node without complaint and the runtime then
-  segfaults inside `rknn_init`, which no caller can guard against. The supported
-  route is a custom operator declared at conversion time and registered with
-  `rknn_register_custom_ops`; that facility is worth having for its own sake and
-  is the next piece of infrastructure here.
+  **Dense optical flow came last and needed infrastructure, not a decoder.**
+  NeuFlow v2 converts cleanly and the toolkit's simulator reproduces the float
+  ONNX — but its correlation lookups are `GridSample`, which librknnrt 2.3.2
+  implements on the NPU *and* on its CPU fallback path exactly nowhere. The
+  toolkit lowers it to a generic CPU node without complaint and the runtime then
+  **segfaults inside `rknn_init`**, which no caller can guard against. So RCDL
+  gained a custom-operator layer: the model is converted with that node declared
+  (`cstGridSample`) and `backend/custom_ops.h` registers a CPU kernel on every
+  Engine. *Verified against manufactured ground truth — 0.10–0.13 px endpoint
+  error on known shifts, and the kernel itself reproduces a numpy reference to
+  4.6e-06 on a dumped real call.*
+
+  The measurement worth carrying forward is the **3° rotation**: 0.145 px for the
+  float model, 0.145 px in the toolkit's simulator, **0.751 px on the NPU**. The
+  simulator does not model fp16 arithmetic, and a uniform shift cannot see the
+  difference because every pixel is displaced alike. This is the same lesson the
+  PP-OCRv5 recogniser taught in a louder voice — *matching the simulator is not
+  matching the board* — and it is why the suite scores a rotation and not only a
+  shift. The head is correct, not fast: each of the nine boundary crossings
+  moves the whole correlation volume, so a frame is about 1.4 s.
 
 - **Pipeline debt** ✅ — `AsyncVideoDetectionPipeline` is a class, built on the
   `acquireSlot` / `letterboxIntoSlot` / `commitSlot` split that exists precisely

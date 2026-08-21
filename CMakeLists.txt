@@ -61,6 +61,7 @@ add_library(rcdl SHARED
   src/core/dma_buf.cc
   src/backend/engine.cc
   src/backend/output_reader.cc
+  src/backend/custom_ops.cc
   src/preproc/image.cc
   src/preproc/rga.cc
   src/preproc/letterbox_cpu.cc
@@ -77,6 +78,7 @@ add_library(rcdl SHARED
   src/tasks/face.cc
   src/tasks/features.cc
   src/tasks/superres.cc
+  src/tasks/optical_flow.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc
@@ -158,6 +160,7 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(depth_demo)
   rcdl_example(xfeat_demo)
   rcdl_example(sr_demo)
+  rcdl_example(flow_demo)
   rcdl_example(async_check)
 endif()
 

@@ -41,6 +41,7 @@ from rcdl_py import (
     Keypoint,
     NpuCore,
     ObbConfig,
+    OpticalFlowEstimator,
     XfeatConfig,
     ObbDetection,
     ObbDetector,
@@ -76,6 +77,10 @@ from rcdl_py import (
     decode_embedding,
     arcface_template,
     decode_faces,
+    decode_flow,
+    flow_colorize,
+    flow_endpoint_error,
+    flow_preprocess,
     face_align_transform,
     decode_xfeat,
     match_features,
@@ -279,6 +284,13 @@ __all__ = [
     "decode_xfeat",
     "match_features",
     "extract_features",
+    # tasks: optical flow
+    "OpticalFlowEstimator",
+    "decode_flow",
+    "flow_colorize",
+    "flow_endpoint_error",
+    "flow_preprocess",
+    "estimate_flow",
     # tasks: super-resolution
     "SuperResConfig",
     "SuperResolver",
@@ -299,12 +311,18 @@ class Engine:
     """
 
     def __init__(self, path: str, core: NpuCore = NpuCore.AUTO, init_flags: int = 0,
-                 float_inputs: Sequence[int] = ()):
+                 float_inputs: Sequence[int] = (), custom_ops: bool = True):
         """``float_inputs`` lists inputs whose tensor is a normalized MAP rather
         than image bytes (XFeat's InstanceNorm output). Those are handed to the
         runtime as float32; the u8 path a quantized model normally uses has no
-        negative range to put half of such a map in, and clips it silently."""
-        self._e = rcdl_py.Engine(path, core, init_flags, list(float_inputs))
+        negative range to put half of such a map in, and clips it silently.
+
+        ``custom_ops`` registers RCDL's CPU kernels for operators librknnrt does
+        not implement — currently ``GridSample``, which every correlation-based
+        optical-flow network needs. It is on by default because registering an
+        unused type costs nothing; turn it off only to show that a model that
+        fails at ``run()`` fails for that reason."""
+        self._e = rcdl_py.Engine(path, core, init_flags, list(float_inputs), custom_ops)
 
     @classmethod
     def _wrap(cls, raw: "rcdl_py.Engine") -> "Engine":
@@ -484,6 +502,15 @@ class Engine:
         than running if it was not.
         """
         return FeatureExtractor(self._e, **kwargs)
+
+    def flow_estimator(self, **kwargs) -> OpticalFlowEstimator:
+        """An OpticalFlowEstimator driving this Engine (two frames -> a field).
+
+        Keyword arguments: ``output_index``, ``input0_index``, ``input1_index``.
+        The model's input size comes from the Engine, and the returned field is
+        already in the source image's pixels.
+        """
+        return OpticalFlowEstimator(self._e, **kwargs)
 
     def upscaler(self, **kwargs) -> SuperResolver:
         """A SuperResolver driving this Engine (tiled x4 upscaling).
@@ -733,6 +760,16 @@ def extract_features(extractor: FeatureExtractor, img) -> FeatureSet:
     if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
         raise ValueError("extract_features: expected an HxWx3 uint8 image")
     return extractor.extract(a)
+
+
+def estimate_flow(estimator: OpticalFlowEstimator, a, b) -> np.ndarray:
+    """Dense flow between two numpy BGR frames -> (H, W, 2) in source pixels."""
+    a = np.ascontiguousarray(a)
+    b = np.ascontiguousarray(b)
+    for x in (a, b):
+        if x.ndim != 3 or x.shape[2] != 3 or x.dtype != np.uint8:
+            raise ValueError("estimate_flow: expected HxWx3 uint8 BGR frames")
+    return estimator.estimate(a, b)
 
 
 def upscale(upscaler: SuperResolver, img) -> np.ndarray:

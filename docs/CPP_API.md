@@ -108,6 +108,13 @@ rcdl::FeatureExtractor extractor(engine);   // throws if the Engine was not
 
 and the head checks `inputType()` rather than trusting the caller.
 
+Operators the runtime does not have are the other half of that story.
+`backend/custom_ops.h` registers RCDL's own CPU kernels on every Engine
+(`EngineOptions::custom_ops`, on by default), which is what makes a
+correlation-based optical-flow model loadable at all — librknnrt 2.3.2 has no
+`GridSample` on the NPU *or* on its CPU fallback path, and a model built without
+that node declared as a custom operator segfaults inside `rknn_init`.
+
 ---
 
 ## Detection, end to end

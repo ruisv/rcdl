@@ -80,7 +80,7 @@ std::vector<float> logits = e.outputAsFloat(0);
 | `backend/` | `Engine`（零拷贝 I/O · 反量化 · 核掩码 · dup）· 输出读取 | ✅ M0 |
 | `preproc/` | RGA letterbox / resize / cvtColor + CPU 回退 | ✅ M1 |
 | `media/` | MPP H.264 / H.265 / VP9 / AV1 / JPEG 编解码，外部 buffer group | ✅ M2 |
-| `tasks/` | det · cls · pose · instance-seg · semseg · obb · depth · embedding · ocr · face · sparse features · 超分 | ✅ M1 / M4 / M7–M10 |
+| `tasks/` | det · cls · pose · instance-seg · semseg · obb · depth · embedding · ocr · face · sparse features · 超分 · 光流 | ✅ M1 / M4 / M7–M10 |
 | `tracks/` | ByteTrack + BoT-SORT 外观关联 · ReID | ✅ M3 |
 | `pipeline/` | 同步 / 异步检测（EnginePool 多核） | ✅ M3 |
 | `python/` | nanobind 绑定（推理时释放 GIL） | ✅ |

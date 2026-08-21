@@ -77,6 +77,11 @@ REGISTRY=(
   # /255 is inside the model. See docs/MODELS.md.
   "realesr_general_x4v3_128_fp16_rk3588.rknn|convert|realesr_general_x4v3_128_fp16_rk3588.rknn"
   "realesr_general_x4v3_128_i8_rk3588.rknn|convert|realesr_general_x4v3_128_i8_rk3588.rknn"
+  # Dense optical flow, 512x384, two frames in. Built with its GridSample nodes
+  # declared as a CUSTOM OPERATOR (`cstGridSample`) — librknnrt 2.3.2 implements
+  # that op nowhere, and a build without the declaration segfaults inside
+  # rknn_init. RCDL registers the CPU kernel itself (backend/custom_ops.h).
+  "neuflow_v2_512x384_fp16_rk3588.rknn|convert|neuflow_v2_512x384_fp16_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

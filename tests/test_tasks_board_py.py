@@ -1496,3 +1496,128 @@ def test_superres_int8_is_the_faster_lower_fidelity_build(rcdl):
         "int8 is expected to differ from the float build by roughly 31 dB — "
         "a much higher number means the builds are no longer what this test describes")
     assert _edge_energy(b) > _edge_energy(a), "the int8 build's extra edge energy is gone"
+
+
+# --------------------------------------------------------------------------- #
+# Dense optical flow — NeuFlow v2, and the custom operator under it            #
+# --------------------------------------------------------------------------- #
+FLOW_MODEL = "neuflow_v2_512x384_fp16_rk3588.rknn"
+
+
+def _flow_window_pair(rcdl, estimator, dx, dy, name="bus.jpg"):
+    """Two windows of one photograph, offset by (dx, dy).
+
+    A window that moves right sees the world move LEFT, so the true flow is
+    (-dx, -dy) everywhere except the band where content entered or left.
+    """
+    cv2 = pytest.importorskip("cv2")
+    img = bm.load_bgr(name)
+    w, h = estimator.input_width, estimator.input_height
+    need_w, need_h = w + abs(dx) + 4, h + abs(dy) + 4
+    if img.shape[1] < need_w or img.shape[0] < need_h:
+        s = max(need_w / img.shape[1], need_h / img.shape[0]) * 1.05
+        img = cv2.resize(img, (int(img.shape[1] * s) + 1, int(img.shape[0] * s) + 1))
+    x0 = (img.shape[1] - w - abs(dx)) // 2
+    y0 = (img.shape[0] - h - abs(dy)) // 2
+    a = np.ascontiguousarray(img[y0:y0 + h, x0:x0 + w])
+    b = np.ascontiguousarray(img[y0 + dy:y0 + dy + h, x0 + dx:x0 + dx + w])
+    return a, b, -float(dx), -float(dy)
+
+
+@pytest.mark.parametrize("dx,dy", [(0, 0), (2, 0), (8, 0), (6, 10)])
+def test_flow_measures_a_known_shift(rcdl, dx, dy):
+    """Flow is the one task whose ground truth can be manufactured exactly: move
+    a window across a photograph and the correct field is that constant.
+
+    The float ONNX scores 0.026 px on a static pair and 0.03-0.10 px on shifts
+    of 2-16; this build has to stay in that neighbourhood, not merely produce a
+    field that points the right way.
+    """
+    need(rcdl, "OpticalFlowEstimator")
+    model = bm.require_model(FLOW_MODEL)
+    est = rcdl.Engine(model).flow_estimator()
+    a, b, gu, gv = _flow_window_pair(rcdl, est, dx, dy)
+
+    field = rcdl.estimate_flow(est, a, b)
+    assert field.shape == (est.input_height, est.input_width, 2)
+    m = 48                                   # the border has no correct answer
+    inner = field[m:-m, m:-m]
+    err = np.hypot(inner[..., 0] - gu, inner[..., 1] - gv)
+    print(f"\nshift ({dx},{dy}): mean vector ({inner[..., 0].mean():.3f}, "
+          f"{inner[..., 1].mean():.3f}) expect ({gu:.1f}, {gv:.1f}), EPE {err.mean():.4f} px")
+    assert err.mean() < 0.5, f"endpoint error {err.mean():.3f} px against a known shift"
+    assert abs(inner[..., 0].mean() - gu) < 0.2
+    assert abs(inner[..., 1].mean() - gv) < 0.2
+
+
+def test_flow_follows_a_rotation_not_just_a_translation(rcdl):
+    """A uniform shift cannot tell a correct field from one with a coordinate
+    convention wrong inside the correlation lookup — every pixel has the same
+    answer, so a systematic distortion of the sampling grid still averages out.
+    A rotation does not: the true field varies across the frame, and its value
+    at each pixel is still known exactly.
+    """
+    need(rcdl, "OpticalFlowEstimator")
+    cv2 = pytest.importorskip("cv2")
+    est = rcdl.Engine(bm.require_model(FLOW_MODEL)).flow_estimator()
+    w, h = est.input_width, est.input_height
+    img = cv2.resize(bm.load_bgr("bus.jpg"), (w, h))
+
+    theta = np.deg2rad(3.0)
+    ca, sa = np.cos(theta), np.sin(theta)
+    cx, cy = w / 2.0, h / 2.0
+    mat = np.array([[ca, -sa, cx - ca * cx + sa * cy],
+                    [sa, ca, cy - sa * cx - ca * cy]], np.float64)
+    rotated = cv2.warpAffine(img, mat, (w, h), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REFLECT)
+
+    field = rcdl.estimate_flow(est, img, rotated)
+    ys, xs = np.mgrid[0:h, 0:w]
+    gt_u = mat[0, 0] * xs + mat[0, 1] * ys + mat[0, 2] - xs
+    gt_v = mat[1, 0] * xs + mat[1, 1] * ys + mat[1, 2] - ys
+    m = 64
+    err = np.hypot(field[m:-m, m:-m, 0] - gt_u[m:-m, m:-m],
+                   field[m:-m, m:-m, 1] - gt_v[m:-m, m:-m])
+    speeds = np.hypot(gt_u, gt_v)[m:-m, m:-m]
+    span = float(speeds.max() - speeds.min())
+    print(f"\n3 deg rotation: true speed varies over {span:.1f} px across the frame, "
+          f"EPE {err.mean():.3f} px (median {np.median(err):.3f})")
+    assert span > 5.0, "the control is not controlling: this rotation is nearly a translation"
+    # The float ONNX scores 0.145 px here and the toolkit's simulator agrees with
+    # it to three decimals; the NPU's fp16 arithmetic costs the rest, and that
+    # gap is the point of docs/MODELS.md's note about the simulator. The gate is
+    # set to catch a broken field (which would be metres, not tenths of a pixel),
+    # not to track the model's precision.
+    assert err.mean() < 1.2, f"endpoint error {err.mean():.3f} px on a non-uniform field"
+
+
+def test_flow_needs_the_custom_operator_and_says_so(rcdl):
+    """This model contains a `GridSample`, which librknnrt 2.3.2 implements
+    neither on the NPU nor on its own CPU fallback path. It was converted with
+    that node declared as a custom operator and RCDL registers the kernel at
+    construction; without the registration the graph loads and then fails at
+    rknn_run. Both halves are asserted, because "it works" is only interesting
+    next to "and here is what it needs".
+    """
+    need(rcdl, "OpticalFlowEstimator")
+    model = bm.require_model(FLOW_MODEL)
+    est = rcdl.Engine(model).flow_estimator()
+    a, b, _, _ = _flow_window_pair(rcdl, est, 8, 0)
+    rcdl.estimate_flow(est, a, b)                     # registered: fine
+
+    bare = rcdl.Engine(model, custom_ops=False)
+    bare_est = bare.flow_estimator()
+    with pytest.raises(Exception):
+        rcdl.estimate_flow(bare_est, a, b)
+
+
+def test_flow_is_reproducible(rcdl):
+    """Same pair twice, byte-identical — the CPU kernel runs OpenMP-parallel over
+    the batch and writes into the runtime's own buffers, which is exactly where a
+    race would hide."""
+    need(rcdl, "OpticalFlowEstimator")
+    est = rcdl.Engine(bm.require_model(FLOW_MODEL)).flow_estimator()
+    a, b, _, _ = _flow_window_pair(rcdl, est, 6, 10)
+    first = rcdl.estimate_flow(est, a, b)
+    second = rcdl.estimate_flow(est, a, b)
+    np.testing.assert_array_equal(first, second)

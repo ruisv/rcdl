@@ -204,6 +204,33 @@ wants. `float_inputs=[0]` above is not optional: see the Inference section.
 
 ---
 
+## Optical flow
+
+```python
+e   = rcdl.Engine("models/neuflow_v2_512x384_fp16_rk3588.rknn")
+est = e.flow_estimator()
+field = rcdl.estimate_flow(est, frame_a, frame_b)   # (H, W, 2) float32, source pixels
+speed = np.hypot(field[..., 0], field[..., 1])
+viz   = rcdl.flow_colorize(field)                   # Middlebury wheel, (H, W, 3) BGR
+```
+
+`field[y, x]` is the displacement of that pixel between the two frames, **+u
+right, +v down** — the OpenCV convention, so splitting it into x/y maps feeds
+`cv2.remap` directly. `rcdl.flow_endpoint_error(a, b)` is the standard metric
+between two fields.
+
+This model carries an operator librknnrt does not implement, and the `Engine`
+registers RCDL's CPU kernel for it at construction (`custom_ops=True`, the
+default). Each such call crosses the CPU/NPU boundary, so a frame takes about
+1.4 s: correct, not fast. `docs/MODELS.md` has the measurements and what a build
+without the custom-operator declaration does instead (it segfaults `rknn_init`).
+
+The pieces are also available on their own: `rcdl.flow_preprocess(bgr, w, h)`
+formats one frame, and `rcdl.decode_flow(tensor, channels_first=True, scale_x=1,
+scale_y=1)` turns a raw output tensor into a field.
+
+---
+
 ## Super-resolution
 
 ```python

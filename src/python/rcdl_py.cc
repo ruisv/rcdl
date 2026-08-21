@@ -40,6 +40,7 @@
 #include "rcdl/tasks/embedding.h"
 #include "rcdl/tasks/face.h"
 #include "rcdl/tasks/features.h"
+#include "rcdl/tasks/optical_flow.h"
 #include "rcdl/tasks/superres.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
@@ -638,17 +639,19 @@ NB_MODULE(rcdl_py, m) {
       .def(
           "__init__",
           [](rcdl::Engine* self, const std::string& path, rcdl::NpuCore core,
-             std::uint32_t init_flags, const std::vector<int>& float_inputs) {
+             std::uint32_t init_flags, const std::vector<int>& float_inputs, bool custom_ops) {
             rcdl::Engine::Options o;
             o.core = core;
             o.init_flags = init_flags;
             o.float_inputs = float_inputs;
+            o.custom_ops = custom_ops;
             new (self) rcdl::Engine(path, o);
           },
           "path"_a, "core"_a = rcdl::NpuCore::Auto, "init_flags"_a = 0u,
-          "float_inputs"_a = std::vector<int>(),
+          "float_inputs"_a = std::vector<int>(), "custom_ops"_a = true,
           "float_inputs: indices whose input is a normalized MAP rather than image bytes "
-          "(XFeat), presented to the runtime as float32 instead of u8")
+          "(XFeat), presented to the runtime as float32 instead of u8. custom_ops: register "
+          "RCDL's CPU kernels for operators this runtime lacks (GridSample)")
       .def("dup", &rcdl::Engine::dup, "core"_a = rcdl::NpuCore::Auto)
       .def_prop_ro("path", &rcdl::Engine::path)
       .def_prop_ro("core", &rcdl::Engine::core)
@@ -3479,4 +3482,132 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("tile_height", &rcdl::SuperResolver::tileHeight)
       .def_prop_ro("last_tile_count", &rcdl::SuperResolver::lastTileCount,
                    "Tiles the last upscale() ran — cost is linear in this");
+  // ===========================================================================
+  // Dense optical flow — tasks/optical_flow.h
+  // ===========================================================================
+  //
+  // A flow field is one dense array, so Python gets it as (H, W, 2) float32
+  // rather than as a bound object: that is what cv2.remap, np.hypot and a
+  // visualiser all want, and it is the same interleaved layout the C++ side
+  // keeps.
+
+  m.def(
+      "decode_flow",
+      [](const Contig& tensor, bool channels_first, float scale_x, float scale_y) {
+        if (tensor.dtype() != nb::dtype<float>() || tensor.ndim() < 3 || tensor.ndim() > 4) {
+          throw std::invalid_argument(
+              "decode_flow: expected a float32 [1,2,H,W] / [2,H,W] / [1,H,W,2] / [H,W,2] tensor");
+        }
+        std::vector<int> shape;
+        for (std::size_t i = 0; i < tensor.ndim(); ++i) {
+          shape.push_back(static_cast<int>(tensor.shape(i)));
+        }
+        rcdl::FlowConfig cfg;
+        cfg.channels_first = channels_first;
+        cfg.scale_x = scale_x;
+        cfg.scale_y = scale_y;
+        const rcdl::FlowField f =
+            rcdl::decodeFlow(static_cast<const float*>(tensor.data()), shape, cfg);
+        return ownedArray<float>(f.data.data(), {static_cast<std::size_t>(f.height),
+                                                 static_cast<std::size_t>(f.width), 2});
+      },
+      "tensor"_a, "channels_first"_a = true, "scale_x"_a = 1.0f, "scale_y"_a = 1.0f,
+      "De-planarize a flow tensor into (H, W, 2) pixel displacements, +u right +v down");
+
+  m.def(
+      "flow_colorize",
+      [](const Contig& field, float max_magnitude) {
+        if (field.dtype() != nb::dtype<float>() || field.ndim() != 3 || field.shape(2) != 2) {
+          throw std::invalid_argument("flow_colorize: expected a float32 (H, W, 2) field");
+        }
+        rcdl::FlowField f;
+        f.height = static_cast<int>(field.shape(0));
+        f.width = static_cast<int>(field.shape(1));
+        const float* p = static_cast<const float*>(field.data());
+        f.data.assign(p, p + static_cast<std::size_t>(f.width) * f.height * 2);
+        const std::vector<std::uint8_t> bgr = rcdl::flowColorize(f, max_magnitude);
+        return ownedArray<std::uint8_t>(bgr.data(), {static_cast<std::size_t>(f.height),
+                                                     static_cast<std::size_t>(f.width), 3});
+      },
+      "field"_a, "max_magnitude"_a = 0.0f,
+      "Middlebury colour wheel -> (H, W, 3) uint8 BGR; 0 normalizes by the field's own "
+      "99th-percentile speed");
+
+  m.def(
+      "flow_preprocess",
+      [](const Contig& bgr, int in_w, int in_h) {
+        if (bgr.ndim() != 3 || bgr.shape(2) != 3 || bgr.dtype() != nb::dtype<std::uint8_t>()) {
+          throw std::invalid_argument("flow_preprocess: expected an HxWx3 uint8 BGR image");
+        }
+        const int h = static_cast<int>(bgr.shape(0));
+        const int w = static_cast<int>(bgr.shape(1));
+        std::vector<float> out;
+        rcdl::flowPreprocess(static_cast<const std::uint8_t*>(bgr.data()), w, h, w * 3, in_w,
+                             in_h, out);
+        return ownedArray<float>(out.data(), {1, static_cast<std::size_t>(in_h),
+                                              static_cast<std::size_t>(in_w), 3});
+      },
+      "bgr"_a, "in_w"_a, "in_h"_a,
+      "Resize one frame into the model's [1,H,W,3] float input — BGR and 0..255 both kept, "
+      "because the graph normalizes internally");
+
+  m.def(
+      "flow_endpoint_error",
+      [](const Contig& a, const Contig& b) {
+        auto as_field = [](const Contig& x, const char* what) {
+          if (x.dtype() != nb::dtype<float>() || x.ndim() != 3 || x.shape(2) != 2) {
+            throw std::invalid_argument(std::string("flow_endpoint_error: ") + what +
+                                        " must be a float32 (H, W, 2) field");
+          }
+          rcdl::FlowField f;
+          f.height = static_cast<int>(x.shape(0));
+          f.width = static_cast<int>(x.shape(1));
+          const float* p = static_cast<const float*>(x.data());
+          f.data.assign(p, p + static_cast<std::size_t>(f.width) * f.height * 2);
+          return f;
+        };
+        return rcdl::flowEndpointError(as_field(a, "a"), as_field(b, "b"));
+      },
+      "a"_a, "b"_a,
+      "Mean endpoint error between two fields — the metric to score a quantized build "
+      "against its float reference");
+
+  nb::class_<rcdl::OpticalFlowEstimator>(m, "OpticalFlowEstimator")
+      .def(
+          "__init__",
+          [](rcdl::OpticalFlowEstimator* self, nb::handle engine_arg, int output_index,
+             int input0_index, int input1_index) {
+            new (self) rcdl::OpticalFlowEstimator(engineFrom(engine_arg), rcdl::FlowConfig{},
+                                                  output_index, input0_index, input1_index);
+          },
+          "engine"_a, "output_index"_a = 0, "input0_index"_a = 0, "input1_index"_a = 1,
+          nb::keep_alive<1, 2>())
+      .def(
+          "estimate",
+          [](rcdl::OpticalFlowEstimator& e, const Contig& a, const Contig& b) {
+            auto check = [](const Contig& x) {
+              if (x.ndim() != 3 || x.shape(2) != 3 || x.dtype() != nb::dtype<std::uint8_t>()) {
+                throw std::invalid_argument("estimate: expected HxWx3 uint8 BGR frames");
+              }
+            };
+            check(a);
+            check(b);
+            if (a.shape(0) != b.shape(0) || a.shape(1) != b.shape(1)) {
+              throw std::invalid_argument("estimate: the two frames must be the same size");
+            }
+            const int h = static_cast<int>(a.shape(0));
+            const int w = static_cast<int>(a.shape(1));
+            rcdl::FlowField f;
+            {
+              nb::gil_scoped_release nogil;  // CPU preproc + NPU + the CPU custom ops
+              f = e.estimate(static_cast<const std::uint8_t*>(a.data()),
+                             static_cast<const std::uint8_t*>(b.data()), w, h, w * 3);
+            }
+            return ownedArray<float>(f.data.data(), {static_cast<std::size_t>(f.height),
+                                                     static_cast<std::size_t>(f.width), 2});
+          },
+          "a"_a, "b"_a,
+          "Flow from frame a to frame b as (H, W, 2), in the SOURCE image's pixels")
+      .def_prop_ro("input_width", &rcdl::OpticalFlowEstimator::inputWidth)
+      .def_prop_ro("input_height", &rcdl::OpticalFlowEstimator::inputHeight);
 }

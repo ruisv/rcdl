@@ -289,6 +289,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   original (edge energy 66.4 against the original's 62.3), for 1.6× the speed.
   Judge this family by edge energy, not PSNR — it is trained perceptually and
   scores below a bicubic resize on PSNR while looking obviously sharper.*
+- `backend/custom_ops` — CPU kernels for operators librknnrt does not implement,
+  registered on every Engine (`EngineOptions::custom_ops`, on by default;
+  `rknn_register_custom_ops` needs a live context, so it happens during
+  construction and again for every `dup()`).
+  The op that forced this is `GridSample`, which librknnrt 2.3.2 has neither on
+  the NPU nor on its own CPU fallback list: the toolkit lowers such a node to a
+  generic CPU node with one line in the log, and the runtime then **segfaults
+  inside `rknn_init`** — nothing a caller can catch. Converted with the node
+  declared as a custom operator instead, the same graph loads, and a missing
+  registration downgrades to an error at `rknn_run`.
+  Two undocumented details are handled in the kernel because both silently
+  produce a plausible field: the runtime returns operator attributes as **quoted
+  text** (an int attribute can arrive as `"1"`), and it labels the sampling grid
+  NCHW while laying it out as ONNX defines it, so the shape and not the format
+  field decides whether coordinate pairs are interleaved.
+- `tasks/optical_flow` — dense two-frame flow: `decodeFlow` (planar or
+  interleaved, with the model->source pixel scale that is otherwise applied
+  silently), `flowColorize` (Middlebury wheel, normalised by the field's own 99th
+  percentile so one fast object cannot flatten the frame), `flowEndpointError`,
+  `flowPreprocess` and `OpticalFlowEstimator`. With
+  `neuflow_v2_512x384_fp16_rk3588.rknn`, `flow_demo` and Python bindings
+  (`Engine.flow_estimator()`, `estimate_flow`, `decode_flow`, `flow_colorize`,
+  `flow_endpoint_error`, `flow_preprocess`).
+  *Verified against manufactured ground truth — move a window across a
+  photograph and the correct field is that constant: 0.10-0.13 px endpoint error
+  on 0-16 px shifts. The suite also scores a 3 degree ROTATION, where the true
+  field varies across the frame: 0.751 px on the NPU against 0.145 px for both
+  the float ONNX and the toolkit's simulator. The kernel is not the gap — dumped
+  from a real call it matches a numpy reference to 4.6e-06 — the simulator simply
+  does not model fp16 arithmetic, and a uniform shift cannot see the difference.*
+  Each GridSample sits between two NPU subgraphs, so a frame costs about 1.4 s:
+  this head is correct, not fast.
 
 ### Fixed
 

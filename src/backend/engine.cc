@@ -6,6 +6,7 @@
 #include <iterator>
 #include <sstream>
 
+#include "rcdl/backend/custom_ops.h"
 #include "rcdl/backend/output_reader.h"
 #include "rcdl/core/status.h"
 
@@ -69,6 +70,8 @@ Engine::Engine(rknn_context dup_from, const std::string& path, NpuCore core,
   if (core_ != NpuCore::Auto) {
     RCDL_CHECK(rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(core_)));
   }
+  // The duplicate is its own context, so it needs its own registration.
+  registerCustomOps(*this);
   setupIo();
 }
 
@@ -83,6 +86,8 @@ void Engine::init(const void* model_data, std::size_t model_size, const Options&
   if (core_ != NpuCore::Auto) {
     RCDL_CHECK(rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(core_)));
   }
+  // After init (the API needs a live context), before any run.
+  if (opts.custom_ops) registerCustomOps(*this);
   setupIo();
 }
 

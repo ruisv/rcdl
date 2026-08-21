@@ -51,6 +51,12 @@ struct EngineOptions {
   /// output, roughly ±3 — and any two-frame or feature-space model is the same.
   /// Task heads that need it check inputType() and say so rather than running.
   std::vector<int> float_inputs;
+
+  /// Register RCDL's CPU kernels for operators this runtime does not implement
+  /// (backend/custom_ops.h). On by default: registering a type the model does
+  /// not use costs nothing, and a model that DOES use one fails at rknn_run
+  /// without it. Turn it off only to prove that is what happened.
+  bool custom_ops = true;
 };
 
 class Engine {

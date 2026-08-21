@@ -61,6 +61,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `xfeat_640x480_i8_rk3588.rknn` | sparse local features | 640×480 **f32** | — (grey) | 3 outputs: `feats[1,64,60,80]`, `keypoints[1,65,60,80]`, `reliability[1,1,60,80]`, all int8 NCHW. **The input is a normalised map, not image bytes** — see below |
 | `realesr_general_x4v3_128_fp16_rk3588.rknn` | ×4 super-resolution | 128×128 **f32** | rgb | `[1,3,512,512]` f16 NCHW in [0,1]. Input is float32 **still in 0..255** — the ÷255 is in the model |
 | `realesr_general_x4v3_128_i8_rk3588.rknn` | ×4 super-resolution | 128×128 u8 | rgb | as above, int8. ~1.6× faster, 31 dB from the float model — see below |
+| `neuflow_v2_512x384_fp16_rk3588.rknn` | dense optical flow | 512×384 ×2 **f32** | **bgr** | `[1,2,384,512]` f16 NCHW, pixels (+u right, +v down). Inputs are 0..255 BGR floats. **Needs a custom operator** — see below |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -366,6 +367,54 @@ indistinguishable from its float one.
 Tiling cost is linear and inference dominates: a 480×270 source is 15 tiles and
 1237 ms in fp16 (796 ms int8) end to end.
 
+**Optical flow needs an operator this runtime does not have, and that is worth
+reading before converting any warping network.** NeuFlow v2 — like every
+correlation-based flow model — warps features by the current estimate, which is
+a `GridSample`. librknnrt 2.3.2 implements that op **nowhere**: not on the NPU,
+and not on its own CPU fallback list. The toolkit lowers it to a generic CPU
+node with one line in the conversion log, and the runtime then prints
+`Unsupport CPU op: GridSample` and **segfaults inside `rknn_init`** — before a
+caller has a handle to guard, so there is nothing to catch.
+
+The supported route is a custom operator, and it is two halves:
+
+* at conversion, the ONNX nodes are renamed to a `cst`-prefixed type and
+  declared with the toolkit's `reg_custom_op` (which also wants a numpy
+  implementation, for its own shape inference and simulation);
+* at run time, `rknn_register_custom_ops` supplies the real kernel — which RCDL
+  does for you in `backend/custom_ops.h`, unconditionally, because registering a
+  type the model does not use costs nothing.
+
+With the declaration the same graph loads cleanly; without the registration it
+loads and fails at `rknn_run` with `has no custom delegate`, which is at least
+an error. Two details cost an afternoon between them and are in the code: the
+runtime returns operator attributes as **quoted text** (`"bilinear"`, and an int
+attribute can arrive the same way), and it labels the sampling grid NCHW while
+laying it out as ONNX defines it — so the shape, not the `fmt` field, says
+whether the coordinate pairs are interleaved.
+
+**Then the accuracy, which is where the simulator is not the board.** Flow can be
+scored against manufactured ground truth: move a window across a photograph and
+the answer is that constant; rotate the frame and the answer is a field that
+varies across it but is still known at every pixel.
+
+| | static pair | 2–16 px shifts | 3° rotation |
+|---|---|---|---|
+| ONNX float (CPU) | 0.026 px | 0.03–0.10 px | 0.145 px |
+| RKNN fp16, toolkit simulator | 0.031 px | 0.04–0.08 px | 0.145 px |
+| **RKNN fp16, on the NPU** | **0.105 px** | **0.10–0.13 px** | **0.751 px** |
+
+The kernel is not the difference: dumped from a real call, RCDL's C++ GridSample
+reproduces a numpy reference to 4.6e-06. The simulator simply does not model the
+NPU's fp16 arithmetic, and a correlation-softmax over hundreds of candidates is
+where that shows. A uniform shift barely notices — every pixel is displaced
+alike — which is exactly why the rotation is in the test suite.
+
+**It is correct, not fast: about 1.4 s a frame.** Each of the nine GridSample
+calls sits between two NPU subgraphs, so the whole correlation volume (37 MB at
+the 1/8 scale) crosses the CPU boundary every time. That is the price of the
+capability on this runtime, not a property of the network.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -388,6 +437,7 @@ RK3588S, single-frame latency unless stated:
 | OSNet x0.25 ReID, detection box → 512-d vector | 13.5 ms per crop (9.9 ms NPU) |
 | XFeat 640×480, frame → 4096 features + descriptors | 56–85 ms (35 ms NPU); matching a 4096-pair is another 213–243 ms |
 | Real-ESRGAN Compact ×4, one 128×128 tile → 512×512 | 70–82 ms fp16, 40–53 ms int8; a 480×270 → 1920×1080 upscale is 15 tiles |
+| NeuFlow v2 512×384, two frames → a dense field | ~1.4 s, nearly all of it the nine CPU GridSample round trips |
 
 ## Adding a model
 
