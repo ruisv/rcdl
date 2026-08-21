@@ -22,24 +22,27 @@ produced. A model that is not staged is reported as skipped rather than dropped
 <!-- BENCH:BEGIN -->
 | task | infer ms | e2e ms | model MB | result |
 |---|---|---|---|---|
-| det | 22.19 | 51.8 | 4.1 | 1 bus, 4 person |
-| det_yolo11 | 31.89 | 76.6 | 4.0 | 1 bus, 4 person |
-| det_yolo26 | 37.53 | 79.4 | 4.1 | 1 bus, 4 person |
-| cls | 4.89 | 5.1 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
-| cls_yolo26 | 1.93 | 2.2 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
-| instance_seg | 34.49 | 130.6 | 4.5 | 5 instances |
-| semantic_seg | 69.30 | 145.3 | 9.1 | 810x1080 map, 9 classes present |
-| pose | 44.89 | 82.0 | 5.0 | 4 people, 43 joints over 0.5 |
-| obb | 32.35 | 75.4 | 4.2 | 33 rotated boxes |
-| depth | 313.94 | 295.7 | 28.3 | 810x1080 disparity [0.00,0.90] |
-| ocr | 40.01 | 1346.1 | 9.2 | 16 boxes, 15 lines read |
-| face | 6.07 | 9.3 | 18.0 | 2 faces, best 0.995 |
-| reid | 8.03 | 16.5 | 2.3 | 4 crops, cross-similarity max 0.471 |
-| features | 43.56 | 98.7 | 1.3 | 4096+4096 features, 1989 matches (+190 ms to match) |
-| superres | 62.69 | 78.8 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
-| flow | 1431.00 | 1452.6 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
-| promptable_seg | 293.81 | 636.1 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 438 ms + prompt 198 ms) |
-| wholebody | 34.68 | 40.5 | 32.1 | 133/133 keypoints over 0.3, one person |
+| det | 21.29 | 46.5 | 4.1 | 1 bus, 4 person |
+| det_yolo11 | 31.57 | 72.8 | 4.0 | 1 bus, 4 person |
+| det_yolo26 | 35.63 | 76.0 | 4.1 | 1 bus, 4 person |
+| cls | 4.99 | 5.3 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
+| cls_yolo26 | 3.34 | 3.8 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
+| instance_seg | 34.51 | 136.0 | 4.5 | 5 instances |
+| semantic_seg | 73.20 | 151.3 | 9.1 | 810x1080 map, 9 classes present |
+| pose | 40.70 | 95.3 | 5.0 | 4 people, 43 joints over 0.5 |
+| obb | 26.95 | 73.8 | 4.2 | 33 rotated boxes |
+| depth | 284.90 | 320.1 | 28.3 | 810x1080 disparity [0.00,0.90] |
+| ocr | 42.00 | 1354.1 | 9.2 | 16 boxes, 15 lines read |
+| face | 5.18 | 9.2 | 18.0 | 2 faces, best 0.995 |
+| reid | 8.38 | 17.9 | 2.3 | 4 crops, cross-similarity max 0.471 |
+| features | 43.40 | 92.2 | 1.3 | 4096+4096 features, 1989 matches (+190 ms to match) |
+| superres | 62.86 | 79.0 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
+| flow | 1658.14 | 1448.7 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
+| promptable_seg | 291.39 | 637.3 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 451 ms + prompt 186 ms) |
+| wholebody | 32.60 | 40.2 | 32.1 | 133/133 keypoints over 0.3, one person |
+| open_vocab | 64.64 | 109.4 | 10.7 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
+| open_vocab_prompts | 56.33 | 91.4 | 10.7 | 6 prompts -> 4 sneakers |
+| panoptic_drive | 148.05 | 222.1 | 9.8 | 18 vehicles, drivable 21.5%, lane 1.8% of the frame |
 <!-- BENCH:END -->
 
 Reading the table:
@@ -60,6 +63,13 @@ Reading the table:
 * **Newer is not faster on this NPU.** YOLO11n and YOLO26n both infer slower than
   YOLOv8n here while finding the same 1 bus + 4 people; YOLO26's win is in
   post-processing, where it has no DFL to reduce.
+* **`panoptic_drive` is ONE inference and three decoders** — an anchor-based
+  detector plus two full-frame masks — so `infer` is a single NPU pass and the
+  gap to `e2e` covers the anchor decode and both mask projections.
+* **`open_vocab` costs what any other detector costs**, and the vocabulary size
+  does not change that: YOLOE's text comparison happened at conversion time, so
+  the board runs an ordinary LTRB head. The `result` column is the interesting
+  part — the six-prompt build finds `sneakers`, which COCO has no class for.
 * Model size is the `.rknn` on disk. `flow` is 263 MB because the conversion
   bakes the correlation grids in as constants; it is not a big network.
 

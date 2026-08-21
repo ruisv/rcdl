@@ -67,6 +67,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `rtmw_s_133_256x192_fp16_rk3588.rknn` | whole-body pose (133 kpts) | 192×256 **f32** | rgb | `simcc_x[1,133,384]` + `simcc_y[1,133,512]` f16. Top-down: one person per inference. Input is float32 in 0..255 |
 | `yoloe_11s_coco80_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | 9 outputs, the yolov8n layout with `cls[1,80,H,W]`. The class axis is **80 words chosen at conversion time**; pair it with `yoloe_11s_coco80_rk3588.labels.txt` |
 | `yoloe_11s_streetwear_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | same head with `cls[1,6,H,W]` — six prompts COCO has no class for. Pair with its own `.labels.txt` |
+| `yolop_cut_640_i8_rk3588.rknn` | panoptic driving | 640×640 u8 | rgb | 5 outputs: three **anchor-based** raw heads `[1,18,H,W]` (3 priors × (5 + 1 class), NCHW, **unactivated**) + `drivable[1,2,640,640]` + `lane[1,2,640,640]` (sigmoid in-graph). ImageNet mean/std baked in |
+| `yolop_cut_640_fp16_rk3588.rknn` | panoptic driving | 640×640 **f32** | rgb | the same 5 outputs, float. Keeps the lane mask the int8 build blurs — but its float32 input cannot be letterboxed straight into the NPU tensor, so it is off the zero-copy path. See below |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -530,6 +532,87 @@ int8 costs nothing measurable here. Against the float ONNX on `bus.jpg`, both
 builds reproduce **every** detection with the same word at IoU > 0.7 (6/6 and
 5/5); the int8 COCO build adds one spurious 6×20 px `tie` at 0.295.
 
+### YOLOP: the published export compiles into a model that finds nothing
+
+The published ONNX ends the detection branch with the decode itself — grid
+arithmetic assembled out of `ScatterND` writes, producing one ready-made
+`[1, 25200, 6]` tensor. It compiles without a single error, and what comes back
+has its **objectness and class columns never written**: only the coordinate
+columns carry data, so a detector reading it finds zero objects at every
+threshold down to 0.01. Nothing reports a problem.
+
+The usable build (`_cut`) stops the graph at the three head convolutions and
+does the arithmetic on the CPU (`rcdl::decodeYoloV5Anchor`). It is cheap — three
+small tensors, no dependency on how many objects are in the frame — and it was
+checked against the published export's own in-graph decode at conversion time:
+**max absolute difference 6.1e-05 over all 25200 candidates.**
+
+The cut also has to happen before the *reshape* inside `Detect.forward`, which
+permutes each head to `[1, na, H, W, no]`. The convolution's own output,
+`[1, na*(5+nc), H, W]`, is what the decoder reads.
+
+**This is the only anchor-BASED head in the library.** Everything else decodes
+anchor-free LTRB, where a cell predicts distances to the four box edges. Here a
+cell carries one prediction per prior box, and the box is an offset from the cell
+times a multiplier on that prior — so **the priors are part of the model, not a
+tuning knob**. Decoding the same tensors with unit priors on the board gives 128
+boxes of median area 12 px² where the correct set gives 18 of median 3554 px²,
+and none of them lands on a vehicle. The prior set is:
+
+```
+stride  8 : (3,9)   (5,11)  (4,20)
+stride 16 : (7,18)  (6,39)  (12,31)
+stride 32 : (19,50) (38,81) (68,157)      # model-input PIXELS, not stride units
+```
+
+The two segmentation outputs are ordinary 2-class logit volumes: decode them
+with `Segmenter` bound to outputs 3 and 4, off the same inference.
+
+**Quantization: the lane mask is what to measure, and the usual metric cannot
+see it.** Running both shipped builds on the board over the same letterboxed
+canvas — int8 through the normal path, fp16 fed a float tensor by hand:
+
+| head | int8 vs fp16 agreement | int8 vs fp16 IoU |
+|---|---|---|
+| drivable area | 99.73% | 0.975 |
+| lane lines | **99.76%** | **0.762** |
+
+Those two lane numbers are the same mask. Pixel accuracy says the builds agree
+almost perfectly; IoU says a quarter of the structure is somewhere else. Lane
+lines are 1% of the frame, so agreement is dominated by the 99% that is
+correctly *not* a lane. **On a sparse structure, score IoU, not agreement.**
+Detection is insensitive by comparison: both builds find 18 vehicles, and 7 of 7
+of yolov8n's vehicles on the same frame are matched at IoU 0.65–0.95.
+
+**`quantized_algorithm="mmse"` is load-bearing for this model, and only the lane
+head shows it.** Against the float ONNX on `cityscapes.png` — held out of the
+calibration set, which is six dashcam frames plus brightness, mirror and zoom
+variants:
+
+| int8 build | drivable IoU | lane IoU | lane pixels (float: 4386) | components (float: 88) |
+|---|---|---|---|---|
+| default (`normal`) | 0.905 | **0.610** | 5327 | 68 |
+| `mmse` | 0.982 | **0.814** | 4245 | 50 |
+
+The default build's lane mask is not jittering at the boundary — dilating both
+masks by a pixel only moves 0.610 to 0.639 — it paints 21% more lane pixels in
+fewer connected components: thicker, blobbier, fewer distinct lines. `mmse`
+costs about an hour of conversion time on this graph and lands within 3% of the
+float model's lane pixel count. Detection and drivable area barely move either
+way, so a model scored on boxes alone would have shipped the worse build.
+
+(The simulator put the `mmse` lane IoU at 0.814 where the board measures 0.762
+against fp16. Different comparison and different arithmetic — the board is the
+number that counts. Same lesson as the PP-OCRv5 recogniser below.)
+
+int8 is what the tests and benchmarks use, for a hardware reason rather than an
+accuracy one: **the fp16 build's input is float32, so it cannot be letterboxed
+straight into the NPU tensor** — `engineInputView` takes u8 image bytes, which is
+the whole zero-copy VPU → RGA → NPU path. The fp16 build does run on the board,
+fed a float32 tensor still in 0..255, and that is how the table above was
+measured. If lane geometry is what a deployment needs rather than drivable area
+and vehicles, take it and pay for the CPU input pass.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -557,6 +640,7 @@ RK3588S, single-frame latency unless stated:
 | EdgeSAM, one prompt against that embedding | 140–165 ms |
 | RTMW whole-body, one person (crop + 133 keypoints) | 23–47 ms |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
+| YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 
 ## Adding a model
 

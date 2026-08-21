@@ -319,6 +319,56 @@ def bench_wholebody(name, model):
     return name, run
 
 
+def bench_open_vocab(name, model):
+    """Open-vocabulary detection. The `result` column names what the PROMPTS
+    found, which is the only thing that distinguishes this from any other
+    detector — the head, the decode and the timing are identical."""
+    def run():
+        path = bm.require_model(model)
+        img = bm.load_bgr("bus.jpg")
+        e = rcdl.Engine(path)
+        labels = e.label_map()
+        det = e.detector(num_classes=len(labels))
+        dets = rcdl.detect(det, img)
+        e2e = timed(lambda: rcdl.detect(det, img))
+        names = {}
+        for d in dets:
+            n = labels.name(d.class_id)
+            names[n] = names.get(n, 0) + 1
+        return npu_ms(e), e2e, model_mb(path), \
+            f"{len(labels)} prompts -> " + (", ".join(f"{v} {k}" for k, v in sorted(names.items()))
+                                            or "nothing")
+    return name, run
+
+
+def bench_panoptic_drive(name, model):
+    """Three heads off one inference, so `infer` is that single NPU pass and
+    `e2e` covers the anchor decode plus BOTH masks. The result column reports
+    all three, because a build that keeps the boxes and loses the lane mask
+    would otherwise look unchanged."""
+    def run():
+        path = bm.require_model(model)
+        img = bm.load_bgr("cityscapes.png")
+        e = rcdl.Engine(path)
+        cfg = rcdl.AnchorDetectConfig()
+        cfg.num_classes, cfg.conf_thresh = 1, 0.35
+        det = e.anchor_detector(cfg, 0)
+        drive = e.segmenter(num_classes=2, output_index=3)
+        lane = e.segmenter(num_classes=2, output_index=4)
+
+        def once():
+            m = rcdl.segment(drive, img)
+            return det.postprocess(drive.letterbox), m, lane.postprocess(drive.letterbox)
+
+        dets, drivable, lanes = once()
+        e2e = timed(lambda: once())
+        da = np.asarray(drivable.labels).astype(bool).mean() * 100
+        ll = np.asarray(lanes.labels).astype(bool).mean() * 100
+        return npu_ms(e), e2e, model_mb(path), \
+            f"{len(dets)} vehicles, drivable {da:.1f}%, lane {ll:.1f}% of the frame"
+    return name, run
+
+
 TASKS = [
     bench_detection("det", "yolov8n_rk3588.rknn"),
     bench_detection("det_yolo11", "yolo11n_rk3588.rknn"),
@@ -339,6 +389,9 @@ TASKS = [
     bench_promptable("promptable_seg", "edge_sam_3x_encoder_fp16_rk3588.rknn",
                      "edge_sam_3x_decoder_fp16_rk3588.rknn"),
     bench_wholebody("wholebody", "rtmw_s_133_256x192_fp16_rk3588.rknn"),
+    bench_open_vocab("open_vocab", "yoloe_11s_coco80_rk3588.rknn"),
+    bench_open_vocab("open_vocab_prompts", "yoloe_11s_streetwear_rk3588.rknn"),
+    bench_panoptic_drive("panoptic_drive", "yolop_cut_640_i8_rk3588.rknn"),
 ]
 
 

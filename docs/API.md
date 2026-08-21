@@ -387,6 +387,32 @@ score, it silently renames every result.
 
 ---
 
+## Panoptic driving
+
+```python
+e = rcdl.Engine("models/yolop_cut_640_i8_rk3588.rknn")         # 5 outputs
+
+cfg = rcdl.AnchorDetectConfig()                                # priors default to YOLOP's
+cfg.num_classes, cfg.conf_thresh = 1, 0.35
+det   = e.anchor_detector(cfg, output_base=0)                  # outputs 0,1,2
+drive = e.segmenter(num_classes=2, output_index=3)
+lane  = e.segmenter(num_classes=2, output_index=4)
+
+drivable = rcdl.segment(drive, frame)                          # ONE inference
+vehicles = det.postprocess(drive.letterbox)                    # ... three decoders
+lanes    = lane.postprocess(drive.letterbox)
+```
+
+One inference feeds three heads, so exactly one of them runs the preprocessing
+(`process`) and the other two decode what is already in the engine
+(`postprocess`), using the letterbox geometry that inference used.
+
+This is the library's only **anchor-based** detector: a cell predicts, per prior
+box, an offset from the cell and a multiplier on that prior's size. The priors
+are part of the model — `AnchorDetectConfig` defaults to YOLOP's, and decoding
+with the wrong ones gives plausible-looking boxes of the wrong size rather than
+an error. `rcdl.decode_yolov5_anchor()` is the Engine-free entry point.
+
 ---
 
 ## Errors

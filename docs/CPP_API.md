@@ -115,6 +115,28 @@ correlation-based optical-flow model loadable at all — librknnrt 2.3.2 has no
 `GridSample` on the NPU *or* on its CPU fallback path, and a model built without
 that node declared as a custom operator segfaults inside `rknn_init`.
 
+One head here is **anchor-based**, and it is worth knowing why it is separate.
+Everything above decodes anchor-free LTRB, where a cell predicts distances to the
+four box edges. A panoptic driving model built on the YOLOv5 backbone predicts,
+per prior box, an offset from the cell and a multiplier on that prior's size:
+
+```c++
+rcdl::Engine engine("yolop_cut_640_i8_rk3588.rknn");   // 5 outputs
+rcdl::AnchorDetectConfig cfg;                          // priors default to YOLOP's
+cfg.num_classes = 1;
+rcdl::AnchorDetector det(engine, cfg, /*output_base=*/0);
+rcdl::SegConfig scfg; scfg.num_classes = 2;
+rcdl::Segmenter drivable(engine, scfg, 3), lane(engine, scfg, 4);
+// one inference, three decoders reading it
+```
+
+The priors are part of the model rather than a tuning knob — a box's size *is*
+its prior times a bounded multiplier, so the wrong set gives plausible-looking
+boxes of the wrong size and no error. And the model is `_cut` for a reason: the
+published export bakes the decode into the graph with `ScatterND`, which compiles
+cleanly into a tensor whose objectness and class columns are never written. See
+`docs/MODELS.md`.
+
 The opposite case is a head that needs **no** new code: an open-vocabulary
 (YOLOE) build is an ordinary LTRB head whose class axis happens to mean words,
 because the CLIP text embeddings were folded into the classification convolution

@@ -2029,3 +2029,142 @@ def test_the_labels_file_is_checked_against_the_model(rcdl):
     with pytest.raises(Exception):
         rcdl.Engine(street).label_map(coco[: -len(".rknn")] + ".labels.txt")
 
+
+# --------------------------------------------------------------------------- #
+# Panoptic driving — YOLOP: an anchor-based detector + two masks, one inference #
+# --------------------------------------------------------------------------- #
+YOLOP_MODEL = "yolop_cut_640_i8_rk3588.rknn"
+# The prior set is part of the model, not a tuning knob — see docs/MODELS.md.
+YOLOP_ANCHORS = [[(3, 9), (5, 11), (4, 20)],
+                 [(7, 18), (6, 39), (12, 31)],
+                 [(19, 50), (38, 81), (68, 157)]]
+
+
+def _yolop(rcdl, conf=0.35, anchors=None):
+    cfg = rcdl.AnchorDetectConfig()
+    cfg.num_classes = 1                       # vehicles
+    cfg.conf_thresh = conf
+    cfg.strides = [8, 16, 32]
+    cfg.anchors = [[rcdl.Anchor(w, h) for w, h in scale]
+                   for scale in (anchors if anchors is not None else YOLOP_ANCHORS)]
+    engine = rcdl.Engine(bm.require_model(YOLOP_MODEL))
+    return engine, cfg
+
+
+def _yolop_run(rcdl, img, conf=0.35, anchors=None):
+    """One inference, three decoders — which is the shape being tested."""
+    engine, cfg = _yolop(rcdl, conf, anchors)
+    det = rcdl.AnchorDetector(engine._e, cfg, 0)
+    drive = rcdl.Segmenter(engine._e, num_classes=2, output_index=3)
+    lane = rcdl.Segmenter(engine._e, num_classes=2, output_index=4)
+    flat = np.ascontiguousarray(img).reshape(-1)
+    drivable = drive.process(flat, img.shape[1], img.shape[0], "bgr888")
+    lb = drive.letterbox                       # the geometry that inference used
+    return det.postprocess(lb), drivable, lane.postprocess(lb), engine
+
+
+def test_panoptic_driving_runs_three_heads_off_one_inference(rcdl):
+    """The multi-head shape nothing else here covers: an anchor-BASED detector
+    reading three raw head tensors plus two segmentation masks, all off a single
+    inference. Measured on this street frame: 18 vehicle boxes, drivable area
+    22% of the pixels and lane lines 1.8%."""
+    need(rcdl, "AnchorDetector", "Segmenter")
+    img = bm.load_bgr("cityscapes.png")
+    engine = rcdl.Engine(bm.require_model(YOLOP_MODEL))
+    assert engine.num_outputs == 5, "3 raw detection heads + drivable + lane"
+
+    dets, drivable, lane, _ = _yolop_run(rcdl, img)
+    print(f"\nYOLOP: {len(dets)} boxes")
+    assert len(dets) >= 8, "an empty detection head is the broken-export symptom"
+    for d in dets:
+        assert d.class_id == 0
+        assert d.x2 > d.x1 and d.y2 > d.y1
+        assert 0 <= d.x1 <= img.shape[1] and 0 <= d.y1 <= img.shape[0]
+
+    for name, mask in (("drivable", drivable), ("lane", lane)):
+        labels = np.asarray(mask.labels)
+        assert labels.shape == img.shape[:2], "the mask is not projected onto the frame"
+        assert set(np.unique(labels)) <= {0, 1}, f"{name} is a 2-class mask"
+        on = labels.astype(bool)
+        assert on.any(), f"{name} came back empty"
+        centroid = float(np.nonzero(on)[0].mean()) / labels.shape[0]
+        print(f"  {name}: {100 * on.mean():.2f}% of the frame, centroid at "
+              f"{centroid:.2f} of the height")
+        # Both are road surface seen from a car: they belong BELOW the horizon.
+        # A transposed or channel-swapped mask still covers a plausible area,
+        # so area alone would not catch it — where it sits does.
+        assert centroid > 0.55, f"{name} is not concentrated in the lower frame"
+    assert np.asarray(drivable.labels).astype(bool)[: img.shape[0] // 3].mean() < 0.02, (
+        "drivable area above the horizon")
+
+
+def test_yolop_finds_the_vehicles_another_model_finds(rcdl):
+    """Cross-model, because "18 boxes" on its own is not evidence. yolov8n is
+    separately trained on a different dataset, so agreement is about the scene
+    rather than about this decode being self-consistent. Measured: all 7 of
+    yolov8n's vehicles matched, best IoUs 0.65–0.95."""
+    need(rcdl, "AnchorDetector")
+    img = bm.load_bgr("cityscapes.png")
+    dets, _, _, _ = _yolop_run(rcdl, img)
+
+    v8 = rcdl.Engine(bm.require_model("yolov8n_rk3588.rknn"))
+    ref = [d for d in rcdl.DetectionPipeline(v8._e, conf_thresh=0.3).process(
+        np.ascontiguousarray(img).reshape(-1), img.shape[1], img.shape[0], "bgr888")
+        if rcdl.coco_class_name(d.class_id) in ("car", "bus", "truck", "motorcycle", "bicycle")]
+    assert ref, "yolov8n found no vehicles — wrong reference frame"
+    best = [max((_iou(a, b) for b in dets), default=0.0) for a in ref]
+    print(f"\n{sum(v > 0.5 for v in best)}/{len(ref)} of yolov8n's vehicles matched; "
+          f"best IoUs {[round(v, 2) for v in sorted(best, reverse=True)]}")
+    assert sum(v > 0.5 for v in best) >= len(ref) - 1
+
+
+def test_the_anchor_priors_are_part_of_the_model(rcdl):
+    """The priors are not a tuning knob: a box is (offset from the cell) x (a
+    multiplier on its prior), so the prior IS the size. Decoding the same tensors
+    with unit priors must collapse every box — this is the contrast that makes
+    "18 plausible boxes" mean something. Measured: median area 12 px^2 against
+    ~3000, and nothing matching a real vehicle."""
+    need(rcdl, "AnchorDetector")
+    img = bm.load_bgr("cityscapes.png")
+    good, _, _, _ = _yolop_run(rcdl, img)
+    bad, _, _, _ = _yolop_run(rcdl, img, anchors=[[(1, 1)] * 3] * 3)
+
+    area = lambda ds: float(np.median([(d.x2 - d.x1) * (d.y2 - d.y1) for d in ds]))
+    print(f"\ncorrect priors: {len(good)} boxes, median {area(good):.0f} px^2; "
+          f"unit priors: {len(bad)} boxes, median {area(bad):.0f} px^2")
+    assert bad, "the objectness gate is what survives, so boxes should still appear"
+    assert area(bad) < area(good) / 50
+    assert max((_iou(a, b) for a in good for b in bad), default=0.0) < 0.5
+
+
+def test_the_strides_are_checked_against_the_models_grids(rcdl):
+    """The strides are configured but the grids come from the model, and the
+    channel count is 18 for all three heads — so nothing about the tensors
+    themselves would object if the two lists were paired the wrong way round.
+    Every box would land at the wrong position and 4x the wrong size, silently.
+    Reversing them must raise instead."""
+    need(rcdl, "AnchorDetector")
+    engine, cfg = _yolop(rcdl)
+    cfg.strides = [32, 16, 8]                      # P5 first: the plausible mistake
+    det = rcdl.AnchorDetector(engine._e, cfg, 0)
+    img = bm.load_bgr("cityscapes.png")
+    drive = rcdl.Segmenter(engine._e, num_classes=2, output_index=3)
+    rcdl.segment(drive, img)
+    with pytest.raises(Exception):
+        det.postprocess(drive.letterbox)
+
+
+def test_yolop_is_reproducible(rcdl):
+    """Every unit on this path is deterministic on its own; only comparing two
+    complete runs field by field catches a preprocessing race (see the letterbox
+    border in docs/RGA.md)."""
+    need(rcdl, "AnchorDetector", "Segmenter")
+    img = bm.load_bgr("cityscapes.png")
+    d1, dr1, ln1, _ = _yolop_run(rcdl, img)
+    d2, dr2, ln2, _ = _yolop_run(rcdl, img)
+    assert len(d1) == len(d2)
+    for a, b in zip(d1, d2):
+        assert (a.x1, a.y1, a.x2, a.y2, a.score, a.class_id) == (
+            b.x1, b.y1, b.x2, b.y2, b.score, b.class_id)
+    np.testing.assert_array_equal(np.asarray(dr1.labels), np.asarray(dr2.labels))
+    np.testing.assert_array_equal(np.asarray(ln1.labels), np.asarray(ln2.labels))

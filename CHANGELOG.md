@@ -347,6 +347,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-prompt build finds four pairs of `sneakers`, a word COCO has no class for
   at all, each at the feet of a person yolov8n found. int8 reproduces every
   detection of the float model with the same word (6/6 and 5/5 at IoU > 0.7).*
+- `tasks/panoptic_drive` — the library's first **anchor-based** detection head:
+  `decodeYoloV5Anchor`, `AnchorDetector`, `AnchorDetectConfig` and `Anchor`
+  (priors in model-input pixels). A cell predicts, per prior box, an offset from
+  the cell and a multiplier on that prior's size — arithmetic the anchor-free
+  LTRB decoder cannot express. With `yolop_cut_640_i8_rk3588.rknn`, whose two
+  segmentation outputs (drivable area, lane lines) are ordinary 2-class logit
+  volumes decoded by `Segmenter` bound to outputs 3 and 4 off the same inference,
+  and Python bindings (`Engine.anchor_detector()`, `decode_yolov5_anchor`).
+  *The `_cut` in the model name is the whole story: the published export bakes
+  the decode into the graph out of `ScatterND` writes, which compiles without an
+  error into a tensor whose objectness and class columns are never written — a
+  detector reading it finds zero objects at any threshold. Cutting the graph at
+  the three head convolutions and doing the arithmetic on the CPU reproduces the
+  reference decode to 6.1e-05 over all 25200 candidates. On the board: all 7 of
+  yolov8n's vehicles matched on a street frame at IoU 0.65-0.95, drivable area
+  22% of the pixels and entirely below the horizon. The priors are part of the
+  model, not a knob — decoding the same tensors with unit priors gives 114 boxes
+  of median area 12 px² against the correct set's 18 of ~3000, matching nothing.
+  The quantization result needs the right metric to see at all: on the board the
+  int8 and fp16 builds agree on 99.76% of LANE pixels at an IoU of 0.762,
+  because lane lines are 1% of the frame and agreement is dominated by the 99%
+  that is correctly not a lane. Only that number moves —
+  `quantized_algorithm="mmse"` lifts the lane IoU against the float ONNX from
+  0.610 to 0.814 (drivable 0.905 to 0.982) while detection barely shifts, so a
+  build scored on boxes alone would have shipped the worse one. int8 is what the
+  tests use because the fp16 build takes float32 input and so cannot be
+  letterboxed straight into the NPU tensor.*
 - `tasks/wholebody` — top-down whole-body pose: one person's box in, the
   COCO-WholeBody 133 keypoints out (17 body, 6 feet, 68 face, 21 per hand).
   `cropGeometry` (the box padded by 1.25 and then GROWN to the model's aspect,

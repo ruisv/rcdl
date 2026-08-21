@@ -47,6 +47,7 @@
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
 #include "rcdl/tasks/open_vocab.h"
+#include "rcdl/tasks/panoptic_drive.h"
 #include "rcdl/tasks/ocr.h"
 #include "rcdl/tasks/pose.h"
 #include "rcdl/tasks/segmentation.h"
@@ -3930,4 +3931,93 @@ NB_MODULE(rcdl_py, m) {
         return "<LabelMap " + std::to_string(lm.size()) + " prompts>";
       });
 
+  // ===========================================================================
+  // Panoptic driving: anchor-based detection head — tasks/panoptic_drive.h
+  // ===========================================================================
+
+  nb::class_<rcdl::Anchor>(m, "Anchor")
+      .def(nb::init<>())
+      .def("__init__",
+           [](rcdl::Anchor* self, float w, float h) { new (self) rcdl::Anchor{w, h}; }, "w"_a,
+           "h"_a)
+      .def_rw("w", &rcdl::Anchor::w)
+      .def_rw("h", &rcdl::Anchor::h)
+      .def("__repr__", [](const rcdl::Anchor& a) {
+        return "<Anchor " + std::to_string(a.w) + "x" + std::to_string(a.h) + " px>";
+      });
+
+  nb::class_<rcdl::AnchorDetectConfig>(m, "AnchorDetectConfig")
+      .def(nb::init<>())
+      .def_rw("num_classes", &rcdl::AnchorDetectConfig::num_classes)
+      .def_rw("conf_thresh", &rcdl::AnchorDetectConfig::conf_thresh)
+      .def_rw("iou_thresh", &rcdl::AnchorDetectConfig::iou_thresh)
+      .def_rw("max_dets", &rcdl::AnchorDetectConfig::max_dets)
+      .def_rw("strides", &rcdl::AnchorDetectConfig::strides)
+      .def_rw("anchors", &rcdl::AnchorDetectConfig::anchors);
+
+  m.def(
+      "decode_yolov5_anchor",
+      [](const std::vector<Contig>& raw, const std::vector<std::pair<int, int>>& grid_hw,
+         const std::vector<int>& strides,
+         const std::vector<std::vector<rcdl::Anchor>>& anchors, const LbTuple& lb,
+         int num_classes, float conf_thresh, float iou_thresh, int max_dets) {
+        rcdl::AnchorDetectConfig cfg;
+        cfg.num_classes = num_classes;
+        cfg.conf_thresh = conf_thresh;
+        cfg.iou_thresh = iou_thresh;
+        cfg.max_dets = max_dets;
+        cfg.strides = strides;
+        cfg.anchors = anchors;
+        // Same reasoning as decode_yolo_ltrb: the decoder indexes up to
+        // (na*(5+nc)-1)*H*W from these pointers using the CALLER's grid, class
+        // and anchor counts, and numpy ties none of that to the arrays' real
+        // sizes. Check here rather than read out of bounds.
+        if (raw.size() != grid_hw.size() || raw.size() != strides.size() ||
+            raw.size() != anchors.size()) {
+          throw std::invalid_argument(
+              "decode_yolov5_anchor: raw, grid_hw, strides and anchors must have the same length");
+        }
+        std::vector<const float*> rp;
+        rp.reserve(raw.size());
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+          const std::size_t need = static_cast<std::size_t>(grid_hw[i].first) *
+                                   static_cast<std::size_t>(grid_hw[i].second) *
+                                   anchors[i].size() *
+                                   static_cast<std::size_t>(5 + num_classes);
+          if (elemCount(raw[i]) < need) {
+            throw std::invalid_argument(
+                "decode_yolov5_anchor: scale " + std::to_string(i) + " needs " +
+                std::to_string(need) + " elements for a " + std::to_string(grid_hw[i].first) +
+                "x" + std::to_string(grid_hw[i].second) + " grid with " +
+                std::to_string(anchors[i].size()) + " anchors and " +
+                std::to_string(num_classes) + " classes, got " +
+                std::to_string(elemCount(raw[i])));
+          }
+          rp.push_back(floatData(raw[i], "decode_yolov5_anchor raw"));
+        }
+        return rcdl::decodeYoloV5Anchor(rp, grid_hw, cfg, lbFromTuple(lb));
+      },
+      "raw"_a, "grid_hw"_a, "strides"_a, "anchors"_a, "letterbox"_a, "num_classes"_a = 1,
+      "conf_thresh"_a = 0.35f, "iou_thresh"_a = 0.45f, "max_dets"_a = 300,
+      "Decode an anchor-based (YOLOv5-style) multi-scale head from per-scale raw float32 "
+      "tensors");
+
+  nb::class_<rcdl::AnchorDetector>(m, "AnchorDetector")
+      .def(
+          "__init__",
+          [](rcdl::AnchorDetector* self, nb::handle engine_arg,
+             const rcdl::AnchorDetectConfig& cfg, int output_base) {
+            new (self) rcdl::AnchorDetector(engineFrom(engine_arg), cfg, output_base);
+          },
+          "engine"_a, "config"_a = rcdl::AnchorDetectConfig(), "output_base"_a = 0,
+          nb::keep_alive<1, 2>())
+      .def(
+          "postprocess",
+          [](const rcdl::AnchorDetector& d, const LbTuple& lb) {
+            const rcdl::LetterboxInfo info = lbFromTuple(lb);
+            nb::gil_scoped_release nogil;  // dequantize + decode
+            return d.postprocess(info);
+          },
+          "letterbox"_a, "Decode the bound Engine's raw anchor heads into Detections")
+      .def_prop_ro("config", &rcdl::AnchorDetector::config, nb::rv_policy::copy);
 }

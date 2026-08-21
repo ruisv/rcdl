@@ -159,16 +159,16 @@ equivalent of its M5.
 
 | | BCDL | RCDL |
 |---|---|---|
-| Task heads in `src/tasks/` | 22 | **16** |
-| Models in the registry | ~38 | **29** |
+| Task heads in `src/tasks/` | 22 | **17** |
+| Models in the registry | ~38 | **31** |
 | Pipeline classes | 5 | 3 |
 
 The core CV set — detection, classification, pose, instance and semantic
 segmentation, oriented boxes, OCR, face detection, monocular depth,
 embedding/ReID — was there from M4, each with a model and a board test. M7–M10
 added the textline angle classifier, sparse features, super-resolution, optical
-flow, promptable segmentation, whole-body pose and open-vocabulary
-detection. What is still missing splits into two kinds, and they are not
+flow, promptable segmentation, whole-body pose, open-vocabulary detection and
+panoptic driving. What is still missing splits into two kinds, and they are not
 equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
@@ -182,7 +182,7 @@ equally hard.
 
 **Heads RCDL does not have.** Each is a decoder plus a model plus tests:
 anomaly detection, RGB-D depth refinement, end-to-end driving, lidar 3-D
-detection, monocular 3-D, panoptic driving — plus stereo disparity, which in BCDL is a pipeline
+detection, monocular 3-D — plus stereo disparity, which in BCDL is a pipeline
 rather than a head. Most of what remains is blocked on *data* rather than on
 code: MVTec parts, a stereo pair, calibrated driving frames. None of it is
 carried here.
@@ -271,11 +271,11 @@ with a board-verified result and a pinned test.
 
 - **M10 and beyond — new task heads** (sparse features ✅, super-resolution ✅,
   optical flow ✅, promptable segmentation ✅, whole-body pose ✅,
-  open-vocabulary detection ✅)
+  open-vocabulary detection ✅, panoptic driving ✅)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test. What is left — panoptic driving, anomaly
-  detection, stereo disparity, and the sensor-fusion heads (lidar 3-D,
-  mono3d, end-to-end driving) — is mostly blocked on data rather than code: MVTec parts, a rectified
+  oracle + model + board test. What is left — anomaly detection, stereo
+  disparity, and the sensor-fusion heads (lidar 3-D, mono3d, end-to-end
+  driving) — is blocked on data rather than code: MVTec parts, a rectified
   stereo pair, calibrated driving frames, none of which this project carries.
 
   **Sparse local features (XFeat) landed first**, and it is the first head here
@@ -334,6 +334,32 @@ with a board-verified result and a pinned test.
   vocabulary is worth measuring before it ships. `LabelMap::requireSize()` is a
   hard check because a labels file from another build moves no box and changes no
   score — it only renames every result.
+
+  **Panoptic driving (YOLOP)** is the opposite: one inference, three decoders,
+  and the first ANCHOR-BASED head in the library. Everything else here decodes
+  anchor-free LTRB, where a cell predicts distances to the box edges; this one
+  predicts, per prior box, an offset from the cell and a multiplier on that
+  prior's size — so the priors are part of the model, not a tuning knob.
+  Decoding the same tensors with unit priors gives 128 boxes of median area
+  12 px² where the correct set gives 18 of ~3000 px², and none on a vehicle.
+  *Verified cross-model: all 7 of yolov8n's vehicles on a street frame matched,
+  best IoUs 0.65–0.95, and the drivable-area mask covers 22% of the frame
+  entirely below the horizon.*
+
+  Its model name carries a warning. The published export bakes the anchor decode
+  into the graph out of `ScatterND` writes; that compiles without a single error
+  into a model whose objectness and class columns are **never written**, so a
+  detector reading it finds zero objects at any threshold. The usable build cuts
+  the graph at the three head convolutions — checked against the reference
+  decode to 6.1e-05 over all 25200 candidates — and does the arithmetic on the
+  CPU. Its quantization result adds a fifth distinct story, and the ordinary
+  metric cannot see it: on the board the int8 and fp16 builds agree on **99.76%
+  of lane pixels at an IoU of 0.762**, because lane lines are 1% of the frame
+  and agreement is dominated by the 99% that is correctly not a lane. On a
+  sparse structure, score IoU, not agreement. And only that number moves —
+  switching the quantizer to `mmse` lifts the lane IoU against the float ONNX
+  from 0.610 to 0.814 while detection and drivable area barely shift, so a build
+  scored on boxes alone would have shipped the worse one.
 
   **Whole-body pose (RTMW)** is the same task as `tasks/pose.h` with the cost
   model inverted: top-down, one inference per person (~25 ms), 133 keypoints

@@ -108,6 +108,10 @@ from rcdl_py import (
     ocr_line_fit_width,
     decode_yolo_ltrb,
     yolo_head_classes,
+    decode_yolov5_anchor,
+    Anchor,
+    AnchorDetectConfig,
+    AnchorDetector,
     LabelMap,
     depth_colorize,
     depth_resize,
@@ -334,6 +338,11 @@ __all__ = [
     # tasks: open-vocabulary detection
     "LabelMap",
     "yolo_head_classes",
+    # tasks: panoptic driving (anchor-based head)
+    "Anchor",
+    "AnchorDetectConfig",
+    "AnchorDetector",
+    "decode_yolov5_anchor",
     "__version__",
 ]
 
@@ -594,6 +603,21 @@ class Engine:
         order comes from the output tensor itself, not from a flag.
         """
         return Segmenter(self._e, **kwargs)
+
+    def anchor_detector(self, config: "AnchorDetectConfig | None" = None,
+                        output_base: int = 0) -> AnchorDetector:
+        """An AnchorDetector driving this Engine (anchor-based YOLOv5-style head).
+
+        Unlike the other factories this one does NO preprocessing: a panoptic
+        driving model feeds three heads off one inference, so something else
+        (a ``Segmenter`` on one of the mask outputs) runs the frame and this
+        decodes the raw detection outputs that inference left behind.
+
+        ``config`` defaults to the YOLOP prior set; the priors are part of the
+        model, not a tuning knob (see docs/MODELS.md).
+        """
+        return AnchorDetector(self._e, config if config is not None else AnchorDetectConfig(),
+                              output_base)
 
     def label_map(self, path: str | None = None) -> LabelMap:
         """The open-vocabulary label table for this model.

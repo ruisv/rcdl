@@ -2,129 +2,150 @@
  "rows": [
   {
    "task": "det",
-   "infer_ms": 22.19,
-   "e2e_ms": 51.82,
+   "infer_ms": 21.29,
+   "e2e_ms": 46.53,
    "model_mb": 4.13,
    "result": "1 bus, 4 person"
   },
   {
    "task": "det_yolo11",
-   "infer_ms": 31.89,
-   "e2e_ms": 76.57,
+   "infer_ms": 31.57,
+   "e2e_ms": 72.8,
    "model_mb": 4.05,
    "result": "1 bus, 4 person"
   },
   {
    "task": "det_yolo26",
-   "infer_ms": 37.53,
-   "e2e_ms": 79.41,
+   "infer_ms": 35.63,
+   "e2e_ms": 76.05,
    "model_mb": 4.12,
    "result": "1 bus, 4 person"
   },
   {
    "task": "cls",
-   "infer_ms": 4.89,
-   "e2e_ms": 5.08,
+   "infer_ms": 4.99,
+   "e2e_ms": 5.33,
    "model_mb": 11.44,
    "result": "812:0.949, 404:0.011, 627:0.003"
   },
   {
    "task": "cls_yolo26",
-   "infer_ms": 1.93,
-   "e2e_ms": 2.22,
+   "infer_ms": 3.34,
+   "e2e_ms": 3.84,
    "model_mb": 3.5,
    "result": "812:0.931, 404:0.003, 867:0.002"
   },
   {
    "task": "instance_seg",
-   "infer_ms": 34.49,
-   "e2e_ms": 130.55,
+   "infer_ms": 34.51,
+   "e2e_ms": 136.02,
    "model_mb": 4.52,
    "result": "5 instances"
   },
   {
    "task": "semantic_seg",
-   "infer_ms": 69.3,
-   "e2e_ms": 145.27,
+   "infer_ms": 73.2,
+   "e2e_ms": 151.32,
    "model_mb": 9.14,
    "result": "810x1080 map, 9 classes present"
   },
   {
    "task": "pose",
-   "infer_ms": 44.89,
-   "e2e_ms": 81.95,
+   "infer_ms": 40.7,
+   "e2e_ms": 95.31,
    "model_mb": 4.98,
    "result": "4 people, 43 joints over 0.5"
   },
   {
    "task": "obb",
-   "infer_ms": 32.35,
-   "e2e_ms": 75.37,
+   "infer_ms": 26.95,
+   "e2e_ms": 73.85,
    "model_mb": 4.22,
    "result": "33 rotated boxes"
   },
   {
    "task": "depth",
-   "infer_ms": 313.94,
-   "e2e_ms": 295.72,
+   "infer_ms": 284.9,
+   "e2e_ms": 320.15,
    "model_mb": 28.26,
    "result": "810x1080 disparity [0.00,0.90]"
   },
   {
    "task": "ocr",
-   "infer_ms": 40.01,
-   "e2e_ms": 1346.12,
+   "infer_ms": 42.0,
+   "e2e_ms": 1354.1,
    "model_mb": 9.25,
    "result": "16 boxes, 15 lines read"
   },
   {
    "task": "face",
-   "infer_ms": 6.07,
-   "e2e_ms": 9.34,
+   "infer_ms": 5.18,
+   "e2e_ms": 9.24,
    "model_mb": 17.98,
    "result": "2 faces, best 0.995"
   },
   {
    "task": "reid",
-   "infer_ms": 8.03,
-   "e2e_ms": 16.54,
+   "infer_ms": 8.38,
+   "e2e_ms": 17.9,
    "model_mb": 2.34,
    "result": "4 crops, cross-similarity max 0.471"
   },
   {
    "task": "features",
-   "infer_ms": 43.56,
-   "e2e_ms": 98.72,
+   "infer_ms": 43.4,
+   "e2e_ms": 92.2,
    "model_mb": 1.28,
    "result": "4096+4096 features, 1989 matches (+190 ms to match)"
   },
   {
    "task": "superres",
-   "infer_ms": 62.69,
-   "e2e_ms": 78.81,
+   "infer_ms": 62.86,
+   "e2e_ms": 79.02,
    "model_mb": 3.47,
    "result": "128x128 -> 512x512, 1 tile(s)"
   },
   {
    "task": "flow",
-   "infer_ms": 1431.0,
-   "e2e_ms": 1452.57,
+   "infer_ms": 1658.14,
+   "e2e_ms": 1448.68,
    "model_mb": 263.18,
    "result": "512x384 field, EPE 0.103 px vs an 8 px shift"
   },
   {
    "task": "promptable_seg",
-   "infer_ms": 293.81,
-   "e2e_ms": 636.13,
+   "infer_ms": 291.39,
+   "e2e_ms": 637.28,
    "model_mb": 33.3,
-   "result": "box -> 28.7% of the frame @ 0.969 (encode 438 ms + prompt 198 ms)"
+   "result": "box -> 28.7% of the frame @ 0.969 (encode 451 ms + prompt 186 ms)"
   },
   {
    "task": "wholebody",
-   "infer_ms": 34.68,
-   "e2e_ms": 40.55,
+   "infer_ms": 32.6,
+   "e2e_ms": 40.16,
    "model_mb": 32.13,
    "result": "133/133 keypoints over 0.3, one person"
+  },
+  {
+   "task": "open_vocab",
+   "infer_ms": 64.64,
+   "e2e_ms": 109.36,
+   "model_mb": 10.72,
+   "result": "80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie"
+  },
+  {
+   "task": "open_vocab_prompts",
+   "infer_ms": 56.33,
+   "e2e_ms": 91.37,
+   "model_mb": 10.69,
+   "result": "6 prompts -> 4 sneakers"
+  },
+  {
+   "task": "panoptic_drive",
+   "infer_ms": 148.05,
+   "e2e_ms": 222.06,
+   "model_mb": 9.81,
+   "result": "18 vehicles, drivable 21.5%, lane 1.8% of the frame"
   }
  ],
  "skipped": []

@@ -106,6 +106,17 @@ REGISTRY=(
   # build that shows the vocabulary is load-bearing rather than decorative.
   "yoloe_11s_streetwear_rk3588.rknn|convert|yoloe_11s_streetwear_rk3588.rknn"
   "yoloe_11s_streetwear_rk3588.labels.txt|convert|yoloe_11s_streetwear_rk3588.labels.txt"
+  # Panoptic driving (YOLOP): one inference, three heads — an anchor-BASED
+  # detector plus drivable-area and lane-line masks. "_cut" because the
+  # published export bakes the anchor decode into the graph with ScatterND;
+  # that compiles cleanly into a tensor whose objectness and class columns are
+  # never written. int8 is the build the tests and benchmarks use, because the
+  # fp16 one takes float32 input and so cannot be letterboxed straight into the
+  # NPU tensor. The trade it makes: every box and 0.905 drivable IoU kept, but a
+  # third of the LANE mask lost (IoU 0.610 against fp16's 0.969). Take fp16 when
+  # lane geometry is the point and a CPU input pass is affordable. See
+  # docs/MODELS.md.
+  "yolop_cut_640_fp16_rk3588.rknn|convert|yolop_cut_640_fp16_rk3588.rknn"
   "yolop_cut_640_i8_rk3588.rknn|convert|yolop_cut_640_i8_rk3588.rknn"
 )
 
