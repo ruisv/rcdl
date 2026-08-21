@@ -66,6 +66,15 @@ add_library(rcdl SHARED
   src/preproc/letterbox_cpu.cc
   src/preproc/letterbox.cc
   src/tasks/detection.cc
+  src/tasks/classification.cc
+  src/tasks/embedding.cc
+  src/tasks/pose.cc
+  src/tasks/obb.cc
+  src/tasks/instance_seg.cc
+  src/tasks/segmentation.cc
+  src/tasks/depth.cc
+  src/tasks/ocr.cc
+  src/tasks/face.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc
@@ -140,6 +149,9 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(jpeg_roundtrip)
   rcdl_example(video_det_demo)
   rcdl_example(async_bench)
+  rcdl_example(cls_demo)
+  rcdl_example(seg_demo)
+  rcdl_example(depth_demo)
   rcdl_example(async_check)
 endif()
 

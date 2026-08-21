@@ -1,0 +1,388 @@
+#include "rcdl/tasks/face.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <sstream>
+#include <string>
+#include <utility>
+
+#include "rcdl/backend/engine.h"
+#include "rcdl/backend/output_reader.h"
+#include "rcdl/core/status.h"
+#include "rcdl/tasks/detection.h"
+
+namespace rcdl {
+
+namespace {
+
+/// Channels each branch of the head carries, per prior. These are what
+/// resolveFaceHead() identifies the outputs BY, and what decodeFaces() strides
+/// its buffers with, so they are named once and shared.
+constexpr int kLocChannels = 4;
+constexpr int kConfChannels = 2;
+constexpr int kLandmChannels = 10;
+constexpr int kNumLandmarks = kLandmChannels / 2;
+
+/// How a [.., N, C] / [.., C, N] tensor is laid out in the flat row-major buffer.
+struct AxisOrder {
+  std::int64_t n = 0;       ///< number of priors
+  bool channels_first = false;
+};
+
+/// Reduce a tensor shape to (N, channel-axis position) given the branch's known
+/// channel count.
+///
+/// Leading unit axes carry no information, so they are dropped first — that
+/// makes [1,N,C], [N,C] and [1,1,N,C] all behave the same. What is left must be
+/// 2-D with exactly one axis equal to `channels`; N comes from the other. The
+/// ambiguous case N == channels cannot arise for a real head (N is in the
+/// thousands, channels is 2/4/10) but is resolved in favour of channels-last,
+/// the layout the export actually uses.
+AxisOrder axisOrder(const std::vector<int>& shape, int channels, const char* what,
+                    const char* fn) {
+  std::vector<std::int64_t> dims;
+  for (int d : shape) {
+    if (dims.empty() && d == 1) continue;  // drop leading batch / unit axes
+    dims.push_back(d);
+  }
+  auto fail = [&]() {
+    std::ostringstream os;
+    os << "RCDL " << fn << ": " << what << " tensor shape [";
+    for (std::size_t i = 0; i < shape.size(); ++i) os << (i ? "," : "") << shape[i];
+    os << "] has no axis of " << channels << " channels";
+    throw Error(-1, os.str());
+  };
+  if (dims.size() != 2 || dims[0] <= 0 || dims[1] <= 0) fail();
+
+  AxisOrder ax;
+  if (dims[1] == channels) {
+    ax.channels_first = false;  // [N, C]
+    ax.n = dims[0];
+  } else if (dims[0] == channels) {
+    ax.channels_first = true;  // [C, N]
+    ax.n = dims[1];
+  } else {
+    fail();
+  }
+  return ax;
+}
+
+/// Element (prior `i`, channel `c`) of a branch buffer.
+inline float at(const float* data, const AxisOrder& ax, int channels, std::int64_t i, int c) {
+  const std::int64_t off = ax.channels_first ? (static_cast<std::int64_t>(c) * ax.n + i)
+                                             : (i * channels + c);
+  return data[off];
+}
+
+/// Model input height/width, or (0,0) when input 0 is not a 4-D image tensor.
+std::pair<int, int> modelInputHw(const Engine& engine) {
+  if (engine.numInputs() < 1) return {0, 0};
+  const rknn_tensor_attr& in = engine.inputAttr(0);
+  if (in.n_dims != 4) return {0, 0};
+  if (in.fmt == RKNN_TENSOR_NHWC) {
+    return {static_cast<int>(in.dims[1]), static_cast<int>(in.dims[2])};
+  }
+  return {static_cast<int>(in.dims[2]), static_cast<int>(in.dims[3])};
+}
+
+/// The model's output signature, for error messages that say what was actually
+/// seen rather than only what was expected.
+std::string describeOutputs(const Engine& engine) {
+  std::ostringstream os;
+  for (int i = 0; i < engine.numOutputs(); ++i) {
+    const rknn_tensor_attr& a = engine.outputAttr(i);
+    os << "\n  out[" << i << "] " << a.name << " shape=[";
+    for (std::uint32_t d = 0; d < a.n_dims; ++d) os << (d ? "," : "") << a.dims[d];
+    os << "]";
+  }
+  return os.str();
+}
+
+[[noreturn]] void failHead(const Engine& engine, const std::string& why) {
+  throw Error(-1, "RCDL resolveFaceHead: " + why + ". Model outputs:" + describeOutputs(engine));
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Prior boxes
+// ---------------------------------------------------------------------------
+
+std::vector<PriorBox> generatePriors(const FaceConfig& cfg) {
+  RCDL_REQUIRE(cfg.input_w > 0 && cfg.input_h > 0,
+               "RCDL generatePriors: model input size must be positive");
+  RCDL_REQUIRE(cfg.steps.size() == cfg.min_sizes.size(),
+               "RCDL generatePriors: steps and min_sizes must have one entry per scale");
+  RCDL_REQUIRE(!cfg.steps.empty(), "RCDL generatePriors: no scales configured");
+
+  const float iw = static_cast<float>(cfg.input_w);
+  const float ih = static_cast<float>(cfg.input_h);
+
+  std::vector<PriorBox> priors;
+  for (std::size_t k = 0; k < cfg.steps.size(); ++k) {
+    const int step = cfg.steps[k];
+    RCDL_REQUIRE(step > 0, "RCDL generatePriors: every step must be positive");
+    RCDL_REQUIRE(!cfg.min_sizes[k].empty(),
+                 "RCDL generatePriors: every scale needs at least one min_size");
+    // ceil, not floor: the last (partial) cell still carries priors, and this is
+    // where an input size that is not a multiple of the stride gets its extra
+    // row/column — dropping it would silently shorten the anchor set.
+    const int grid_h = (cfg.input_h + step - 1) / step;
+    const int grid_w = (cfg.input_w + step - 1) / step;
+    priors.reserve(priors.size() +
+                   static_cast<std::size_t>(grid_h) * grid_w * cfg.min_sizes[k].size());
+
+    for (int i = 0; i < grid_h; ++i) {
+      for (int j = 0; j < grid_w; ++j) {
+        // Cell CENTRE, normalized. The +0.5 puts the prior in the middle of the
+        // cell; note it is scaled by `step`, not by the grid size, so a grid
+        // rounded up by ceil() keeps its cells aligned to the stride.
+        const float cx = (static_cast<float>(j) + 0.5f) * static_cast<float>(step) / iw;
+        const float cy = (static_cast<float>(i) + 0.5f) * static_cast<float>(step) / ih;
+        for (int min_size : cfg.min_sizes[k]) {
+          RCDL_REQUIRE(min_size > 0, "RCDL generatePriors: every min_size must be positive");
+          PriorBox p;
+          p.cx = cx;
+          p.cy = cy;
+          p.w = static_cast<float>(min_size) / iw;
+          p.h = static_cast<float>(min_size) / ih;
+          if (cfg.clip) {
+            p.cx = std::min(std::max(p.cx, 0.0f), 1.0f);
+            p.cy = std::min(std::max(p.cy, 0.0f), 1.0f);
+            p.w = std::min(std::max(p.w, 0.0f), 1.0f);
+            p.h = std::min(std::max(p.h, 0.0f), 1.0f);
+          }
+          priors.push_back(p);
+        }
+      }
+    }
+  }
+  return priors;
+}
+
+// ---------------------------------------------------------------------------
+// Decode
+// ---------------------------------------------------------------------------
+
+std::vector<FaceDetection> decodeFaces(const float* loc, const std::vector<int>& loc_shape,
+                                       const float* conf, const std::vector<int>& conf_shape,
+                                       const float* landm, const std::vector<int>& landm_shape,
+                                       const std::vector<PriorBox>& priors,
+                                       const FaceConfig& cfg, const LetterboxInfo& lb) {
+  if (loc == nullptr || conf == nullptr || landm == nullptr || priors.empty()) return {};
+  RCDL_REQUIRE(cfg.face_class >= 0 && cfg.face_class < kConfChannels,
+               "RCDL decodeFaces: face_class must index the 2-channel conf tensor");
+
+  const char* kFn = "decodeFaces";
+  const AxisOrder loc_ax = axisOrder(loc_shape, kLocChannels, "loc", kFn);
+  const AxisOrder conf_ax = axisOrder(conf_shape, kConfChannels, "conf", kFn);
+  const AxisOrder landm_ax = axisOrder(landm_shape, kLandmChannels, "landmark", kFn);
+
+  // The prior set is the authority on N: every read below is indexed by prior,
+  // so a tensor holding fewer rows than there are priors would be read past its
+  // end. Requiring exact agreement (rather than min()) also catches a
+  // mis-configured prior layout that happens to be a prefix of the real one.
+  const std::int64_t n = static_cast<std::int64_t>(priors.size());
+  if (loc_ax.n != n || conf_ax.n != n || landm_ax.n != n) {
+    throw Error(-1, "RCDL decodeFaces: " + std::to_string(priors.size()) +
+                        " priors but the loc/conf/landmark tensors hold " +
+                        std::to_string(loc_ax.n) + "/" + std::to_string(conf_ax.n) + "/" +
+                        std::to_string(landm_ax.n) +
+                        " rows — the prior configuration does not match this model");
+  }
+
+  const float vc = cfg.var_center;
+  const float vs = cfg.var_size;
+  const float mw = static_cast<float>(cfg.input_w);
+  const float mh = static_cast<float>(cfg.input_h);
+  const int bg_class = kConfChannels - 1 - cfg.face_class;
+
+  // NMS runs through the shared routine, so candidates are staged as Detection
+  // and their landmarks carried alongside by index.
+  std::vector<Detection> boxes;
+  std::vector<std::vector<std::pair<float, float>>> marks;
+
+  for (std::int64_t i = 0; i < n; ++i) {
+    float score = at(conf, conf_ax, kConfChannels, i, cfg.face_class);
+    if (cfg.apply_softmax) {
+      // Two-class softmax, shifted by the max for stability. Only needed for an
+      // export that left the softmax out of the graph.
+      const float other = at(conf, conf_ax, kConfChannels, i, bg_class);
+      const float m = std::max(score, other);
+      const float e0 = std::exp(score - m);
+      const float e1 = std::exp(other - m);
+      score = e0 / (e0 + e1);
+    }
+    if (score < cfg.conf_thresh) continue;
+
+    const PriorBox& p = priors[static_cast<std::size_t>(i)];
+
+    // Centre/size deltas -> a normalized box, then to model-input pixels.
+    const float cx = p.cx + at(loc, loc_ax, kLocChannels, i, 0) * vc * p.w;
+    const float cy = p.cy + at(loc, loc_ax, kLocChannels, i, 1) * vc * p.h;
+    const float w = p.w * std::exp(at(loc, loc_ax, kLocChannels, i, 2) * vs);
+    const float h = p.h * std::exp(at(loc, loc_ax, kLocChannels, i, 3) * vs);
+
+    Detection d;
+    d.x1 = lb.clampX(lb.invX((cx - w * 0.5f) * mw));
+    d.y1 = lb.clampY(lb.invY((cy - h * 0.5f) * mh));
+    d.x2 = lb.clampX(lb.invX((cx + w * 0.5f) * mw));
+    d.y2 = lb.clampY(lb.invY((cy + h * 0.5f) * mh));
+    d.score = score;
+    d.class_id = 0;  // single class: nms() is per-class, and there is only one
+
+    std::vector<std::pair<float, float>> pts;
+    pts.reserve(kNumLandmarks);
+    for (int t = 0; t < kNumLandmarks; ++t) {
+      // Same centre encoding as the box centre — var_center on both axes.
+      const float lx = p.cx + at(landm, landm_ax, kLandmChannels, i, 2 * t) * vc * p.w;
+      const float ly = p.cy + at(landm, landm_ax, kLandmChannels, i, 2 * t + 1) * vc * p.h;
+      pts.emplace_back(lb.clampX(lb.invX(lx * mw)), lb.clampY(lb.invY(ly * mh)));
+    }
+
+    boxes.push_back(d);
+    marks.push_back(std::move(pts));
+  }
+
+  const std::vector<int> keep = nms(boxes, cfg.iou_thresh, cfg.max_faces);
+  std::vector<FaceDetection> out;
+  out.reserve(keep.size());
+  for (int idx : keep) {
+    const Detection& d = boxes[static_cast<std::size_t>(idx)];
+    FaceDetection f;
+    f.x1 = d.x1;
+    f.y1 = d.y1;
+    f.x2 = d.x2;
+    f.y2 = d.y2;
+    f.score = d.score;
+    f.landmarks = std::move(marks[static_cast<std::size_t>(idx)]);
+    out.push_back(std::move(f));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Engine binding
+// ---------------------------------------------------------------------------
+
+std::string FaceHeadLayout::describe() const {
+  std::ostringstream os;
+  os << "RetinaFace head: " << num_priors << " priors, input " << input_w << "x" << input_h
+     << ", loc=out[" << loc_index << "] conf=out[" << conf_index << "] landmark=out["
+     << landm_index << "]";
+  return os.str();
+}
+
+FaceHeadLayout resolveFaceHead(const Engine& engine) {
+  if (engine.numOutputs() < 3) {
+    failHead(engine, "a RetinaFace head has 3 outputs, this model has " +
+                         std::to_string(engine.numOutputs()));
+  }
+
+  FaceHeadLayout layout;
+  std::int64_t n_loc = 0, n_conf = 0, n_landm = 0;
+
+  for (int i = 0; i < engine.numOutputs(); ++i) {
+    // Leading unit axes carry no information; what remains must be (N, C) or
+    // (C, N) for a branch of this head.
+    std::vector<int> dims;
+    for (int d : engine.outputShape(i)) {
+      if (dims.empty() && d == 1) continue;
+      dims.push_back(d);
+    }
+    if (dims.size() != 2) continue;
+
+    // Branches are identified by channel count alone: 4 / 2 / 10 are distinct
+    // and fixed for this head, so an export that reorders its outputs still
+    // resolves. A shape that matches none is simply skipped — a model with an
+    // extra auxiliary output stays usable.
+    struct Candidate {
+      int channels;
+      int* index;
+      std::int64_t* count;
+      const char* what;
+    };
+    const Candidate cands[] = {{kLocChannels, &layout.loc_index, &n_loc, "loc"},
+                               {kConfChannels, &layout.conf_index, &n_conf, "conf"},
+                               {kLandmChannels, &layout.landm_index, &n_landm, "landmark"}};
+    for (const Candidate& c : cands) {
+      if (dims[0] != c.channels && dims[1] != c.channels) continue;
+      if (*c.index >= 0) {
+        failHead(engine, std::string("two outputs look like the ") + c.what +
+                             " branch (" + std::to_string(c.channels) + " channels): out[" +
+                             std::to_string(*c.index) + "] and out[" + std::to_string(i) + "]");
+      }
+      *c.index = i;
+      *c.count = dims[1] == c.channels ? dims[0] : dims[1];
+      break;
+    }
+  }
+
+  if (layout.loc_index < 0 || layout.conf_index < 0 || layout.landm_index < 0) {
+    failHead(engine,
+             "could not find all three branches — expected 2-D outputs with 4 (box), 2 (score) "
+             "and 10 (landmark) channels");
+  }
+  if (n_loc != n_conf || n_loc != n_landm) {
+    failHead(engine, "the three branches disagree on the anchor count: loc " +
+                         std::to_string(n_loc) + ", conf " + std::to_string(n_conf) +
+                         ", landmark " + std::to_string(n_landm));
+  }
+  layout.num_priors = static_cast<int>(n_loc);
+
+  const std::pair<int, int> hw = modelInputHw(engine);
+  if (hw.first <= 0 || hw.second <= 0) {
+    failHead(engine, "input 0 is not a 4-D image tensor, cannot size the prior grid");
+  }
+  layout.input_h = hw.first;
+  layout.input_w = hw.second;
+  return layout;
+}
+
+FaceDetector::FaceDetector(Engine& engine, FaceConfig cfg)
+    : engine_(engine), cfg_(std::move(cfg)), layout_(resolveFaceHead(engine)) {
+  // The canvas comes from the model, not from the caller: the prior grid is
+  // derived from it, and a config that disagrees with the loaded model would
+  // generate priors for a different network.
+  cfg_.input_w = layout_.input_w;
+  cfg_.input_h = layout_.input_h;
+  priors_ = generatePriors(cfg_);
+
+  if (static_cast<int>(priors_.size()) != layout_.num_priors) {
+    // Free, decisive check: the anchor count is a fingerprint of the prior
+    // configuration. If it does not match, the steps / min_sizes in cfg are not
+    // the ones this model was exported with, and every decoded box would be
+    // wrong in a way nothing downstream could detect.
+    std::ostringstream os;
+    os << "RCDL FaceDetector: prior configuration produces " << priors_.size()
+       << " priors but the model declares " << layout_.num_priors << " at " << cfg_.input_w
+       << "x" << cfg_.input_h << " (steps";
+    for (int s : cfg_.steps) os << " " << s;
+    os << ", min_sizes";
+    for (const std::vector<int>& ms : cfg_.min_sizes) {
+      os << " [";
+      for (std::size_t i = 0; i < ms.size(); ++i) os << (i ? "," : "") << ms[i];
+      os << "]";
+    }
+    os << ") — check FaceConfig against the model's export settings";
+    throw Error(-1, os.str());
+  }
+}
+
+std::vector<FaceDetection> FaceDetector::postprocess(const LetterboxInfo& lb) const {
+  // Scratch must outlive the pointers handed to the decoder: outputAsFloat is
+  // zero-copy for packed f32 (nothing lands in scratch) and dequant-into-scratch
+  // for the int8 / fp16 branches this head actually emits.
+  std::vector<float> loc_buf, conf_buf, landm_buf;
+  std::vector<int> loc_shape, conf_shape, landm_shape;
+
+  const float* loc = outputAsFloat(engine_, layout_.loc_index, loc_buf, loc_shape);
+  const float* conf = outputAsFloat(engine_, layout_.conf_index, conf_buf, conf_shape);
+  const float* landm = outputAsFloat(engine_, layout_.landm_index, landm_buf, landm_shape);
+
+  return decodeFaces(loc, loc_shape, conf, conf_shape, landm, landm_shape, priors_, cfg_, lb);
+}
+
+}  // namespace rcdl
