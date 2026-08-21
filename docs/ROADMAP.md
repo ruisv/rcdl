@@ -90,9 +90,9 @@ Each milestone ends with a board-verified result and a pinned test.
   a panning sequence — 4 objects, 4 distinct ids over 14 frames, three of them
   alive for all 14 — in BOTH its geometry-only and its ReID mode, and takes a
   decoded `VideoFrame` without copying it. `AsyncVideoDetectionPipeline` runs
-  1080p H.264 → YOLOv8n at 96.7 fps against 27.7 fps for the same stream through
-  the synchronous pipeline (3.49x), returning detections identical to it frame by
-  frame.* `video_det_demo` remains the synchronous baseline and the only place
+  1080p H.264 → YOLOv8n at 72–97 fps against 23–28 fps for the same stream
+  through the synchronous pipeline — a 3.1x to 3.7x speed-up over six runs —
+  returning detections identical to it frame by frame.* `video_det_demo` remains the synchronous baseline and the only place
   the overlay → VPU encode tail is demonstrated.
 
 - **M4 — task breadth** ✅
@@ -237,9 +237,9 @@ with a board-verified result and a pinned test.
   head has no DFL, so the box branch is 4 channels instead of 64, and
   `resolveYoloHead()` reads that off the model's own signature and switches to
   the plain-LTRB path by itself. *Verified: all three generations return the
-  same 1 bus + 4 people on `bus.jpg`; postprocessing drops from 8.8 ms (v8n) and
-  12.9 ms (11n) to 4.9 ms because there is no DFL to reduce — while inference
-  does not improve, 36.5 ms against 23.6 ms for v8n on this NPU.* The export has
+  same 1 bus + 4 people on `bus.jpg`; postprocessing drops from 13 ms (v8n) and
+  13–18 ms (11n) to 6–8 ms because there is no DFL to reduce — while inference
+  does not improve, 36–38 ms against 26 ms for v8n on this NPU.* The export has
   two traps, both of which yield a plausible model: an NMS-free head carries a
   second set of branches and only the `one2one_*` pair is the deployed one, and
   an ultralytics too old to know the architecture loads the checkpoint anyway

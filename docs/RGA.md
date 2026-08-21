@@ -141,8 +141,9 @@ So `rgaLetterbox()` paints the border with **RGA**: a small flat-grey source
 (allocated once per format/pad/size, CPU-written once, thereafter read-only) is
 stretched over the whole canvas, and the image blit lands on top of it. Every
 write to the destination then comes from one engine, in order. It costs one
-extra RGA op — measured at **+0.35 ms/frame** for a 640x640 canvas, preproc
-2.39 → 2.74 ms — and buys a pipeline whose output does not depend on timing.
+extra RGA op — letterboxing 1080p into a 640x640 canvas went from 2.39 ms/frame
+to 2.8-2.9 ms across four runs, so about **+0.4 ms/frame** — and buys a pipeline
+whose output does not depend on timing.
 The CPU band fill remains as the fallback for a destination RGA will not take as
 a blit target, which is not the NPU-input path.
 

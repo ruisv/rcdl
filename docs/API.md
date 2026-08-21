@@ -134,8 +134,8 @@ the padding unless you pass `keep_stride=True`.
 `engine.video_detector()` puts the whole path — VPU decode, RGA letterbox, NPU
 inference across three contexts — behind two calls, all of it C++ threads with
 the GIL released. Python never touches a frame, so a driver that only pumps
-bytes runs at the C++ speed (**96.7 fps on 1080p H.264 → YOLOv8n, against 27.7
-fps for the frame-at-a-time path**).
+bytes runs at the C++ speed (**72–97 fps on 1080p H.264 → YOLOv8n against 23–28
+fps frame-at-a-time, a 3.1–3.7× speed-up over six runs**).
 
 ```python
 p = engine.video_detector(codec="h264")            # detector kwargs also apply

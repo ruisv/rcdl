@@ -179,9 +179,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   return value rather than a wait, which is what keeps a single-threaded driver
   from deadlocking against its own bounded queues. Bound in Python as
   `Engine.video_detector()`, with the GIL released around every stage, so a
-  Python caller that only pumps bytes gets the C++ throughput: **96.7 fps on
-  1080p H.264 → YOLOv8n against 27.7 fps frame-at-a-time, a 3.49x speed-up**,
-  and per-frame detections identical to the synchronous path. Example:
+  Python caller that only pumps bytes gets the C++ throughput: **72–97 fps on
+  1080p H.264 → YOLOv8n against 23–28 fps frame-at-a-time, a 3.1–3.7x speed-up
+  over six runs**, and per-frame detections identical to the synchronous path. Example:
   `video_det_async` (`--sync` measures both in one run).
 - `rcdl::TextAngleClassifier` + `decodeTextOrientation()` — PP-OCR's 0°/180°
   text-line direction head, the piece whose absence made rotated text decode
@@ -227,8 +227,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   switches to the plain-LTRB path from the model's signature alone. All three
   generations now return the same 1 bus + 4 people on `bus.jpg`, pinned by a
   cross-generation test that also asserts the resolved layout, and
-  postprocessing drops to 4.9 ms against 8.8 (v8n) and 12.9 (11n) — inference
-  does not improve, at 36.5 ms against 23.6.
+  postprocessing drops to 6–8 ms against 13 (v8n) and 13–18 (11n) — inference
+  does not improve, at 36–38 ms against 26.
 - `yolo26n-seg_rk3588.rknn` and `yolo26n-pose_rk3588.rknn`, and with them
   `KeypointDecode::kCellRelativeWhole` — the one piece of the YOLO26 family that
   did need code. YOLOv8/YOLO11 predict a keypoint offset in HALF cells and
@@ -281,7 +281,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   border, was identical every time. The border is now **blitted by RGA** from a
   flat-grey source allocated once per format/pad/size: every write to the
   destination comes from one engine, in order, and the same three runs are now
-  identical on every frame. Costs one extra RGA op (+0.35 ms/frame at 640x640).
+  identical on every frame. Costs one extra RGA op (about +0.4 ms/frame at
+  640x640: 2.39 ms to 2.8-2.9 ms of letterbox per frame).
   The CPU band fill remains the fallback for a destination RGA will not take.
   The hardware colour fill is still probed once on a private scratch buffer
   rather than by attempting it on a live destination (a rejected fill damages

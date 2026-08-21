@@ -67,14 +67,17 @@ signature and reports `plain LTRB` instead of `DFL reg_max=16`. Measured on
 
 | model | detections | infer | postproc |
 |---|---|---|---|
-| YOLOv8n | 1 bus + 4 people, top score 0.887 | 23.6 ms | 8.8 ms |
-| YOLO11n | 1 bus + 4 people, top score 0.948 | 35.3 ms | 12.9 ms |
-| YOLO26n | 1 bus + 4 people, top score 0.924 | 36.5 ms | **4.9 ms** |
+| YOLOv8n | 1 bus + 4 people, top score 0.887 | 26 ms | 13 ms |
+| YOLO11n | 1 bus + 4 people, top score 0.948 | 33–37 ms | 13–18 ms |
+| YOLO26n | 1 bus + 4 people, top score 0.924 | 36–38 ms | **6–8 ms** |
 
-Postprocessing halves because there is no DFL to reduce — 8400 cells no longer
-need a 4×16 softmax-and-sum each. Inference does **not** improve: YOLO11n and
-YOLO26n both run slower than YOLOv8n on this NPU despite fewer FLOPs, which is
-worth knowing before treating a newer generation as an upgrade.
+(Per frame over 30 frames after warm-up, two runs; postprocessing is CPU work
+and shares the board, hence the ranges.)
+
+Postprocessing roughly halves because there is no DFL to reduce — 8400 cells no
+longer need a 4×16 softmax-and-sum each. Inference does **not** improve: YOLO11n
+and YOLO26n both run slower than YOLOv8n on this NPU despite fewer FLOPs, which
+is worth knowing before treating a newer generation as an upgrade.
 
 The rest of the family follows, with one decoder change and two more export
 traps of the same kind:

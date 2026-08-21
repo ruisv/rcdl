@@ -164,9 +164,12 @@ can drain is the one parked in `submit()`. Hence the retry loop above.
 `finished()` distinguishes back-pressure from a closed pipeline; a caller that
 drains on another thread can pass a negative timeout and block instead.
 
-Measured on the board (1080p H.264 → YOLOv8n, three pinned contexts): **96.7 fps
-against 27.7 fps for the same stream through the synchronous pipeline, a 3.49x
-speed-up**, with the per-frame detections identical to the synchronous path.
+Measured on the board (1080p H.264 → YOLOv8n, three pinned contexts), over six
+runs of a 300-frame clip: **72–97 fps against 23–28 fps for the same stream
+through the synchronous pipeline, a 3.1x to 3.7x speed-up**, with the per-frame
+detections identical to the synchronous path. The spread is the board's, not the
+pipeline's — both figures move together run to run, which is why a range is
+quoted rather than the best single number.
 
 ---
 
