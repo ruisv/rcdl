@@ -229,6 +229,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cross-generation test that also asserts the resolved layout, and
   postprocessing drops to 4.9 ms against 8.8 (v8n) and 12.9 (11n) — inference
   does not improve, at 36.5 ms against 23.6.
+- `yolo26n-seg_rk3588.rknn` and `yolo26n-pose_rk3588.rknn`, and with them
+  `KeypointDecode::kCellRelativeWhole` — the one piece of the YOLO26 family that
+  did need code. YOLOv8/YOLO11 predict a keypoint offset in HALF cells and
+  YOLO26 dropped the doubling; nothing in the tensor distinguishes them, and the
+  older formula puts every joint at twice its distance from the cell centre —
+  still a skeleton, still drawable, still wrong. Measured over one model with
+  both formulas: 16/16 confident joints inside their own person's box with the
+  new mode, 5/16 with the old one, which is what the board test asserts.
 
 ### Fixed
 

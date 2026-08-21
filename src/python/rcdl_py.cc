@@ -329,11 +329,14 @@ rcdl::DepthMap depthMapFromArray(const Contig& data) {
 rcdl::KeypointDecode kptDecodeFromName(const std::string& n) {
   if (n == "model_pixels") return rcdl::KeypointDecode::kModelPixels;
   if (n == "cell_relative") return rcdl::KeypointDecode::kCellRelative;
+  if (n == "cell_relative_whole") return rcdl::KeypointDecode::kCellRelativeWhole;
   throw std::invalid_argument("unknown keypoint decode: " + n);
 }
 
 const char* pyKptDecodeName(rcdl::KeypointDecode d) noexcept {
-  return d == rcdl::KeypointDecode::kCellRelative ? "cell_relative" : "model_pixels";
+  if (d == rcdl::KeypointDecode::kCellRelative) return "cell_relative";
+  if (d == rcdl::KeypointDecode::kCellRelativeWhole) return "cell_relative_whole";
+  return "model_pixels";
 }
 
 // A rotated box as the 5-tuple Python spells it, so `rotated_iou((cx, cy, w, h,
@@ -2401,7 +2404,8 @@ NB_MODULE(rcdl_py, m) {
           "kpt_decode",
           [](const rcdl::PoseConfig& c) { return std::string(pyKptDecodeName(c.kpt_decode)); },
           [](rcdl::PoseConfig& c, const std::string& n) { c.kpt_decode = kptDecodeFromName(n); },
-          "'model_pixels' (the deployed export decodes in-graph) or 'cell_relative' (raw head)")
+          "'model_pixels' (the export decoded in-graph), 'cell_relative' (raw YOLOv8/11 head, "
+          "half-cell offsets) or 'cell_relative_whole' (raw YOLO26 head, whole-cell offsets)")
       .def_rw("kpt_apply_sigmoid", &rcdl::PoseConfig::kpt_apply_sigmoid);
 
   m.def(

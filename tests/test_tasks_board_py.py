@@ -545,6 +545,87 @@ def _ocr_line_crops(rcdl, img):
     return crops
 
 
+def test_yolo26_pose_needs_its_own_keypoint_formula(rcdl):
+    """The same model, two decode formulas, and only one puts the joints on the body.
+
+    YOLOv8 and YOLO11 predict a keypoint offset in HALF cells — the decode is
+    `(2*raw + grid) * stride` — and YOLO26 dropped the doubling: `(raw + grid +
+    0.5) * stride`. One factor of two, and nothing in the tensor says which. Get
+    it wrong and the joints land at roughly twice their distance from the cell
+    centre, which on a person a few hundred pixels tall is still a skeleton, is
+    still drawable, and is simply not this person's.
+
+    So the test runs BOTH formulas over one model and asserts the difference:
+    with `cell_relative_whole` every confident joint sits inside its own person's
+    box (16 of 16 on the two clear people), and with the older `cell_relative`
+    only 5 of those 16 do.
+    """
+    need(rcdl, "PoseEstimator")
+    path = bm.find_model("yolo26n-pose_rk3588.rknn")
+    if path is None:
+        pytest.skip("yolo26n-pose is not staged")
+    img = bm.load_bgr("bus.jpg")
+    engine = rcdl.Engine(path)
+
+    def inside_own_box(kpt_decode):
+        est = engine.pose_estimator(kpt_decode=kpt_decode, kpt_apply_sigmoid=True)
+        poses = est.process(np.ascontiguousarray(img), img.shape[1], img.shape[0], "bgr888")
+        poses = sorted(poses, key=lambda p: -p.box.score)[:2]
+        assert len(poses) == 2, f"expected the two clear people, got {len(poses)}"
+        confident = inside = 0
+        for p in poses:
+            b = p.box
+            for k in p.keypoints:
+                if k.score > 0.5:
+                    confident += 1
+                    inside += b.x1 <= k.x <= b.x2 and b.y1 <= k.y <= b.y2
+        return confident, inside
+
+    conf_right, inside_right = inside_own_box("cell_relative_whole")
+    conf_wrong, inside_wrong = inside_own_box("cell_relative")
+    assert conf_right >= 12, f"only {conf_right} confident joints on two people"
+    assert inside_right == conf_right, (
+        f"YOLO26 formula: {inside_right}/{conf_right} joints inside their own box")
+    assert inside_wrong < conf_wrong / 2, (
+        f"the v8 formula put {inside_wrong}/{conf_wrong} joints inside the box — if that is "
+        "no longer wrong, the two decodes have stopped differing and this test is vacuous")
+
+
+@pytest.mark.parametrize("model_name,min_people", [("yolov8n-seg_rk3588.rknn", 4),
+                                                   ("yolo26n-seg_rk3588.rknn", 3)])
+def test_instance_seg_generations_segment_the_same_bus(rcdl, model_name, min_people):
+    """Both segmentation generations, through one decoder that reads its own layout.
+
+    YOLO26's box branch has 4 channels where YOLOv8's has 64 (no DFL), and its
+    prototypes are built from all three feature scales rather than P3 alone — yet
+    the head resolver handles both from the model's signature, which is what this
+    checks. The instance counts differ on purpose: measured here, v8n-seg finds
+    the bus and all four people including the one cropped by the left edge (which
+    it scores 0.318), while 26n-seg finds the bus and the three unambiguous people
+    at 0.84-0.91 and leaves the edge case below threshold. So the assertion is the
+    floor each one actually clears, not a number that flatters both.
+    """
+    need(rcdl, "InstanceSegmenter")
+    path = bm.find_model(model_name)
+    if path is None:
+        pytest.skip(f"{model_name} is not staged")
+    img = bm.load_bgr("bus.jpg")
+    seg = rcdl.Engine(path).instance_segmenter()
+    inst = seg.process(np.ascontiguousarray(img), img.shape[1], img.shape[0], "bgr888")
+
+    classes = [rcdl.coco_class_name(m.class_id) for m in inst]
+    assert classes.count("bus") == 1, f"{model_name}: expected one bus, got {classes}"
+    assert classes.count("person") >= min_people, f"{model_name}: got {classes}"
+
+    # A mask that is empty, or that fills its whole box, means the prototype
+    # combination collapsed — both look fine in a count.
+    for m in inst:
+        area = max(1.0, (m.x2 - m.x1) * (m.y2 - m.y1))
+        frac = float(np.asarray(m.mask).sum()) / area
+        assert 0.15 < frac < 0.95, (
+            f"{model_name}: {rcdl.coco_class_name(m.class_id)} mask covers {frac:.0%} of its box")
+
+
 def test_the_v5_detector_agrees_with_the_v4_one(rcdl):
     """Two detector generations, one page, the same answer.
 

@@ -133,6 +133,12 @@ std::vector<PoseDetection> decodePose(const std::vector<const float*>& cls,
             // keypoint ADDS the grid; the box above SUBTRACTS a distance from it.
             mkx = (2.0f * raw_x + static_cast<float>(gx)) * stride;
             mky = (2.0f * raw_y + static_cast<float>(gy)) * stride;
+          } else if (cfg.kpt_decode == KeypointDecode::kCellRelativeWhole) {
+            // (raw + anchor) * stride, anchor = grid + 0.5: the same shape of
+            // formula without the doubling. One factor of two apart from the
+            // branch above, and nothing but the model's generation says which.
+            mkx = (raw_x + static_cast<float>(gx) + 0.5f) * stride;
+            mky = (raw_y + static_cast<float>(gy) + 0.5f) * stride;
           }
 
           Keypoint joint;

@@ -76,12 +76,21 @@ enum class KeypointDecode {
   /// keeps the cheap per-anchor arithmetic on the NPU and only the DFL reduction
   /// (which quantizes badly) on the CPU.
   kModelPixels,
-  /// Raw head: the two channels are cell-relative and are decoded here as
+  /// Raw head, HALF-CELL units — the YOLOv8/YOLO11 convention:
   ///   kx = (2*raw_x + gx) * stride,  ky = (2*raw_y + gy) * stride
   /// which is `(raw*2 + (anchor - 0.5)) * stride` for the cell-center anchor
   /// (anchor = gx + 0.5). Note the doubling, and note that the keypoint ADDS the
   /// grid where the box SUBTRACTS a distance from it.
   kCellRelative,
+  /// Raw head, WHOLE-CELL units — YOLO26 dropped the doubling:
+  ///   kx = (raw_x + gx + 0.5) * stride,  ky = (raw_y + gy + 0.5) * stride
+  ///
+  /// The two differ by a factor of two on the OFFSET only, which is why they
+  /// have to be told apart explicitly: decode a YOLO26 head with the older
+  /// formula and every joint lands at roughly twice its distance from the cell
+  /// centre. On a person a few hundred pixels tall that still puts the skeleton
+  /// on the body, still draws, and is simply wrong — see the board test.
+  kCellRelativeWhole,
 };
 
 /// Post-processing parameters for the LTRB multi-scale pose head.

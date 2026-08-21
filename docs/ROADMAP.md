@@ -244,8 +244,16 @@ with a board-verified result and a pinned test.
   second set of branches and only the `one2one_*` pair is the deployed one, and
   an ultralytics too old to know the architecture loads the checkpoint anyway
   and predicts confident nonsense. Both are written up in
-  [`MODELS.md`](MODELS.md). Classification, pose, instance seg and OBB need the
-  same treatment, one export patch each.
+  [`MODELS.md`](MODELS.md).
+
+  Instance segmentation and pose followed. Segmentation needed no code either.
+  **Pose needed one decoder addition**, and it is the sharpest trap of the three:
+  YOLOv8/YOLO11 predict the keypoint offset in half cells and YOLO26 dropped the
+  doubling, with nothing in the tensor to say which — so `KeypointDecode` gained
+  `kCellRelativeWhole`. *Verified by running both formulas over the same model:
+  16 of 16 confident joints land inside their own person's box with the YOLO26
+  formula, 5 of 16 with the older one — a skeleton that still draws and is still
+  wrong.* Classification and OBB are the same exercise, one export patch each.
 
 - **M10 and beyond — new task heads**
   Ported in BCDL's order where the maths carries over, each as decoder + numpy

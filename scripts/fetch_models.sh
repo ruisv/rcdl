@@ -30,6 +30,10 @@ REGISTRY=(
   # so the box branch is 4 channels instead of 64 and postprocessing is half the
   # cost. Exported from the one2one branch (see docs/MODELS.md).
   "yolo26n_rk3588.rknn|convert|yolo26n_rk3588.rknn"
+  "yolo26n-seg_rk3588.rknn|convert|yolo26n-seg_rk3588.rknn"
+  # Pose needs the DECODER told which generation it is: YOLO26 dropped the
+  # doubling in the keypoint offset (kpt_decode="cell_relative_whole").
+  "yolo26n-pose_rk3588.rknn|convert|yolo26n-pose_rk3588.rknn"
   "yolov8n-pose_rk3588.rknn|convert|yolov8n-pose_rk3588.rknn"
   "yolov8n-seg_rk3588.rknn|convert|yolov8n-seg_rk3588.rknn"
   "yolov8n-obb_rk3588.rknn|convert|yolov8n-obb_rk3588.rknn"

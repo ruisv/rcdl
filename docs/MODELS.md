@@ -41,6 +41,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `yolov8n_rk3588.rknn` | detection | 640×640 u8 | rgb | 9 outputs: per scale `box[1,64,H,W]`, `cls[1,80,H,W]`, `sum[1,1,H,W]`, NCHW. **Sigmoid in-graph.** |
 | `yolo11n_rk3588.rknn` | detection | 640×640 u8 | rgb | same as yolov8n |
 | `yolo26n_rk3588.rknn` | detection | 640×640 u8 | rgb | 9 outputs, same shape as yolov8n except the box branch is **4 channels, not 64: this head has no DFL**. Exported from the NMS-free head's one2one branch |
+| `yolo26n-seg_rk3588.rknn` | instance seg | 640×640 u8 | rgb | 13 outputs, the v8-seg layout with 4-channel box branches. Prototypes are built from **all three scales**, not P3 alone |
+| `yolo26n-pose_rk3588.rknn` | pose | 640×640 u8 | rgb | 9 outputs: per scale box(4), cls(1, sigmoid on the CPU), keypoints(51) raw. **Decode with `kpt_decode="cell_relative_whole"`** — see below |
 | `yolov8n-seg_rk3588.rknn` | instance seg | 640×640 u8 | rgb | 13 outputs: per scale `box(64)`, `cls(80)`, `sum(1)`, `mc(32)` + `proto[1,32,160,160]`, NCHW |
 | `yolov8n-pose_rk3588.rknn` | pose | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,65,H,W]` = 64 DFL + 1 class, plus `keypoints[1,17,3,8400]` f16. **Sigmoid applied on the CPU.** |
 | `yolov8n-obb_rk3588.rknn` | oriented boxes | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,79,H,W]` = 64 DFL + 15 DOTA classes, plus `angle[1,1,8400]` (sigmoid in-graph; decode as `(a − 0.25)·π`). **Class sigmoid on the CPU.** |
@@ -72,8 +74,29 @@ need a 4×16 softmax-and-sum each. Inference does **not** improve: YOLO11n and
 YOLO26n both run slower than YOLOv8n on this NPU despite fewer FLOPs, which is
 worth knowing before treating a newer generation as an upgrade.
 
-Two things about the export, both of which produce a plausible-looking model when
-got wrong:
+The rest of the family follows, with one decoder change and two more export
+traps of the same kind:
+
+* **Instance segmentation** needed nothing new. Its prototype branch is built
+  from all three feature scales rather than P3 alone, which only matters to the
+  export patch. On `bus.jpg` v8n-seg finds the bus and all four people including
+  the one cropped by the left edge (0.318); 26n-seg finds the bus and the three
+  unambiguous people at 0.84–0.91 and leaves the edge case below threshold.
+* **Pose** needed a new keypoint decode, and it is the sharpest trap here.
+  YOLOv8/YOLO11 predict the joint offset in HALF cells — `(2*raw + grid) *
+  stride` — and **YOLO26 dropped the doubling**: `(raw + grid + 0.5) * stride`.
+  Nothing in the tensor says which. Decoded with the older formula, the joints
+  land at roughly twice their distance from the cell centre: measured on the two
+  clear people in `bus.jpg`, 16 of 16 confident joints sit inside their own
+  person's box with `kpt_decode="cell_relative_whole"` and only **5 of 16** with
+  `cell_relative` — a skeleton that still draws and is still wrong.
+* Pose also splits its keypoint branch in two: `cv4` is a feature TRUNK, and the
+  joints come from `cv4_kpts` on top of it (`cv4_sigma` is a training-only
+  uncertainty). Exporting `cv4` yields its 85 channels, which look exactly like
+  17 joints × 5 and decode into a plausible skeleton of nonsense.
+
+Two things about the detection export, both of which produce a plausible-looking
+model when got wrong:
 
 * An NMS-free head (`end2end = True`) carries **two** sets of branches — the
   one2many `cv2`/`cv3` used in training and the `one2one_*` pair the model
