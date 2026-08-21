@@ -193,14 +193,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `PreprocBackend::Auto` fell through to an exception when RGA accepted a
   request at `imcheck` time and then refused it at submit. It now falls back to
   the CPU on a run-time refusal as well as a pre-flight one.
-- The RGA letterbox wrote its border bands **before** the blit, and librga's
-  destination import discards CPU writes made beforehand — so the bands came
-  back with 64-, 128- or 192-byte runs of stale content on most frames. Because
-  the destination is normally the NPU's input tensor, reused every frame, that
-  fed the model the previous frame's pixels in the padding, silently. The border
-  is now written after the blit, and the hardware fill is probed once on a
-  private scratch buffer rather than by attempting it on a live destination
-  (a rejected fill damages what it was pointed at).
+- The RGA letterbox painted its border with the **CPU**, and no ordering of that
+  write is safe. Before the blit, librga's destination import discards it and
+  the bands come back with 64-, 128- or 192-byte runs of stale content; after
+  the blit, the band edge lands mid-cache-line and the fill's read-modify-write
+  puts stale bytes back over pixels the hardware just wrote. Because the
+  destination is normally the NPU's input tensor, reused every frame, both
+  variants feed the model the previous frame's pixels — silently, since the
+  boxes stay plausible. Measured on a 16-frame clip letterboxed 816x1088 →
+  640x640, three runs of the same bytes disagreed on **7 to 16 of 16 frames**
+  (boxes ~1 px, scores ~0.005); the same clip on a square canvas, which needs no
+  border, was identical every time. The border is now **blitted by RGA** from a
+  flat-grey source allocated once per format/pad/size: every write to the
+  destination comes from one engine, in order, and the same three runs are now
+  identical on every frame. Costs one extra RGA op (+0.35 ms/frame at 640x640).
+  The CPU band fill remains the fallback for a destination RGA will not take.
+  The hardware colour fill is still probed once on a private scratch buffer
+  rather than by attempting it on a live destination (a rejected fill damages
+  what it was pointed at).
 - The RGA letterbox left a one-pixel band of the canvas unwritten when
   `dst - scaled == 1`, and did not even-align its destination rectangle for
   4:2:0 destinations. Since the destination is normally the NPU's input tensor,

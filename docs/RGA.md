@@ -98,10 +98,6 @@ virtual addresses.
 **What RCDL does about it.** `rgaFill()` tries the hardware once; the first
 failure switches the process to a CPU `memset` permanently (retrying per frame
 would cost one failed ioctl and a page of kernel log every frame for nothing).
-`rgaLetterbox()` also paints **only the border bands** rather than the whole
-canvas, and skips the fill entirely when the aspect ratios already match — so
-the fallback touches a few hundred KB, not the full tensor, and costs tens of
-microseconds.
 
 A board where the hardware fill does work keeps using it; nothing is disabled at
 compile time — but the decision is made **once, on a private scratch buffer**,
@@ -110,19 +106,50 @@ its target untouched: measured here, a band that took a failed attempt came back
 with 64–192 bytes of pre-fill content still in it, at cache-line granularity, on
 most runs.
 
-**Write the border after the blit, not before.** For the same reason: whatever
-cache maintenance librga performs on the destination when it imports it for
-`improcess` discards CPU writes made beforehand. Filling the bands first left
-64-byte runs of stale content in them on 8 runs out of 10; filling them after
-the hardware is finished with the buffer is reliable, and the two regions are
-disjoint so the order does not affect the picture. Since the destination is
-normally the NPU's input tensor reused every frame, getting this wrong feeds the
-model the previous frame's pixels in the pad bands — silently, since the boxes
-stay plausible.
-
 The proper fix would be a dma-heap backed by memory below 4 GB (a CMA heap).
 The image this was measured on has an empty `cma` heap, and RK3588's NPU, RGA3
 and VPU all sit behind IOMMUs, so `system` is the right default anyway.
+
+### 3.1 The letterbox border is a blit, because a CPU fill is not reproducible
+
+With colour fill unavailable, the obvious substitute is to paint the letterbox
+border with the CPU. **Do not**, and this is the sharpest measurement in this
+document, because the failure is invisible.
+
+Setup: a 16-frame 816x1088 H.264 clip, decoded on the VPU, letterboxed by RGA
+into a 640x640 NPU input tensor (so padX = 80, padY = 0), YOLOv8n. The same
+clip, the same bytes, the same process, run three times:
+
+| border | frames whose detections changed between runs |
+|---|---|
+| CPU fill after the blit | **7 to 16 of 16** (boxes moving ~1 px, scores ~0.005) |
+| CPU fill before the blit | **16 of 16** |
+| no border fill at all | 0 of 16 |
+| square canvas, so no border at all | 0 of 16 |
+| **grey source blitted by RGA** | **0 of 16** |
+
+The decoded frames are bit-identical across runs (checked), RGA's letterbox is
+bit-identical when repeated on one frame, and `rknn_run` is bit-identical on one
+input. Only the CPU border is not, and it does not merely corrupt the border: a
+band edge lands mid-cache-line, so filling it is a **read-modify-write of a line
+the hardware just wrote**, and whichever of the two writebacks lands second
+wins. Filling before the blit loses the band instead — librga's cache
+maintenance on import discards the CPU's writes — which is the same effect from
+the other side. There is no order that is safe.
+
+So `rgaLetterbox()` paints the border with **RGA**: a small flat-grey source
+(allocated once per format/pad/size, CPU-written once, thereafter read-only) is
+stretched over the whole canvas, and the image blit lands on top of it. Every
+write to the destination then comes from one engine, in order. It costs one
+extra RGA op — measured at **+0.35 ms/frame** for a 640x640 canvas, preproc
+2.39 → 2.74 ms — and buys a pipeline whose output does not depend on timing.
+The CPU band fill remains as the fallback for a destination RGA will not take as
+a blit target, which is not the NPU-input path.
+
+Worth stating plainly, because it is the reusable lesson: **the bug was not that
+results were wrong, it was that they were not the same twice.** Nothing failed,
+no ioctl returned an error, and every box looked reasonable. It surfaced only
+when a new test compared two runs of the same clip frame by frame.
 
 ## 4. RGA and the CPU fallback do not resample identically
 

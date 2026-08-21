@@ -6,6 +6,9 @@
 #include <sys/mman.h>
 #include <cstring>
 #include <exception>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -204,6 +207,95 @@ bool hwFillUsable() noexcept {
     }
   }();
   return ok;
+}
+
+// --- the border, painted by the hardware --------------------------------------
+//
+// The CPU must not write into a buffer RGA is blitting into, in either order,
+// and that is a measurement rather than a principle. Letterboxing a decoded
+// 816x1088 stream into a 640x640 NPU input tensor, with the border painted by
+// the CPU (RGA's own colour fill being unusable here — see tryHwFill), the same
+// 16-frame clip run three times gave DIFFERENT detections on 7 to 16 of its
+// frames: boxes moving about a pixel, scores by ~0.005. The same clip on a
+// square canvas, where the letterbox needs no border at all, was identical on
+// every frame of every run, and so was the padded clip with the border fill
+// disabled. Painting the border before the blit instead of after made it worse
+// (16 of 16), which is the other half of the same effect: the blit's cache
+// maintenance on the destination discards CPU writes made just before it, and a
+// CPU write just after it merges stale bytes back over the seam, because the
+// band edge lands mid-cache-line and filling it is a read-modify-write of a
+// line the hardware just wrote.
+//
+// So: no CPU writes. The border is a BLIT from a small grey source, allocated
+// once per (format, pad, size) and thereafter read-only. Every write to the
+// destination then comes from the same engine, in order. The CPU fill stays as
+// the fallback for a destination RGA cannot take.
+int greySide(const ImageView& dst) noexcept {
+  // RGA3 scales by at most 8x; a quarter of the destination leaves margin, and
+  // 68 is the engine's minimum source width.
+  const int need = std::max({(dst.width + 3) / 4, (dst.height + 3) / 4, 68});
+  return (need + 15) & ~15;  // 16-aligned, which is what packed RGB strides want
+}
+
+// One flat grey image, ready for RGA to stretch over a border band. Returns
+// nullptr when it cannot be built, which sends the caller to the CPU fallback.
+const ImageView* greySource(PixelFormat fmt, std::uint8_t pad, int side) noexcept {
+  struct Grey {
+    DmaBuf buf;
+    ImageView view;
+  };
+  static std::mutex mu;
+  static std::map<std::uint64_t, std::unique_ptr<Grey>> cache;
+
+  const std::uint64_t key = (static_cast<std::uint64_t>(fmt) << 40) |
+                            (static_cast<std::uint64_t>(pad) << 32) |
+                            static_cast<std::uint64_t>(static_cast<std::uint32_t>(side));
+  std::lock_guard<std::mutex> lock(mu);
+  const auto it = cache.find(key);
+  if (it != cache.end()) return it->second ? &it->second->view : nullptr;
+
+  std::unique_ptr<Grey> g;
+  try {
+    g = std::make_unique<Grey>();
+    g->buf = DmaBuf::alloc(imageBytes(fmt, side, side));
+    g->view.data = g->buf.data();
+    g->view.fd = g->buf.fd();
+    g->view.width = g->view.wstride = side;
+    g->view.height = g->view.hstride = side;
+    g->view.format = fmt;
+    g->view.size = g->buf.size();
+    // The one CPU write this buffer ever sees, on a buffer no hardware is
+    // touching yet, flushed before anything reads it.
+    g->buf.syncStart(/*read=*/false, /*write=*/true);
+    fillRectCpu(g->view, 0, 0, side, side, pad);
+    g->buf.syncEnd(/*read=*/false, /*write=*/true);
+  } catch (...) {
+    cache.emplace(key, nullptr);
+    return nullptr;
+  }
+  const ImageView* view = &g->view;
+  cache.emplace(key, std::move(g));
+  return view;
+}
+
+// Stretch the grey source over `rect`. Nearest or bilinear makes no difference
+// to a constant image, so the band comes out exactly `pad` — byte-identical to
+// what letterboxCpu() paints.
+bool tryGreyBlit(const ImageView& dst, const im_rect& rect, std::uint8_t pad) noexcept {
+  try {
+    const ImageView* grey = greySource(dst.format, pad, greySide(dst));
+    if (grey == nullptr) return false;
+    rga_buffer_t s = wrap(*grey, "grey");
+    rga_buffer_t d = wrap(dst, "dst");
+    const im_rect srect{0, 0, grey->width, grey->height};
+    rga_buffer_t pat{};
+    im_rect prect{};
+    if (!imOk(imcheck_t(s, d, pat, srect, rect, prect, 0))) return false;
+    return imOk(improcess(s, d, pat, srect, rect, prect, /*acquire_fence_fd=*/-1,
+                          /*release_fence_fd=*/nullptr, /*opt_ptr=*/nullptr, IM_SYNC));
+  } catch (...) {
+    return false;
+  }
 }
 
 // Try the hardware fill. False means it is unusable on this board, decided by
@@ -574,57 +666,62 @@ LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint
     // The source scales below one pixel (or below two on a 4:2:0 destination):
     // there is no rectangle to blit, only the border. letterboxCpu() returns the
     // same all-pad canvas and the same geometry.
-    fillRectGrey(d, im_rect{0, 0, dst.width, dst.height}, pad, dst);
+    const im_rect whole{0, 0, dst.width, dst.height};
+    if (!tryGreyBlit(dst, whole, pad)) fillRectGrey(d, whole, pad, dst);
     return lb;
   }
   checkPair(s, d, srect, drect, src, dst, "letterbox");
 
-  // 1. Border — only the bands the blit will not cover. An aspect-matched source
-  //    pads on neither axis and skips the fill entirely; the usual
-  //    16:9-into-square case costs two bands instead of a whole canvas.
+  // The border is needed unless the source's aspect matches the canvas exactly.
+  // Each edge is tested on ITS OWN extent, never on `pad > 0`: when the leftover
+  // is a single pixel the leading pad rounds down to 0 and only the trailing
+  // band exists, and skipping it would leave that row (or column) holding
+  // whatever was there before — which, since the destination is normally the
+  // NPU input tensor reused every frame, means the PREVIOUS frame's pixels.
   //
-  //    Each band is tested on ITS OWN extent, never on `pad > 0`: when the
-  //    leftover is a single pixel the leading pad rounds down to 0 and only the
-  //    trailing band exists, and skipping it would leave that row (or column)
-  //    holding whatever was there before — which, since the destination is
-  //    normally the NPU input tensor reused every frame, means the PREVIOUS
-  //    frame's pixels.
-  //
-  //    The fill is issued before the colour-space mode is set on the buffers, so
-  //    a YUV->RGB matrix meant for the source cannot also touch the border. On a
-  //    board where the hardware fill works, a YUV destination is at the mercy of
-  //    whether RGA runs the fill colour through its RGB->YUV matrix; the CPU
-  //    fallback (which is what runs here) always writes Y=pad with neutral 128
-  //    chroma, exactly like letterboxCpu().
+  // Both the border blit and the CPU fallback run before the colour-space mode
+  // is set on the buffers, so a YUV->RGB matrix meant for the source cannot also
+  // touch the border: the grey source is in the destination's own format, and
+  // the CPU fill writes Y=pad with neutral 128 chroma, exactly like
+  // letterboxCpu().
   const int right = padX + newW;
   const int bottom = padY + newH;
+  const bool has_border =
+      padY > 0 || padX > 0 || bottom < dst.height || right < dst.width;
 
-  // 2. Crop, scale and colour-convert into the centered rectangle in one pass.
-  //    This runs BEFORE the border, not after. The border and the blit target
-  //    disjoint rectangles, so the order does not matter to the picture — but it
-  //    matters to the cache. When the CPU wrote the border first, the band came
-  //    back with 64-, 128- or 192-byte runs of pre-fill content (cache-line
-  //    granularity) on most runs: whatever cache maintenance librga performs on
-  //    the destination when it imports it for the blit discards CPU writes made
-  //    beforehand. Writing the border last, after the hardware is finished with
-  //    the buffer, is reliable — and since the destination is normally the NPU's
-  //    input tensor reused every frame, the alternative is a stale band fed to
-  //    the model, which shows up as slightly-wrong results rather than an error.
+  // 1. Border, by hardware, over the WHOLE canvas and before the blit. One RGA
+  //    op instead of up to four CPU-filled bands, and — the reason it is done
+  //    this way — no CPU write into a buffer the blit is about to write. The
+  //    bytes under the image rectangle are painted twice, which costs a little
+  //    bandwidth and buys an ordering that is simply not racy: same engine,
+  //    same queue, in order. See the comment on greySource() for what the CPU
+  //    fill measured before this replaced it.
+  const bool hw_border = has_border && tryGreyBlit(dst, im_rect{0, 0, dst.width, dst.height}, pad);
+
+  // 2. Crop, scale and colour-convert into the centred rectangle in one pass,
+  //    on top of the grey the step above laid down.
   applyCsc(&s, &d, cscMode(src, dst, range));
   process(s, d, srect, drect, src, dst, "letterbox blit");
 
-  // 3. Border, into the bands the blit did not cover.
-  if (padY > 0) {
-    fillRectGrey(d, im_rect{0, 0, dst.width, padY}, pad, dst);
-  }
-  if (bottom < dst.height) {
-    fillRectGrey(d, im_rect{0, bottom, dst.width, dst.height - bottom}, pad, dst);
-  }
-  if (padX > 0) {
-    fillRectGrey(d, im_rect{0, padY, padX, newH}, pad, dst);
-  }
-  if (right < dst.width) {
-    fillRectGrey(d, im_rect{right, padY, dst.width - right, newH}, pad, dst);
+  // 3. Border, the fallback: the CPU paints only the bands the blit did not
+  //    cover, and only AFTER it. That order is the lesser evil — filling first
+  //    loses the band outright (the blit's cache maintenance discards the CPU's
+  //    writes), filling afterwards keeps it but can disturb the seam. A
+  //    destination that gets here is one RGA would not take as a blit target,
+  //    so it is not the NPU-input hot path.
+  if (has_border && !hw_border) {
+    if (padY > 0) {
+      fillRectGrey(d, im_rect{0, 0, dst.width, padY}, pad, dst);
+    }
+    if (bottom < dst.height) {
+      fillRectGrey(d, im_rect{0, bottom, dst.width, dst.height - bottom}, pad, dst);
+    }
+    if (padX > 0) {
+      fillRectGrey(d, im_rect{0, padY, padX, newH}, pad, dst);
+    }
+    if (right < dst.width) {
+      fillRectGrey(d, im_rect{right, padY, dst.width - right, newH}, pad, dst);
+    }
   }
   return lb;
 }
