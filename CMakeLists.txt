@@ -71,7 +71,12 @@ add_library(rcdl SHARED
   src/media/video_decoder.cc
   src/media/video_encoder.cc
   src/media/jpeg_codec.cc
-  src/pipeline/detection_pipeline.cc)
+  src/tracks/byte_tracker.cc
+  src/tracks/reid.cc
+  src/backend/engine_pool.cc
+  src/pipeline/detection_pipeline.cc
+  src/pipeline/async_detection_pipeline.cc
+  src/pipeline/tracking_pipeline.cc)
 add_library(rcdl::rcdl ALIAS rcdl)
 
 configure_file(
@@ -134,6 +139,8 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(video_roundtrip)
   rcdl_example(jpeg_roundtrip)
   rcdl_example(video_det_demo)
+  rcdl_example(async_bench)
+  rcdl_example(async_check)
 endif()
 
 # --- python module -----------------------------------------------------------
