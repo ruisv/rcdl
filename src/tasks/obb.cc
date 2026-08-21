@@ -274,7 +274,7 @@ std::vector<ObbDetection> decodeObb(const std::vector<const float*>& cls,
 
         const float raw_a = ap[cell];
         const float act_a = cfg.apply_angle_sigmoid ? sigmoid(raw_a) : raw_a;
-        const float a_rad = (act_a - cfg.angle_bias) * kPi;
+        const float a_rad = (act_a - cfg.angle_bias) * cfg.angle_scale;
 
         // The LTRB distances are measured in the BOX's frame, so the centre
         // offset they imply has to be rotated into the image frame before it is

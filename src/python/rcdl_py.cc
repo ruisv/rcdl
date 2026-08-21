@@ -2592,6 +2592,9 @@ NB_MODULE(rcdl_py, m) {
       .def_rw("apply_sigmoid", &rcdl::ObbConfig::apply_sigmoid)
       .def_rw("apply_angle_sigmoid", &rcdl::ObbConfig::apply_angle_sigmoid)
       .def_rw("angle_bias", &rcdl::ObbConfig::angle_bias)
+      .def_rw("angle_scale", &rcdl::ObbConfig::angle_scale,
+              "angle = (value - angle_bias) * angle_scale; pi for the ultralytics\n"
+              "fraction-of-a-half-turn convention, 1 for a head that emits radians")
       .def_rw("regularize", &rcdl::ObbConfig::regularize);
 
   // Two spellings on purpose: a bound RotatedBox, and the (cx, cy, w, h, angle)
@@ -2633,7 +2636,7 @@ NB_MODULE(rcdl_py, m) {
          const std::vector<Contig>& angle, const std::vector<std::pair<int, int>>& grid_hw,
          const std::vector<int>& strides, const LbTuple& lb, int num_classes, float conf_thresh,
          float iou_thresh, int max_dets, int reg_max, bool channels_first, bool apply_sigmoid,
-         bool apply_angle_sigmoid, float angle_bias, bool regularize) {
+         bool apply_angle_sigmoid, float angle_bias, float angle_scale, bool regularize) {
         rcdl::ObbConfig cfg;
         cfg.num_classes = num_classes;
         cfg.conf_thresh = conf_thresh;
@@ -2645,6 +2648,7 @@ NB_MODULE(rcdl_py, m) {
         cfg.apply_sigmoid = apply_sigmoid;
         cfg.apply_angle_sigmoid = apply_angle_sigmoid;
         cfg.angle_bias = angle_bias;
+        cfg.angle_scale = angle_scale;
         cfg.regularize = regularize;
         requireSameLength(cls.size(), box.size(),
                           "decode_obb: cls, box, angle, grid_hw and strides must have the same "
@@ -2681,7 +2685,8 @@ NB_MODULE(rcdl_py, m) {
       "cls"_a, "box"_a, "angle"_a, "grid_hw"_a, "strides"_a, "letterbox"_a, "num_classes"_a = 15,
       "conf_thresh"_a = 0.25f, "iou_thresh"_a = 0.4f, "max_dets"_a = 300, "reg_max"_a = 0,
       "channels_first"_a = true, "apply_sigmoid"_a = true, "apply_angle_sigmoid"_a = false,
-      "angle_bias"_a = 0.25f, "regularize"_a = true,
+      "angle_bias"_a = 0.25f, "angle_scale"_a = 3.14159265358979323846f,
+      "regularize"_a = true,
       "Decode the anchor-free LTRB OBB head from per-scale float32 cls/box/angle buffers into "
       "ObbDetections in source pixels");
 
@@ -2694,7 +2699,8 @@ NB_MODULE(rcdl_py, m) {
           "__init__",
           [](PyObbDetector* self, nb::handle engine_arg, float conf_thresh, float iou_thresh,
              int max_dets, int num_classes, bool apply_sigmoid, bool apply_angle_sigmoid,
-             float angle_bias, bool regularize, const std::string& model_input, std::uint8_t pad,
+             float angle_bias, float angle_scale, bool regularize, const std::string& model_input,
+             std::uint8_t pad,
              const std::string& backend) {
             rcdl::Engine& engine = engineFrom(engine_arg);
             // Grids, class count, reg_max, channel order and strides come from
@@ -2708,12 +2714,14 @@ NB_MODULE(rcdl_py, m) {
             cfg.apply_sigmoid = apply_sigmoid;
             cfg.apply_angle_sigmoid = apply_angle_sigmoid;
             cfg.angle_bias = angle_bias;
+            cfg.angle_scale = angle_scale;
             cfg.regularize = regularize;
             new (self) PyObbDetector(engine, model_input, pad, backend, cfg);
           },
           "engine"_a, "conf_thresh"_a = 0.25f, "iou_thresh"_a = 0.4f, "max_dets"_a = 300,
           "num_classes"_a = 15, "apply_sigmoid"_a = true, "apply_angle_sigmoid"_a = false,
-          "angle_bias"_a = 0.25f, "regularize"_a = true, "model_input"_a = "rgb888",
+          "angle_bias"_a = 0.25f, "angle_scale"_a = 3.14159265358979323846f,
+          "regularize"_a = true, "model_input"_a = "rgb888",
           "pad"_a = std::uint8_t(114), "backend"_a = "auto", nb::keep_alive<1, 2>())
       .def(
           "process",

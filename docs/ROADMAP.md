@@ -253,7 +253,17 @@ with a board-verified result and a pinned test.
   `kCellRelativeWhole`. *Verified by running both formulas over the same model:
   16 of 16 confident joints land inside their own person's box with the YOLO26
   formula, 5 of 16 with the older one — a skeleton that still draws and is still
-  wrong.* Classification and OBB are the same exercise, one export patch each.
+  wrong.*
+
+  Oriented boxes and classification complete the family, each with a convention
+  that changed silently: YOLO26 regresses the OBB angle in **radians** where v8
+  emitted a fraction of a half-turn through a sigmoid (so `ObbConfig` gained
+  `angle_scale`), and its classifier has the **softmax in the graph** where
+  ResNet-18 emits logits. *Verified against the framework's own outputs: all
+  four aircraft in `obb.jpg` within 0.12 rad with the right convention and the
+  largest 0.35 rad out with the wrong one; class 812 at 0.939 respecting the
+  in-graph softmax and 0.003 — same argmax, meaningless confidence — with a
+  second one applied.* All five heads of the generation are now in the registry.
 
 - **M10 and beyond — new task heads**
   Ported in BCDL's order where the maths carries over, each as decoder + numpy

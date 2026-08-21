@@ -138,6 +138,13 @@ struct ObbConfig {
   /// angle = (value - angle_bias) * pi. 0.25 gives the ultralytics
   /// [-pi/4, 3pi/4] range; 0.5 gives a symmetric [-pi/2, pi/2].
   float angle_bias = 0.25f;
+  /// angle = (value - angle_bias) * angle_scale. Pi is the ultralytics
+  /// parameterisation, where the head emits a FRACTION of a half-turn. YOLO26
+  /// regresses the angle in RADIANS directly and applies no mapping at all
+  /// downstream, so it wants angle_scale = 1 with angle_bias = 0 — and the two
+  /// conventions are three radians apart at the extremes while both produce
+  /// boxes that look like boxes.
+  float angle_scale = 3.14159265358979323846f;
   /// Canonicalise every box to w >= h by swapping the sides and adding pi/2.
   /// Without it the same physical box has two encodings and rotated NMS sees
   /// them as different shapes.

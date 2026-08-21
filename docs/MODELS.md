@@ -43,6 +43,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `yolo26n_rk3588.rknn` | detection | 640×640 u8 | rgb | 9 outputs, same shape as yolov8n except the box branch is **4 channels, not 64: this head has no DFL**. Exported from the NMS-free head's one2one branch |
 | `yolo26n-seg_rk3588.rknn` | instance seg | 640×640 u8 | rgb | 13 outputs, the v8-seg layout with 4-channel box branches. Prototypes are built from **all three scales**, not P3 alone |
 | `yolo26n-pose_rk3588.rknn` | pose | 640×640 u8 | rgb | 9 outputs: per scale box(4), cls(1, sigmoid on the CPU), keypoints(51) raw. **Decode with `kpt_decode="cell_relative_whole"`** — see below |
+| `yolo26n-obb_rk3588.rknn` | oriented boxes | 640×640 u8 | rgb | 9 outputs: per scale box(4), cls(15), angle(1). **The angle is in RADIANS** — decode with `angle_bias=0`, `angle_scale=1` |
+| `yolo26n-cls_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]` with the **softmax IN the graph** — pass `apply_softmax=False` |
 | `yolov8n-seg_rk3588.rknn` | instance seg | 640×640 u8 | rgb | 13 outputs: per scale `box(64)`, `cls(80)`, `sum(1)`, `mc(32)` + `proto[1,32,160,160]`, NCHW |
 | `yolov8n-pose_rk3588.rknn` | pose | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,65,H,W]` = 64 DFL + 1 class, plus `keypoints[1,17,3,8400]` f16. **Sigmoid applied on the CPU.** |
 | `yolov8n-obb_rk3588.rknn` | oriented boxes | 640×640 u8 | rgb | 4 outputs: per scale **fused** `[1,79,H,W]` = 64 DFL + 15 DOTA classes, plus `angle[1,1,8400]` (sigmoid in-graph; decode as `(a − 0.25)·π`). **Class sigmoid on the CPU.** |
@@ -90,6 +92,21 @@ traps of the same kind:
   clear people in `bus.jpg`, 16 of 16 confident joints sit inside their own
   person's box with `kpt_decode="cell_relative_whole"` and only **5 of 16** with
   `cell_relative` — a skeleton that still draws and is still wrong.
+* **Oriented boxes** changed convention: v8 maps its angle through
+  `(sigmoid(v) - 0.25) * pi` inside the graph, YOLO26 regresses **radians** and
+  applies nothing, so `ObbConfig` gained `angle_scale` (pi for the older
+  fraction-of-a-half-turn form, 1 for radians). Decoded with the wrong one the
+  boxes still land on the objects, just rotated wrongly — and because rotated
+  NMS merges by IoU, even the object COUNT changes. Checked against the
+  framework's own angles for `obb.jpg`: all four aircraft agree within 0.12 rad
+  with the right convention (comparing modulo pi/2, since RCDL regularises every
+  box to w >= h and the reference does not), and the largest is 0.35 rad out
+  with v8's.
+* **Classification** puts its softmax in the graph, where ResNet-18 emits
+  logits. Softmax it a second time and the ARGMAX survives — top-3 remains space
+  shuttle, submarine, catamaran — while the score collapses from 0.939 to 0.003
+  over 1000 classes. Nothing errors, and a test that only checked the predicted
+  class would pass.
 * Pose also splits its keypoint branch in two: `cv4` is a feature TRUNK, and the
   joints come from `cv4_kpts` on top of it (`cv4_sigma` is a training-only
   uncertainty). Exporting `cv4` yields its 85 channels, which look exactly like

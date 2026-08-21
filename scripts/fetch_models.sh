@@ -34,6 +34,11 @@ REGISTRY=(
   # Pose needs the DECODER told which generation it is: YOLO26 dropped the
   # doubling in the keypoint offset (kpt_decode="cell_relative_whole").
   "yolo26n-pose_rk3588.rknn|convert|yolo26n-pose_rk3588.rknn"
+  # OBB: YOLO26 regresses the angle in RADIANS, so decode with angle_bias=0 and
+  # angle_scale=1 (the v8 default is (sigmoid-0.25)*pi). Classification: the
+  # softmax is IN the graph, so pass apply_softmax=False.
+  "yolo26n-obb_rk3588.rknn|convert|yolo26n-obb_rk3588.rknn"
+  "yolo26n-cls_rk3588.rknn|convert|yolo26n-cls_rk3588.rknn"
   "yolov8n-pose_rk3588.rknn|convert|yolov8n-pose_rk3588.rknn"
   "yolov8n-seg_rk3588.rknn|convert|yolov8n-seg_rk3588.rknn"
   "yolov8n-obb_rk3588.rknn|convert|yolov8n-obb_rk3588.rknn"

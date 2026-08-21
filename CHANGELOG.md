@@ -237,6 +237,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still a skeleton, still drawable, still wrong. Measured over one model with
   both formulas: 16/16 confident joints inside their own person's box with the
   new mode, 5/16 with the old one, which is what the board test asserts.
+- `yolo26n-obb_rk3588.rknn` and `yolo26n-cls_rk3588.rknn` complete the YOLO26
+  family, with `ObbConfig::angle_scale` for the one convention change that
+  needed code: YOLO26 regresses the oriented-box angle in **radians**, where
+  YOLOv8 emitted a fraction of a half-turn through an in-graph sigmoid. Decoded
+  with the wrong one the boxes still sit on the objects, just rotated — and
+  rotated NMS then merges a different set, so the count changes too. The
+  classifier needs no code but does need `apply_softmax=False`: its softmax is
+  in the graph, and a second one leaves the argmax intact while flattening the
+  score from 0.939 to 0.003. Both are pinned against the framework's own
+  outputs.
 
 ### Fixed
 

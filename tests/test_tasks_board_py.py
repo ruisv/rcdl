@@ -12,6 +12,8 @@ Everything skips cleanly when the model, the bindings or OpenCV are missing:
     PYTHONPATH=build:python pytest -s tests/test_tasks_board_py.py
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -543,6 +545,101 @@ def _ocr_line_crops(rcdl, img):
         if c.shape[0] >= 6 and c.shape[1] >= 12:
             crops.append(c)
     return crops
+
+
+def test_yolo26_obb_regresses_radians_where_v8_regressed_a_fraction(rcdl):
+    """The angle convention changed generations, and only the number moves.
+
+    YOLOv8's OBB head emits a value mapped by `(sigmoid(v) - 0.25) * pi`; YOLO26
+    regresses the angle in RADIANS and applies nothing. Decoded with the wrong
+    one the boxes are still boxes, still on the objects, just rotated wrongly —
+    and rotated NMS then merges a different set of them, so even the COUNT
+    changes. Measured against the PyTorch reference for the same image, the
+    largest plane sits at 0.533 rad; RCDL reads 0.53 with the YOLO26 convention
+    and 0.88 with v8's.
+    """
+    need(rcdl, "ObbDetector")
+    path = bm.find_model("yolo26n-obb_rk3588.rknn")
+    if path is None:
+        pytest.skip("yolo26n-obb is not staged")
+    img = bm.load_bgr("obb.jpg")
+    engine = rcdl.Engine(path)
+
+    # The framework's own answer for this image: four aircraft, at these centres
+    # and these angles in radians.
+    reference = {(785, 1894): 0.533, (1200, 1284): 0.438,
+                 (2132, 1810): 0.537, (2706, 2066): 0.519}
+
+    def planes(**kw):
+        det = engine.obb_detector(**kw)
+        out = det.process(np.ascontiguousarray(img), img.shape[1], img.shape[0], "bgr888")
+        found = [d for d in out if rcdl.dota_class_name(d.class_id) == "plane"]
+        assert len(found) == 4, f"expected the four planes, got {len(found)} ({kw})"
+        return out, found
+
+    def same_rectangle(a, b):
+        """Angles of the SAME rectangle, allowing for regularisation.
+
+        RCDL canonicalises every box to w >= h, which swaps the sides and adds
+        pi/2 — the identical physical rectangle described the other way round.
+        So two angles describe one rectangle when they agree modulo pi/2, and
+        comparing them any other way would fail on half the aircraft here purely
+        because the reference did not regularise.
+        """
+        d = abs(a - b) % (math.pi / 2)
+        return min(d, math.pi / 2 - d)
+
+    def matched(found):
+        out = {}
+        for cx, cy in reference:
+            near = min(found, key=lambda d: (d.rrect.cx - cx) ** 2 + (d.rrect.cy - cy) ** 2)
+            assert (near.rrect.cx - cx) ** 2 + (near.rrect.cy - cy) ** 2 < 40 ** 2, (
+                f"no plane near ({cx}, {cy})")
+            out[(cx, cy)] = near.rrect.angle
+        return out
+
+    boxes, found = planes(angle_bias=0.0, angle_scale=1.0)
+    names = [rcdl.dota_class_name(d.class_id) for d in boxes]
+    assert names.count("large vehicle") >= 20, f"only {names.count('large vehicle')} vehicles"
+    right = matched(found)
+    for key, expect in reference.items():
+        assert same_rectangle(right[key], expect) < 0.12, (
+            f"plane at {key}: {right[key]:.3f} rad against the framework's {expect:.3f}")
+
+    _, wrong_found = planes()  # the v8 convention, on a YOLO26 model
+    wrong = matched(wrong_found)
+    off = [same_rectangle(wrong[k], reference[k]) for k in reference]
+    assert max(off) > 0.2, (
+        "the v8 angle convention agrees with the framework on every plane, so the two "
+        "conventions have stopped differing and this test is vacuous")
+
+
+def test_yolo26_classifier_has_its_softmax_in_the_graph(rcdl):
+    """Right ranking, meaningless scores — the double-softmax signature.
+
+    ResNet-18 emits logits and RCDL softmaxes them; the YOLO26 classifier emits
+    probabilities already. Softmax them again and the ARGMAX survives — the top
+    three are still space shuttle, submarine, catamaran — while the confidence
+    collapses towards uniform: 0.003 instead of 0.939 over 1000 classes. Nothing
+    errors, and a test that only checked the predicted class would pass.
+    """
+    need(rcdl, "Classifier")
+    path = bm.find_model("yolo26n-cls_rk3588.rknn")
+    if path is None:
+        pytest.skip("yolo26n-cls is not staged")
+    img = bm.load_bgr("space_shuttle_224.jpg")
+    engine = rcdl.Engine(path)
+
+    right = engine.classifier(top_k=3, crop_ratio=1.0, apply_softmax=False).classify(
+        np.ascontiguousarray(img), img.shape[1], img.shape[0], "bgr888")
+    assert right[0].class_id == 812, f"top-1 is {right[0].class_id}, expected 812 (space shuttle)"
+    assert right[0].score > 0.5, f"top-1 scored only {right[0].score:.3f}"
+
+    doubled = engine.classifier(top_k=3, crop_ratio=1.0).classify(
+        np.ascontiguousarray(img), img.shape[1], img.shape[0], "bgr888")
+    assert doubled[0].class_id == 812, "the argmax should survive a second softmax"
+    assert doubled[0].score < 0.05, (
+        f"a second softmax should flatten the score, but it is {doubled[0].score:.3f}")
 
 
 def test_yolo26_pose_needs_its_own_keypoint_formula(rcdl):
