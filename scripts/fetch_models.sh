@@ -21,9 +21,19 @@ mkdir -p "${DEST}"
 #   zoo     : ${RCDL_SRC_ZOO}/<path>          (rknn_model_zoo checkout; run its
 #                                              download_model.sh first)
 #   convert : ${RCDL_CONVERT_HOST}:${RCDL_CONVERT_MODELS}/<path>
+# Each model's INPUT ORDER (rgb/bgr) and head family are recorded here so the
+# examples and tests do not have to guess; see docs/MODELS.md for the table.
 REGISTRY=(
-  "resnet18_rk3588.rknn|zoo|examples/resnet/model/resnet18_rk3588.rknn"
-  "yolov8n_rk3588.rknn|zoo|examples/yolov8/model/yolov8n_rk3588.rknn"
+  "yolov8n_rk3588.rknn|convert|yolov8n_rk3588.rknn"
+  "yolo11n_rk3588.rknn|convert|yolo11n_rk3588.rknn"
+  "yolov8n-pose_rk3588.rknn|convert|yolov8n-pose_rk3588.rknn"
+  "yolov8n-seg_rk3588.rknn|convert|yolov8n-seg_rk3588.rknn"
+  "yolov8n-obb_rk3588.rknn|convert|yolov8n-obb_rk3588.rknn"
+  "ppocrv4_det_rk3588.rknn|convert|ppocrv4_det_rk3588.rknn"
+  "ppocrv4_rec_rk3588.rknn|convert|ppocrv4_rec_rk3588.rknn"
+  "ppseg_rk3588.rknn|convert|ppseg_rk3588.rknn"
+  "retinaface_rk3588.rknn|convert|retinaface_rk3588.rknn"
+  "resnet18_rk3588.rknn|convert|resnet18_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

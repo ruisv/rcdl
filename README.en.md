@@ -14,8 +14,18 @@
 
 RCDL is the Rockchip counterpart of [BCDL](https://github.com/ruisv/bcdl) (RDK
 BPU): the same `Engine` + task-class mental model and zero-copy pipeline idea,
-re-based on the RK3588-family NPU / RGA / VPU. **Early development** — M0
-(skeleton + inference engine) is done; see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+re-based on the RK3588-family NPU / RGA / VPU. **Early development** — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+Measured on RK3588S (librknnrt 2.3.2 / driver 0.9.8):
+
+| | |
+|---|---|
+| ResNet-18 int8, one core / three pinned contexts | 4.0 ms · **707 fps** |
+| Detection pipeline, sync / async (3 workers, one per core) | 99 fps · **481 fps** (4.86x, results field-identical to sync and in order) |
+| 1080p H.264 decode / 4K H.265 decode | **324 fps** · **244 fps**, every frame carrying a dma-buf fd |
+| 1080p H.264 encode straight from decoded frames | **197 fps**, round-trip luma PSNR 47.2 dB |
+| YOLOv8n / YOLO11n on `bus.jpg` | each independently finds 1 bus + 4 people |
 
 ```python
 import rcdl, numpy as np
@@ -68,12 +78,12 @@ std::vector<float> logits = e.outputAsFloat(0);
 |---|---|---|
 | `core/` | `DmaBuf` (dma-heap RAII + cache sync) · `Status` | ✅ M0 |
 | `backend/` | `Engine` (zero-copy I/O · dequant · core masks · dup) · output readers | ✅ M0 |
-| `preproc/` | RGA letterbox / resize / cvtColor + CPU fallback | M1 |
-| `media/` | MPP H.264 / H.265 / JPEG codecs | M2 |
-| `tasks/` | det · cls · pose · seg · obb · ocr · depth … | M1 / M4 |
-| `tracks/` | ByteTrack | M3 |
-| `pipeline/` | sync / async detection · tracking · video end-to-end | M3 |
-| `python/` | nanobind bindings (GIL released in infer) | ✅ M0 (Engine) |
+| `preproc/` | RGA letterbox / resize / cvtColor + CPU fallback | ✅ M1 |
+| `media/` | MPP H.264 / H.265 / VP9 / AV1 / JPEG codecs, external buffer group | ✅ M2 |
+| `tasks/` | det · cls · pose · instance seg · semantic seg · obb · depth · embedding | ✅ M1 / M4 |
+| `tracks/` | ByteTrack + BoT-SORT appearance association · ReID | ✅ M3 |
+| `pipeline/` | sync / async detection (multi-core `EnginePool`) | ✅ M3 |
+| `python/` | nanobind bindings (GIL released in infer) | ✅ |
 
 ## Quick start
 
@@ -117,6 +127,10 @@ See [`models/README.md`](models/README.md).
 | Doc | Covers |
 |---|---|
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | BCDL → RCDL stack mapping, milestones, RK3588 hardware notes |
+| [`docs/API.md`](docs/API.md) | Python API |
+| [`docs/CPP_API.md`](docs/CPP_API.md) | C++ API |
+| [`docs/RGA.md`](docs/RGA.md) | What the 2-D engine will and will not do — including three limits that are not in the vendor documentation |
+| [`docs/MODELS.md`](docs/MODELS.md) | Model registry, each model's input order and activation placement, measured performance |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setup, building (on the board), testing, submitting changes |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes (Keep a Changelog / SemVer) |
 

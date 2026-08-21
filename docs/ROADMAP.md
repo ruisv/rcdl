@@ -59,43 +59,73 @@ Each milestone ends with a board-verified result and a pinned test.
   *Verified on RK3588 (librknnrt 2.3.2 / driver 0.9.8): ResNet18 int8 4.0 ms on
   one core; 3 pinned contexts 707 fps aggregate.*
 
-- **M1 — detection end-to-end (NPU + RGA)**
+- **M1 — detection end-to-end (NPU + RGA)** ✅
   `preproc/rga`: `RgaLetterbox` (NV12/BGR → RGB888 letterbox into the NPU input
   dma-buf in one `improcess`), `RgaResize`, `RgaCvtColor`, CPU/OpenCV fallback
   behind `RCDL_HAVE_RGA`. `tasks/detection`: LTRB multi-scale + DFL decode +
   per-class NMS ported from BCDL; `DetectionPipeline` (sync, buffer reuse).
-  Verify: YOLOv8n/YOLO11n `.rknn` on `bus.jpg` — boxes match the toolkit
-  simulator (cosine > 0.99 on raw head outputs); RGA letterbox bit-matches the
-  CPU reference within ±1 LSB. numpy `decode_detections` test pinned.
+  *Verified: YOLOv8n and YOLO11n independently find 1 bus + 4 people on
+  `bus.jpg`. RGA and the CPU reference agree to ±1 LSB on a linear ramp at every
+  downscale factor, and to ≤5 LSB on band-limited content — but NOT on content
+  that aliases, because RGA pre-filters when it shrinks and bilinear does not.
+  End to end that means the two backends find the same objects and agree to
+  ~1.5 px on confident boxes, while marginal detections move materially. All of
+  that is measured in `docs/RGA.md` rather than assumed.*
 
-- **M2 — media: MPP codecs, zero-copy**
+- **M2 — media: MPP codecs, zero-copy** ✅
   `media/VideoDecoder` (H.264/H.265 → NV12 dma-bufs, external buffer group,
   reorder-correct), `VideoEncoder` (NV12/RGB dma-buf → H.264/H.265), `JpegCodec`
-  (MJPEG enc/dec). Verify: decode → RGA → NPU without a memcpy (fd hand-off),
-  1080p decode/encode round-trip PSNR, per-frame zero allocations.
+  (MJPEG enc/dec). *Verified: 1080p H.264 decode 324 fps, 4K H.265 244 fps,
+  1080p H.264 encode 197 fps reading the decoder's dma-bufs in place — every
+  frame carries an fd, so decode → RGA → NPU → encode never copies. Round-trip
+  luma PSNR 47.2 dB. Hardware JPEG matches libjpeg to 0.02 mean luma.*
 
-- **M3 — pipelines + multi-core**
+- **M3 — pipelines + multi-core** ✅ (async detection, `EnginePool`, ByteTrack)
   `AsyncDetectionPipeline` (preproc ‖ infer ‖ decode, bounded channels, FIFO),
   `EnginePool` (N dup'd contexts on cores 0/1/2, round-robin), `TrackingPipeline`
   (ByteTrack), `AsyncVideoDetectionPipeline` (VPU → RGA → NPU → overlay → VPU).
-  Verify: async returns sync-identical results in order; throughput within ~10%
-  of `max(stage)` bound; 1080p H.264 → detect → H.264 end-to-end fps published.
+  *Verified: the async pipeline returns results field-identical to the
+  synchronous one, in submission order, at 481 fps against 99 fps — a 4.86x
+  speed-up on three pinned contexts. `TrackingPipeline` holds stable ids across
+  a panning sequence — 3 objects, 3 ids, no churn over 24 frames — and takes a
+  decoded `VideoFrame` without copying it.* `AsyncVideoDetectionPipeline` is not
+  built as a class; `video_det_demo` covers the VPU → RGA → NPU → overlay → VPU
+  path as an example.
 
-- **M4 — task breadth**
+- **M4 — task breadth** ✅
   Port the BCDL task heads that map cleanly: classification, pose, instance
   seg, OBB, semantic seg, depth, OCR (DBNet + CTC), embedding/ReID, face. Each:
   pure-function decoder + numpy test + board test + one `.rknn` in the model
-  registry. Also RK-specific: native NC1HWC2 output path benchmark (use if it
-  wins), dynamic-shape inputs (`rknn_set_input_shapes`).
+  registry. *Verified against real models: instance seg agrees with detection on
+  `bus.jpg` (1 bus + 4 people) with plausible mask coverage; PP-LiteSeg resolves
+  a Cityscapes street into 11 classes; pose lands all 17 keypoints on the right
+  body parts; OBB finds 4 planes and ~24 vehicles at a consistent angle.*
+  *The native NC1HWC2 output path was benchmarked and **rejected**: binding
+  outputs with `RKNN_QUERY_NATIVE_OUTPUT_ATTR` instead of the standard attrs is
+  within noise on YOLOv8n and ResNet-18 (−1%) and **23.6% slower** on
+  YOLOv8n-seg, while producing larger buffers (NC1HWC2 padding) and requiring a
+  de-swizzle in every decoder. The runtime's own conversion is not the
+  bottleneck, so RCDL keeps the standard NCHW binding.* Dynamic-shape inputs
+  (`rknn_set_input_shapes`) remain to do.
 
-- **M5 — Python surface + docs**
-  Full nanobind coverage of tasks/pipelines (GIL released), `API.md` /
-  `CPP_API.md`, `MODELS.md`, `RGA.md` (alignment / size limits / formats).
+  Worth knowing: the deployed **pose and OBB exports fuse box and class into one
+  tensor per scale and leave the class sigmoid on the CPU**, unlike the detection
+  export. The decoders read the model's own signature and handle both shapes —
+  see `docs/MODELS.md`.
+
+- **M5 — Python surface + docs** ✅
+  nanobind coverage of the engine, preprocessing, codecs, tracking and the task
+  heads (GIL released around anything that touches hardware);
+  [`API.md`](API.md), [`CPP_API.md`](CPP_API.md), [`MODELS.md`](MODELS.md),
+  [`RGA.md`](RGA.md).
 
 - **M6 — packaging + release**
   conda recipes (`librknnrt`, `librga`, `rockchip-mpp`, `librcdl` + `rcdl`) for
   linux-aarch64 across Python 3.9–3.14, board validation of the packages, pip
   wheel, tagged 0.1.0. Benchmarks page with the annotated-figure gallery.
+  *The pip wheel is done and validated on the board: the installed package —
+  not the build tree — reports RGA and MPP available and runs detection end to
+  end. The conda recipes live in a separate feedstock and are still to do.*
 
 - **Later** — camera (V4L2/rkaiq) source, RK3576 / RK356x validation, LLM/VLM
   via `rknn-llm` (separate project, as BLLM is to BCDL), ROS 2 nodes.

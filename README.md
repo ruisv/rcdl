@@ -14,8 +14,18 @@
 
 RCDL 是 [BCDL](https://github.com/ruisv/bcdl)（RDK BPU）的 Rockchip 对应版：同一套
 `Engine` + 任务类的心智模型、同样的零拷贝流水线思路，底层换成 RK3588 系列的
-NPU / RGA / VPU。**项目处于早期开发阶段**，目前完成了 M0（骨架 + 推理引擎），
-路线图见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+NPU / RGA / VPU。**项目处于早期开发阶段**，路线图见
+[`docs/ROADMAP.md`](docs/ROADMAP.md)。
+
+RK3588S 实测（librknnrt 2.3.2 / 驱动 0.9.8）：
+
+| | |
+|---|---|
+| ResNet-18 int8，单核 / 三核并发 | 4.0 ms · **707 fps** |
+| 检测流水线，同步 / 异步（3 worker 各钉一核） | 99 fps · **481 fps**（4.86×，结果与同步逐字段一致且保序） |
+| 1080p H.264 解码 / 4K H.265 解码 | **324 fps** · **244 fps**，每帧都带 dma-buf fd |
+| 1080p H.264 编码（直接读解码帧的 fd） | **197 fps**，往返亮度 PSNR 47.2 dB |
+| YOLOv8n / YOLO11n on `bus.jpg` | 各自独立得到 1 bus + 4 person |
 
 ```python
 import rcdl, numpy as np
@@ -68,12 +78,12 @@ std::vector<float> logits = e.outputAsFloat(0);
 |---|---|---|
 | `core/` | `DmaBuf`（dma-heap RAII + cache sync）· `Status` | ✅ M0 |
 | `backend/` | `Engine`（零拷贝 I/O · 反量化 · 核掩码 · dup）· 输出读取 | ✅ M0 |
-| `preproc/` | RGA letterbox / resize / cvtColor + CPU 回退 | M1 |
-| `media/` | MPP H.264 / H.265 / JPEG 编解码 | M2 |
-| `tasks/` | det · cls · pose · seg · obb · ocr · depth … | M1 / M4 |
-| `tracks/` | ByteTrack | M3 |
-| `pipeline/` | 同步 / 异步检测 · 跟踪 · 视频端到端 | M3 |
-| `python/` | nanobind 绑定（推理时释放 GIL） | ✅ M0（Engine） |
+| `preproc/` | RGA letterbox / resize / cvtColor + CPU 回退 | ✅ M1 |
+| `media/` | MPP H.264 / H.265 / VP9 / AV1 / JPEG 编解码，外部 buffer group | ✅ M2 |
+| `tasks/` | det · cls · pose · instance-seg · semseg · obb · depth · embedding | ✅ M1 / M4 |
+| `tracks/` | ByteTrack + BoT-SORT 外观关联 · ReID | ✅ M3 |
+| `pipeline/` | 同步 / 异步检测（EnginePool 多核） | ✅ M3 |
+| `python/` | nanobind 绑定（推理时释放 GIL） | ✅ |
 
 ## 快速上手
 
@@ -85,6 +95,10 @@ scripts/build.sh                     # cmake + ninja → build/
 ./build/model_info models/resnet18_rk3588.rknn        # I/O 签名、运行时/驱动版本、延迟
 ./build/npu_bench  models/resnet18_rk3588.rknn 5 0,1,2   # 三核并发吞吐
 ./build/dma_buf_probe                                   # dma-heap 是否对当前用户可用
+./build/det_demo   models/yolov8n_rk3588.rknn data/images/bus.jpg out.jpg   # 检测 + 画框
+./build/video_decode  clip.h264 --frames 300            # VPU 解码吞吐 + 零拷贝确认
+./build/video_det_demo models/yolov8n_rk3588.rknn clip.h264 --out out.h264  # VPU→RGA→NPU→VPU
+./build/async_bench models/yolov8n_rk3588.rknn data/images/bus.jpg          # 三核吞吐对比
 PYTHONPATH=build:python python -m pytest tests/ --model models/resnet18_rk3588.rknn
 ```
 
@@ -116,6 +130,10 @@ RCDL 只消费编译好的 `.rknn`。ONNX → `.rknn`（rknn-toolkit2 PTQ、精�
 | 文档 | 内容 |
 |---|---|
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 架构映射（BCDL → RCDL）、里程碑、RK3588 硬件要点 |
+| [`docs/API.md`](docs/API.md) | Python API |
+| [`docs/CPP_API.md`](docs/CPP_API.md) | C++ API |
+| [`docs/RGA.md`](docs/RGA.md) | RGA 能做什么、不能做什么（含三条文档没写、实测才发现的限制） |
+| [`docs/MODELS.md`](docs/MODELS.md) | 模型登记表、每个模型的输入通道序与激活位置、实测性能 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 如何搭建、构建（在板上）、测试并提交改动 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 发布说明（Keep a Changelog / SemVer） |
 
