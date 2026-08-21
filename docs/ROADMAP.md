@@ -200,7 +200,16 @@ with a board-verified result and a pinned test.
   Its preprocessing is **not** the letterbox the rest of the library uses — PP-OCR
   fits the crop to the model's height and pads to the right, and a centred
   letterbox costs 16/16 → 9/16 on the same lines (see
-  [`MODELS.md`](MODELS.md)). Still to do: PP-OCRv5/v6 detection and recognition.
+  [`MODELS.md`](MODELS.md)).
+
+  PP-OCRv5 was then converted and measured. The **detector** ships as a
+  non-regression — same regions, same text, same confidence as v4 on the sample
+  page, pinned by a parity test — while the **recogniser cannot be deployed on
+  this board at all**: correct in the toolkit's simulator (0.9997 mean winning
+  probability), 1 line in 16 correct on the NPU in float16, worse in int8, and
+  int16 fails to submit its first Conv on this driver. PP-OCRv4 therefore stays
+  the deployed recogniser, and the search for a newer one that survives float16
+  moves to the model-zoo side. The numbers are in [`MODELS.md`](MODELS.md).
 
 - **M8 — face recognition**
   An ArcFace-style identity embedding on top of the existing detector: the

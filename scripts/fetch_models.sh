@@ -35,6 +35,11 @@ REGISTRY=(
   # between the detector and the recogniser: a CTC model fed an upside-down line
   # reads out confident nonsense rather than failing. See docs/MODELS.md.
   "ppocr_cls_rk3588.rknn|convert|ppocr_cls_rk3588.rknn"
+  # PP-OCRv5 mobile detection. Measures identical to the v4 detector on the
+  # sample page (same boxes, same text); kept as the newer alternative and
+  # pinned by a parity test. There is no v5 recogniser here on purpose — see
+  # docs/MODELS.md for what the board does to it.
+  "ppocrv5_det_rk3588.rknn|convert|ppocrv5_det_rk3588.rknn"
   "ppseg_rk3588.rknn|convert|ppseg_rk3588.rknn"
   "retinaface_rk3588.rknn|convert|retinaface_rk3588.rknn"
   "resnet18_rk3588.rknn|convert|resnet18_rk3588.rknn"

@@ -46,12 +46,42 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `ppocrv4_det_rk3588.rknn` | text detection | DBNet probability map | — | thresholded map → contours → unclipped quads |
 | `ppocrv4_rec_rk3588.rknn` | text recognition | CRNN | — | CTC greedy decode against `data/ppocr_keys_*.txt` |
 | `ppocr_cls_rk3588.rknn` | text-line direction | 192×48 u8 | **bgr** | `[1,2]` f16, **softmax in-graph**: argmax is the label (0 upright / 1 rotated 180°), its value the score |
+| `ppocrv5_det_rk3588.rknn` | text detection | 480×480 u8 | rgb | as the v4 detector, and measurably the same on the sample page — see below |
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
 | `resnet18_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]`, softmax on the CPU |
 | `depth_anything_v2_vits_308_rk3588.rknn` | monocular depth | 308×308 u8 | rgb | `[1,308,308]` int8 — **relative inverse depth (disparity, big = near)**, no activation. ImageNet mean/std baked into the `.rknn` preprocessing, so the NPU takes raw u8 RGB |
 | `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
 | `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
+
+**PP-OCRv5: the detector ships, the recogniser cannot.** Both were converted
+from the PaddleOCR 3.x mobile exports with the same recipes used for v4.
+
+*Detection* is a straight non-regression: 480×480 int8, and on
+`data/images/ocr.jpg` it finds the same 16 regions as the v4 build, which yield
+the same 15 strings at the same mean confidence. No improvement is demonstrable
+on one page, so that is all this claims; the parity is pinned by a test so a
+future divergence surfaces.
+
+*Recognition* is the interesting failure, and it is a hardware one:
+
+| build | result on the 16 sample lines |
+|---|---|
+| Paddle fp32 (the original) | 16/16 exact, scores 0.95–0.999 |
+| RKNN float16, **toolkit simulator** | matches the original, mean winning probability 0.9997 |
+| RKNN float16, **on the NPU** | **1/16 exact**, mean 0.28, characters dropped mid-line |
+| RKNN int8 | 0/16, mean 0.21 |
+| RKNN int16 | `rknn_run` fails to submit at the first Conv on this driver |
+
+The graph converts correctly — the simulator proves that — and the board still
+gets it wrong: fed the identical input tensor, the NPU returns a flattened
+softmax (peak 0.47 where the simulator has 1.00) and the argmax at the first
+character collapses to the CTC blank. An 18385-class head in float16 is past
+what this runtime keeps accurate, and neither quantization escape is open. So
+**PP-OCRv4 remains the deployed recogniser** and the v5 build is not in the
+registry. This is the sharper form of a lesson already in this file: a model
+that compiles, and even one that a simulator reproduces exactly, is not
+therefore a model that works.
 
 **The direction classifier is fed differently from everything else, and it
 matters.** PP-OCR fits a line crop to the model's HEIGHT, caps the width at the

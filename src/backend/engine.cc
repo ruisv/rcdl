@@ -103,12 +103,19 @@ void Engine::setupIo() {
       case RKNN_TENSOR_UINT8:
         t.io_attr.type = RKNN_TENSOR_UINT8;
         break;
+      case RKNN_TENSOR_INT16:
+        // A 16-bit quantized input cannot take image bytes, and asking the
+        // caller for pre-quantized int16 would push the tensor's scale and
+        // zero-point into every call site. Present float32 and let the runtime
+        // quantize, exactly as it does for a float model. This is the precision
+        // an OCR recognition head needs: the same PP-OCRv5 export in float16
+        // comes out of the NPU with a flattened softmax and dropped characters.
       case RKNN_TENSOR_FLOAT16:
       case RKNN_TENSOR_FLOAT32:
         t.io_attr.type = RKNN_TENSOR_FLOAT32;
         break;
       default:
-        break;  // keep as is (int16/int32 inputs are rare; provide the model's type)
+        break;  // keep as is (int32 inputs are rare; provide the model's type)
     }
     if (t.io_attr.fmt == RKNN_TENSOR_NC1HWC2 || t.io_attr.fmt == RKNN_TENSOR_UNDEFINED) {
       t.io_attr.fmt = RKNN_TENSOR_NHWC;

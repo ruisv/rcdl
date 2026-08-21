@@ -487,6 +487,51 @@ def _ocr_line_crops(rcdl, img):
     return crops
 
 
+def test_the_v5_detector_agrees_with_the_v4_one(rcdl):
+    """Two detector generations, one page, the same answer.
+
+    A newer model is only an upgrade if it is at least as good, and on the one
+    text page this project carries the two are indistinguishable: 16 regions
+    each, 15 of which carry text, and the SAME 15 strings out of the (v4)
+    recogniser at the same mean confidence. That is the honest result — not a
+    demonstrated improvement, but a demonstrated non-regression, which is what
+    justifies keeping the newer build in the registry. The test is the parity
+    itself: if a future toolkit or calibration change moves one of them, this
+    fails rather than the difference going unnoticed.
+    """
+    need(rcdl, "TextDetector", "TextRecognizer")
+    import os
+    v5 = bm.find_model("ppocrv5_det_rk3588.rknn")
+    if v5 is None:
+        pytest.skip("PP-OCRv5 detection model not staged")
+    rec_model = bm.require_model("ppocrv4_rec_rk3588.rknn")
+    dict_path = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")
+    if not os.path.isfile(dict_path):
+        pytest.skip(f"character dictionary missing: {dict_path}")
+
+    img = bm.load_bgr("ocr.jpg")
+    rec = rcdl.Engine(rec_model).text_recognizer(dict_path)
+
+    def read(det_model):
+        det = rcdl.Engine(det_model).text_detector()
+        boxes = sorted(rcdl.detect_text(det, img, "bgr888"), key=lambda b: (b.y1, b.x1))
+        out = []
+        for b in boxes:
+            c = _warp_upright(img, b)
+            if c.shape[0] < 6 or c.shape[1] < 12:
+                continue
+            line = rcdl.recognize_text(rec, c, "bgr888")
+            if line.text:
+                out.append(line.text)
+        return len(boxes), out
+
+    n4, t4 = read(bm.require_model("ppocrv4_det_rk3588.rknn"))
+    n5, t5 = read(v5)
+    assert n5 == n4, f"v5 found {n5} regions, v4 found {n4}"
+    assert t5 == t4, f"the two detectors led to different text:\n  v4 {t4}\n  v5 {t5}"
+    assert len(t5) >= 14, f"only {len(t5)} lines came back — the page should give 15"
+
+
 def test_text_angle_classifier_reads_the_direction_of_every_line(rcdl):
     """Both orientations of all 16 sample lines, called right every time.
 

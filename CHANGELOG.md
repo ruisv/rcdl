@@ -199,6 +199,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   192×48 BGR, int8), calibrated on line crops cut by RCDL's own detector and
   checked against the Paddle fp32 original — 100% label agreement on a held-out
   split, probability MAE 0.0000.
+- `ppocrv5_det_rk3588.rknn` — the PP-OCRv5 mobile detector, kept as the newer
+  build with a parity test rather than a claimed improvement: on the sample page
+  it finds the same 16 regions as the v4 detector and they yield the same 15
+  strings. Its recogniser counterpart is deliberately **not** in the registry —
+  correct in the toolkit's simulator and wrong on the NPU (1/16 lines exact in
+  float16, 0/16 in int8, int16 refuses to run), so PP-OCRv4 stays the deployed
+  recogniser. See `docs/MODELS.md` for the table.
+- `Engine` now presents an **int16** quantized input as float32 rather than
+  handing the caller raw int16, so a 16-bit model's scale and zero-point do not
+  leak into every call site. (The only int16 model built so far cannot run on
+  this driver, which is how the mapping came to be needed and why it is not
+  demonstrated end to end.)
 
 ### Fixed
 
