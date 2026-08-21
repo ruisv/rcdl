@@ -85,6 +85,8 @@ std::vector<float> logits = e.outputAsFloat(0);
 | `pipeline/` | sync / async detection (multi-core `EnginePool`) | ✅ M3 |
 | `python/` | nanobind bindings (GIL released in infer) | ✅ |
 
+Benchmarks (measured on the board, regenerable): [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+
 ## Quick start
 
 On the board (aarch64 with `librknnrt` / `librga` / `librockchip_mpp`):

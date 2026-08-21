@@ -321,6 +321,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not model fp16 arithmetic, and a uniform shift cannot see the difference.*
   Each GridSample sits between two NPU subgraphs, so a frame costs about 1.4 s:
   this head is correct, not fast.
+- `benchmarks/bench.py` + `benchmarks/RESULTS.md` — every registered model timed
+  on the board, with the numbers regenerable rather than quoted from a session.
+  Two columns and the second is the point: `infer` is the NPU alone, `e2e` is the
+  whole task, because for several heads here the post-processing is the larger
+  half (instance segmentation spends three quarters of its time assembling masks;
+  XFeat spends ~190 ms matching against ~44 ms of inference). A third column says
+  what each model actually FOUND, so a build that got faster and stopped finding
+  the bus cannot read as an improvement. Regeneration replaces only the table and
+  leaves the prose that explains it.
 - `tasks/wholebody` — top-down whole-body pose: one person's box in, the
   COCO-WholeBody 133 keypoints out (17 body, 6 feet, 68 face, 21 per hand).
   `cropGeometry` (the box padded by 1.25 and then GROWN to the model's aspect,

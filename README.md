@@ -85,6 +85,8 @@ std::vector<float> logits = e.outputAsFloat(0);
 | `pipeline/` | 同步 / 异步检测（EnginePool 多核） | ✅ M3 |
 | `python/` | nanobind 绑定（推理时释放 GIL） | ✅ |
 
+基准测试（板端实测，可重跑）：[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md)。
+
 ## 快速上手
 
 在板上（aarch64，已带 `librknnrt` / `librga` / `librockchip_mpp`）：
