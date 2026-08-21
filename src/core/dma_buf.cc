@@ -126,13 +126,23 @@ void* DmaBuf::data() {
   return map_;
 }
 
-void DmaBuf::sync(bool start, bool read, bool write) const {
-  RCDL_REQUIRE(valid(), "DmaBuf::sync on an empty buffer");
+namespace {
+void syncFd(int fd, bool start, bool read, bool write) {
+  if (fd < 0) return;  // host-only buffer: nothing to keep coherent
   dma_buf_sync s{};
   s.flags = (start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END);
   if (read) s.flags |= DMA_BUF_SYNC_READ;
   if (write) s.flags |= DMA_BUF_SYNC_WRITE;
-  if (::ioctl(fd_, DMA_BUF_IOCTL_SYNC, &s) < 0) throwErrno("DMA_BUF_IOCTL_SYNC", "");
+  if (::ioctl(fd, DMA_BUF_IOCTL_SYNC, &s) < 0) throwErrno("DMA_BUF_IOCTL_SYNC", "");
+}
+}  // namespace
+
+void dmaBufSyncStart(int fd, bool read, bool write) { syncFd(fd, true, read, write); }
+void dmaBufSyncEnd(int fd, bool read, bool write) { syncFd(fd, false, read, write); }
+
+void DmaBuf::sync(bool start, bool read, bool write) const {
+  RCDL_REQUIRE(valid(), "DmaBuf::sync on an empty buffer");
+  syncFd(fd_, start, read, write);
 }
 
 void DmaBuf::syncStart(bool read, bool write) const { sync(true, read, write); }

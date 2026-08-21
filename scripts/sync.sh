@@ -16,10 +16,20 @@ DEST="${RCDL_BOARD_DEST:-projects/rcdl}"   # relative to board $HOME
 
 ssh "$BOARD" "mkdir -p ${DEST}"
 echo ">> sync ${PROJ} -> ${BOARD}:${DEST}"
+# The root .md files are whitelisted in .gitignore with `!/README*.md` and
+# friends, but rsync's gitignore filter does NOT honour those negations the way
+# git does — it drops them, and then a board-side `pip install .` fails with
+# "Readme file not found". Include them explicitly, BEFORE the gitignore filter,
+# since the first matching rule wins.
 rsync -az --delete \
   --exclude '.git/' \
   --include 'third_party/' \
   --include 'third_party/rknpu2/***' \
+  --include '/README.md' \
+  --include '/README.en.md' \
+  --include '/CHANGELOG.md' \
+  --include '/CONTRIBUTING.md' \
+  --include '/LICENSE' \
   --filter ':- .gitignore' \
   --filter 'protect models/*' \
   --filter 'protect build/' \

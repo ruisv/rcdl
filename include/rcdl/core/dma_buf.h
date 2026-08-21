@@ -23,6 +23,13 @@ namespace rcdl {
 /// Uncached heaps skip both at the cost of slow CPU access. The RKNN runtime
 /// flushes its own I/O tensors around rknn_run, so a DmaBuf only handed to the
 /// NPU needs none of this; one the CPU touches between hardware stages does.
+/// Cache maintenance on a bare dma-buf fd, for code that holds an ImageView (a
+/// non-owning descriptor) rather than the DmaBuf itself — the RGA and media
+/// layers, which are handed buffers allocated elsewhere (the RKNN runtime, MPP).
+/// Both are no-ops for fd < 0, so a host-only buffer needs no special case.
+void dmaBufSyncStart(int fd, bool read = true, bool write = true);
+void dmaBufSyncEnd(int fd, bool read = true, bool write = true);
+
 class DmaBuf {
  public:
   enum class Heap {

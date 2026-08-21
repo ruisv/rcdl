@@ -60,7 +60,11 @@ add_library(rcdl SHARED
   src/core/status.cc
   src/core/dma_buf.cc
   src/backend/engine.cc
-  src/backend/output_reader.cc)
+  src/backend/output_reader.cc
+  src/preproc/image.cc
+  src/preproc/rga.cc
+  src/preproc/letterbox_cpu.cc
+  src/preproc/letterbox.cc)
 add_library(rcdl::rcdl ALIAS rcdl)
 
 configure_file(
