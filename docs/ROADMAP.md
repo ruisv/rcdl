@@ -105,8 +105,14 @@ Each milestone ends with a board-verified result and a pinned test.
   within noise on YOLOv8n and ResNet-18 (−1%) and **23.6% slower** on
   YOLOv8n-seg, while producing larger buffers (NC1HWC2 padding) and requiring a
   de-swizzle in every decoder. The runtime's own conversion is not the
-  bottleneck, so RCDL keeps the standard NCHW binding.* Dynamic-shape inputs
-  (`rknn_set_input_shapes`) remain to do.
+  bottleneck, so RCDL keeps the standard NCHW binding.*
+
+  Dynamic-shape inputs (`rknn_set_input_shapes`) are **not implemented, and not
+  for lack of trying**: whether a model accepts them is fixed at conversion
+  time, and querying `RKNN_QUERY_INPUT_DYNAMIC_RANGE` on all ten models in the
+  registry returns `-6` on every one — none was built with `dynamic_input`.
+  Adding the API without a model that exercises it would ship untested code, so
+  it waits for the model-zoo side to produce one.
 
   Worth knowing: the deployed **pose and OBB exports fuse box and class into one
   tensor per scale and leave the class sigmoid on the CPU**, unlike the detection
