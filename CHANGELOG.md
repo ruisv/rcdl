@@ -321,6 +321,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not model fp16 arithmetic, and a uniform shift cannot see the difference.*
   Each GridSample sits between two NPU subgraphs, so a frame costs about 1.4 s:
   this head is correct, not fast.
+- `rcdl::floatToHalf` beside the existing `halfToFloat` (Python:
+  `rcdl.float_to_half`) — the direction a CPU kernel writes in when the graph
+  around it carries fp16. It sits on a hardware path, so it is checked against
+  numpy's own conversion over 8k values including subnormals, the largest
+  normal, and overflow to infinity, rather than a handful of spot values.
 
 ### Fixed
 

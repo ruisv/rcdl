@@ -44,6 +44,35 @@ const char* dtypeName(rknn_tensor_type type) noexcept {
   }
 }
 
+std::uint16_t floatToHalf(float f) noexcept {
+  // Round-to-nearest-even, with the subnormal and overflow cases the flow
+  // tensors actually reach; this is the inverse of halfToFloat().
+  std::uint32_t x;
+  std::memcpy(&x, &f, sizeof(x));
+  const std::uint32_t sign = (x >> 16) & 0x8000u;
+  std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+  std::uint32_t mant = x & 0x7FFFFFu;
+
+  if (((x >> 23) & 0xFFu) == 0xFFu) {  // inf / nan
+    return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
+  }
+  if (exp >= 0x1F) return static_cast<std::uint16_t>(sign | 0x7C00u);  // overflow -> inf
+  if (exp <= 0) {
+    if (exp < -10) return static_cast<std::uint16_t>(sign);            // underflow -> 0
+    mant |= 0x800000u;
+    const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
+    const std::uint32_t sub = mant >> shift;
+    const std::uint32_t rem = mant & ((1u << shift) - 1);
+    const std::uint32_t half = 1u << (shift - 1);
+    return static_cast<std::uint16_t>(
+        sign | (sub + ((rem > half || (rem == half && (sub & 1))) ? 1 : 0)));
+  }
+  const std::uint32_t out = (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13);
+  const std::uint32_t rem = mant & 0x1FFFu;
+  return static_cast<std::uint16_t>(
+      sign | (out + ((rem > 0x1000u || (rem == 0x1000u && (out & 1))) ? 1 : 0)));
+}
+
 float halfToFloat(std::uint16_t h) noexcept {
   // IEEE 754 binary16 -> binary32, handling subnormals / inf / nan.
   std::uint32_t sign = (static_cast<std::uint32_t>(h) & 0x8000u) << 16;

@@ -743,6 +743,24 @@ NB_MODULE(rcdl_py, m) {
           },
           "n"_a, "offset"_a = 0);
 
+  m.def(
+      "float_to_half",
+      [](const Contig& v) {
+        if (v.dtype() != nb::dtype<float>()) {
+          throw std::invalid_argument("float_to_half: expected a float32 array");
+        }
+        const std::size_t n = elemCount(v);
+        const float* src = static_cast<const float*>(v.data());
+        std::vector<std::uint16_t> out(n);
+        for (std::size_t i = 0; i < n; ++i) out[i] = rcdl::floatToHalf(src[i]);
+        std::vector<std::size_t> shape;
+        for (std::size_t d = 0; d < v.ndim(); ++d) shape.push_back(v.shape(d));
+        return ownedArray<std::uint16_t>(out.data(), shape);
+      },
+      "values"_a,
+      "fp32 -> fp16 bit patterns (uint16), round-to-nearest-even. The direction a "
+      "custom-op kernel needs when a graph carries fp16 between its stages.");
+
   m.def("dequantize", [](nb::bytes raw, const std::string& dtype, int qnt_type, int zp, float scale,
                          int fl) {
     rknn_tensor_attr a{};

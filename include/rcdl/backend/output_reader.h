@@ -21,6 +21,15 @@ const char* dtypeName(rknn_tensor_type type) noexcept;
 /// Convert one fp16 (IEEE binary16) value to fp32.
 float halfToFloat(std::uint16_t h) noexcept;
 
+/// Convert one fp32 value to fp16 (IEEE binary16), round-to-nearest-even.
+///
+/// The inverse of halfToFloat(), and the direction a CPU kernel needs when it
+/// has to hand results back to a graph that carries fp16 between its stages
+/// (backend/custom_ops.h). Subnormals and overflow are handled rather than
+/// clamped: a flow field that saturates to inf would be worse than one that
+/// loses a bit of precision.
+std::uint16_t floatToHalf(float f) noexcept;
+
 /// Dequantize / convert `n` elements of an output tensor into float32.
 ///
 /// Handles the RKNN output encodings:
