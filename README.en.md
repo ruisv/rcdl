@@ -80,7 +80,7 @@ std::vector<float> logits = e.outputAsFloat(0);
 | `backend/` | `Engine` (zero-copy I/O · dequant · core masks · dup) · output readers | ✅ M0 |
 | `preproc/` | RGA letterbox / resize / cvtColor + CPU fallback | ✅ M1 |
 | `media/` | MPP H.264 / H.265 / VP9 / AV1 / JPEG codecs, external buffer group | ✅ M2 |
-| `tasks/` | det · cls · pose · instance seg · semantic seg · obb · depth · embedding | ✅ M1 / M4 |
+| `tasks/` | det · cls · pose · instance seg · semantic seg · obb · depth · embedding · ocr · face · sparse features | ✅ M1 / M4 / M7–M10 |
 | `tracks/` | ByteTrack + BoT-SORT appearance association · ReID | ✅ M3 |
 | `pipeline/` | sync / async detection (multi-core `EnginePool`) | ✅ M3 |
 | `python/` | nanobind bindings (GIL released in infer) | ✅ |

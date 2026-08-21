@@ -34,6 +34,7 @@
 #include "rcdl/tasks/depth.h"
 #include "rcdl/tasks/ocr.h"
 #include "rcdl/tasks/face.h"
+#include "rcdl/tasks/features.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"
 #include "rcdl/backend/engine_pool.h"

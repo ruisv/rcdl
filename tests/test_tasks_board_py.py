@@ -1214,3 +1214,138 @@ def test_tracking_reset_restarts_the_ids(rcdl):
     assert min(ids_kept) > 1, (
         f"without reset the new scene should get fresh ids counting on from the old "
         f"tracklets, got {sorted(ids_kept)} — the control is not controlling anything")
+
+
+# --------------------------------------------------------------------------- #
+# Sparse local features — XFeat                                                #
+# --------------------------------------------------------------------------- #
+XFEAT_MODEL = "xfeat_640x480_i8_rk3588.rknn"
+
+
+def _xfeat(rcdl, **cfg_kw):
+    """An extractor on the XFeat model, opened the one way that works.
+
+    `float_inputs=[0]` is not a tuning knob: this model's input is an
+    InstanceNorm output, roughly ±3, and the u8 path a quantized model normally
+    takes has no negative range at all to put half of that in.
+    """
+    model = bm.require_model(XFEAT_MODEL)
+    cfg = rcdl.XfeatConfig()
+    for k, v in cfg_kw.items():
+        setattr(cfg, k, v)
+    engine = rcdl.Engine(model, float_inputs=[0])
+    return engine, engine.feature_extractor(config=cfg)
+
+
+def _warped(img, angle=12.0, scale=0.85, tx=25.0, ty=-15.0):
+    """A known rotation+scale of `img`, and the 2x3 that produced it."""
+    cv2 = pytest.importorskip("cv2")
+    h, w = img.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, scale)
+    m[0, 2] += tx
+    m[1, 2] += ty
+    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REFLECT), m
+
+
+def _at_model_size(rcdl, img, extractor):
+    cv2 = pytest.importorskip("cv2")
+    return cv2.resize(img, (extractor.input_width, extractor.input_height))
+
+
+def test_xfeat_matches_survive_a_known_warp(rcdl):
+    """The only head here whose ground truth can be MANUFACTURED.
+
+    Rotate and shrink a photograph by a known amount and every correspondence
+    has an exact right answer: where the warp says it should land. So this does
+    not assert "some matches were found" — a descriptor that returned noise
+    would still produce mutual nearest neighbours — it asserts that most of them
+    agree with the geometry, to within a few pixels.
+    """
+    need(rcdl, "FeatureExtractor", "match_features")
+    engine, ex = _xfeat(rcdl)
+    a = _at_model_size(rcdl, bm.load_bgr("bus.jpg"), ex)
+    b, warp = _warped(a)
+
+    fa = rcdl.extract_features(ex, a)
+    fb = rcdl.extract_features(ex, b)
+    pairs, scores = rcdl.match_features(fa, fb)
+    assert len(fa) > 500 and len(fb) > 500, f"only {len(fa)}/{len(fb)} features"
+    assert len(pairs) > 200, f"only {len(pairs)} matches"
+
+    pa = fa.xy[pairs[:, 0]]
+    pb = fb.xy[pairs[:, 1]]
+    proj = (warp[:, :2] @ pa.T).T + warp[:, 2]
+    h, w = a.shape[:2]
+    inside = ((proj[:, 0] >= 16) & (proj[:, 0] < w - 16) &
+              (proj[:, 1] >= 16) & (proj[:, 1] < h - 16))
+    err = np.linalg.norm(proj[inside] - pb[inside], axis=1)
+    frac = float((err < 3.0).mean())
+    print(f"\nXFeat vs a known warp: {len(fa)}+{len(fb)} features, {len(pairs)} matches, "
+          f"{int(inside.sum())} in frame, {frac:.1%} within 3 px, median {np.median(err):.2f} px")
+
+    # The float ONNX scores 0.774 on this pair; int8 measured 0.775. The gate is
+    # well under both, because it is guarding against a broken contract (wrong
+    # channel order, transposed cells, bilinear descriptors) rather than tracking
+    # the model's exact quality.
+    assert frac > 0.6, f"only {frac:.1%} of matches agree with the known warp"
+    assert float(np.median(err)) < 2.0
+
+
+def test_xfeat_refuses_an_engine_that_would_clip_its_input(rcdl):
+    """Opened without `float_inputs`, this model's input is presented as image
+    bytes and the negative half of the normalized map is silently clipped to the
+    zero point. Keypoints still come out and still look like keypoints, so the
+    head has to refuse rather than run."""
+    need(rcdl, "FeatureExtractor")
+    model = bm.require_model(XFEAT_MODEL)
+    engine = rcdl.Engine(model)           # the u8 default
+    assert engine.input_dtype(0) == np.uint8
+    with pytest.raises(Exception):
+        engine.feature_extractor()
+
+    ok = rcdl.Engine(model, float_inputs=[0])
+    assert ok.input_dtype(0) == np.float32
+    ok.feature_extractor()
+
+
+def test_xfeat_is_reproducible_frame_to_frame(rcdl):
+    """The same frame twice must give byte-identical features.
+
+    This repo has already been bitten by a silently non-deterministic
+    preprocessing path (a CPU-filled letterbox border racing the hardware that
+    wrote the rest of the tensor), where every unit was deterministic on its own
+    and only a full second run showed the difference.
+    """
+    need(rcdl, "FeatureExtractor")
+    _, ex = _xfeat(rcdl)
+    img = _at_model_size(rcdl, bm.load_bgr("zidane.jpg"), ex)
+    first = rcdl.extract_features(ex, img)
+    second = rcdl.extract_features(ex, img)
+    assert len(first) == len(second)
+    np.testing.assert_array_equal(first.xy, second.xy)
+    np.testing.assert_array_equal(first.scores, second.scores)
+    np.testing.assert_array_equal(first.descriptors, second.descriptors)
+
+
+def test_xfeat_descriptors_separate_a_place_from_another_place(rcdl):
+    """Matching two DIFFERENT scenes must not produce the same agreement.
+
+    Without this control, "1500 mutual matches" reads as success; mutual nearest
+    neighbours exist between any two sets of vectors. The cross-scene pair is
+    what shows the number means something.
+    """
+    need(rcdl, "FeatureExtractor", "match_features")
+    _, ex = _xfeat(rcdl)
+    bus = _at_model_size(rcdl, bm.load_bgr("bus.jpg"), ex)
+    zid = _at_model_size(rcdl, bm.load_bgr("zidane.jpg"), ex)
+    same, _ = _warped(bus)
+
+    f_bus = rcdl.extract_features(ex, bus)
+    f_same = rcdl.extract_features(ex, same)
+    f_zid = rcdl.extract_features(ex, zid)
+    self_matches, _ = rcdl.match_features(f_bus, f_same)
+    cross_matches, _ = rcdl.match_features(f_bus, f_zid)
+    print(f"\nmatches: same scene warped {len(self_matches)}, different scene "
+          f"{len(cross_matches)}")
+    assert len(self_matches) > 4 * max(len(cross_matches), 1)

@@ -65,6 +65,11 @@ REGISTRY=(
   # ReID side of ByteTrack consume. 512-d, crops squashed to 128x256 (NOT
   # letterboxed); see docs/MODELS.md.
   "osnet_x0_25_msmt17_rk3588.rknn|convert|osnet_x0_25_msmt17_rk3588.rknn"
+  # XFeat sparse features, 640x480. Its input is NOT image bytes: the graph
+  # starts after the reference's InstanceNorm, so open the Engine with
+  # float_inputs=[0] (FeatureExtractor refuses otherwise). int8 measured
+  # equivalent to the float ONNX on a known-warp match test; see docs/MODELS.md.
+  "xfeat_640x480_i8_rk3588.rknn|convert|xfeat_640x480_i8_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

@@ -58,6 +58,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `depth_anything_v2_vits_308_rk3588.rknn` | monocular depth | 308×308 u8 | rgb | `[1,308,308]` int8 — **relative inverse depth (disparity, big = near)**, no activation. ImageNet mean/std baked into the `.rknn` preprocessing, so the NPU takes raw u8 RGB |
 | `depth_anything_v2_vits_rk3588.rknn` | monocular depth | 518×518 u8 | rgb | as above at the network's native resolution; slower **and** less accurate — see below |
 | `osnet_x0_25_msmt17_rk3588.rknn` | appearance embedding (person ReID) | 128×256 u8 | rgb | `[1,512]` int8, L2-normalised on read-out. Crops are **squashed, not letterboxed** — see below |
+| `xfeat_640x480_i8_rk3588.rknn` | sparse local features | 640×480 **f32** | — (grey) | 3 outputs: `feats[1,64,60,80]`, `keypoints[1,65,60,80]`, `reliability[1,1,60,80]`, all int8 NCHW. **The input is a normalised map, not image bytes** — see below |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
 head from the model.** Its box branch carries 4 channels where YOLOv8/YOLO11
@@ -268,6 +269,64 @@ it is what the vendor's own reference implementation reads — so the decoders
 support both the fused and the separate-branch shapes and choose from the
 model's output signature.
 
+**XFeat's input is not an image, and the Engine has to be told.** The reference
+graph starts with a channel mean and an InstanceNorm — a per-image, data-dependent
+statistic, and exactly the thing int8 quantizes badly — so the exported graph
+begins one step later and takes the normalised map, roughly ±3, as float. A
+quantized RKNN input is normally presented to the runtime as u8 image bytes, and
+that path has **no negative range at all**: half of this map would clip to the
+zero point, and the head would still return keypoints that look like keypoints.
+So the Engine is opened with `float_inputs = {0}` (Python: `float_inputs=[0]`),
+and `FeatureExtractor` refuses to construct on an Engine that was not:
+
+```python
+engine = rcdl.Engine("models/xfeat_640x480_i8_rk3588.rknn", float_inputs=[0])
+ex = engine.feature_extractor()
+```
+
+**int8 is measured equivalent to float here**, which is a per-model finding and
+not a rule (see the PP-OCRv5 recogniser above for the opposite). Optical flow is
+the standard cautionary tale for feature-space models in int8; this one is fine.
+Scoring uses ground truth that can be *manufactured*: rotate a photograph 12°,
+scale it 0.85 and shift it, and the correct correspondence for every keypoint is
+where the warp puts it.
+
+| Build | keypoints | matches | within 3 px | median error |
+|---|---|---|---|---|
+| ONNX float (CPU) | 4096 + 4096 | 2192 | 77.4% | 1.35 px |
+| RKNN int8, toolkit simulator | 4096 + 4096 | 2022 | 77.5% | 1.34 px |
+| **RKNN int8, on the NPU** | 4096 + 4096 | 2033 | **76.6%** | **1.36 px** |
+
+Descriptors from the int8 build reach cosine 0.9978 (min 0.9910) against the
+float model's, on the 3348 of 4096 keypoints both builds detected at the same
+pixel. The control that makes the match count mean something: the same extractor
+on two *different* scenes finds 69 mutual matches where the warped pair finds
+2033.
+
+Cost, on `bus.jpg` at 640×480:
+
+| Stage | Time |
+|---|---|
+| extract (CPU preproc + NPU + CPU decode) | 56–85 ms, of which 35 ms is `rknn_run` |
+| match, 4096 × 4096 × 64-d | 213–243 ms with 8 threads (824 ms single-threaded) |
+
+**Matching, not inference, is the budget.** It is `O(|a|·|b|·64)` — about 10⁹
+multiply-adds at the reference `top_k` of 4096 — so `XfeatConfig::top_k` is the
+knob that decides whether a pair costs milliseconds or a quarter second. It is
+not free accuracy-wise: dropping to `top_k = 1024` cut matching to 72 ms but the
+known-warp agreement fell to 62.7%, because the highest-scoring points are also
+the most repetitive ones.
+
+**Dense optical flow is not in the registry, and the reason is the runtime.**
+NeuFlow v2 converts cleanly (the toolkit's simulator reproduces the float ONNX to
+0.03 px on known shifts), but its correlation lookups are `GridSample`, which
+**librknnrt 2.3.2 on this board does not implement at all** — not on the NPU and
+not on its CPU fallback list. The toolkit lowers the op as a generic CPU node
+without complaint; the runtime then reports `Unsupport CPU op: GridSample` and
+**`rknn_init` segfaults**, so this is not something a caller can catch. The
+supported route is a custom operator (`rknn_register_custom_ops`, declared at
+conversion time), which is a piece of work RCDL has not done yet.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -288,6 +347,7 @@ RK3588S, single-frame latency unless stated:
 | Depth-Anything-V2-Small 308×308, frame → depth in source pixels | 330 ms (142 ms NPU, 108 ms CPU — the CPU part is the DPT head's `align_corners` upsamples, see above) |
 | Same at the native 518×518 | 963 ms |
 | OSNet x0.25 ReID, detection box → 512-d vector | 13.5 ms per crop (9.9 ms NPU) |
+| XFeat 640×480, frame → 4096 features + descriptors | 56–85 ms (35 ms NPU); matching a 4096-pair is another 213–243 ms |
 
 ## Adding a model
 

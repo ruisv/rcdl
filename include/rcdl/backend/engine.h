@@ -40,6 +40,17 @@ struct EngineOptions {
   NpuCore core = NpuCore::Auto;
   /// rknn_init flags (RKNN_FLAG_*). COLLECT_PERF_MASK enables perfDetail().
   std::uint32_t init_flags = 0;
+
+  /// Input indices to present as FLOAT32 even though the model quantized them.
+  ///
+  /// The default (image bytes for a quantized input) is right for every model
+  /// fed by a camera, and wrong for a model whose input is a computed MAP: the
+  /// u8 path can only express the non-negative half of the tensor's affine
+  /// range, so half of a mean-zero input clips to the zero point and nothing
+  /// reports it. XFeat is the case in this repo — its input is an InstanceNorm
+  /// output, roughly ±3 — and any two-frame or feature-space model is the same.
+  /// Task heads that need it check inputType() and say so rather than running.
+  std::vector<int> float_inputs;
 };
 
 class Engine {
@@ -132,7 +143,8 @@ class Engine {
     std::size_t packed_bytes = 0;
   };
 
-  Engine(rknn_context dup_from, const std::string& path, NpuCore core);
+  Engine(rknn_context dup_from, const std::string& path, NpuCore core,
+         std::vector<int> float_inputs);
   void init(const void* model_data, std::size_t model_size, const Options& opts);
   void setupIo();
   void checkInput(int i) const;
@@ -141,6 +153,7 @@ class Engine {
   std::string path_;
   NpuCore core_ = NpuCore::Auto;
   rknn_context ctx_ = 0;
+  std::vector<int> float_inputs_;  ///< see EngineOptions::float_inputs
   std::vector<Tensor> inputs_;
   std::vector<Tensor> outputs_;
   bool async_pending_ = false;

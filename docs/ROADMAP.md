@@ -265,13 +265,44 @@ with a board-verified result and a pinned test.
   in-graph softmax and 0.003 — same argmax, meaningless confidence — with a
   second one applied.* All five heads of the generation are now in the registry.
 
-- **M10 and beyond — new task heads**
+- **M10 and beyond — new task heads** (sparse features ✅, the rest to do)
   Ported in BCDL's order where the maths carries over, each as decoder + numpy
-  oracle + model + board test: optical flow, super-resolution, open-vocabulary
-  detection, promptable segmentation, whole-body pose, anomaly detection, stereo
-  disparity. The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic
-  and end-to-end driving) are a separate question — they need calibration data
-  and sample frames this project does not currently carry.
+  oracle + model + board test: super-resolution, open-vocabulary detection,
+  promptable segmentation, whole-body pose, anomaly detection, stereo disparity.
+  The sensor-fusion and driving heads (lidar 3-D, mono3d, panoptic and
+  end-to-end driving) are a separate question — they need calibration data and
+  sample frames this project does not currently carry.
+
+  **Sparse local features (XFeat) landed first**, and it is the first head here
+  that answers a question about *two* frames rather than one: repeatable points
+  plus 64-d descriptors, mutual-nearest-neighbour matching, and therefore
+  homographies, stitching and a SLAM front end. It is also the only head whose
+  ground truth can be manufactured — rotate a photograph by a known amount and
+  every correspondence has an exact right answer — so the board test asserts
+  *agreement with the geometry* rather than "some matches were found". *Verified:
+  76.6% of 2033 matches within 3 px of where a 12°/0.85 warp puts them, median
+  1.36 px, against 77.4% and 1.35 px for the float ONNX on CPU; the same
+  extractor on two different scenes finds 69 matches where the warped pair finds
+  2033.*
+
+  It also cost one **Engine** change, and the reason generalises. XFeat's input
+  is not image bytes but an InstanceNorm output — kept on the CPU precisely
+  because a per-image statistic quantizes badly — and a quantized RKNN input is
+  presented to the runtime as u8, a path with no negative range at all. Half of
+  a mean-zero map would clip to the zero point and the head would still return
+  keypoints that look like keypoints. `EngineOptions::float_inputs` names such
+  inputs, and `FeatureExtractor` refuses to construct without it rather than
+  running.
+
+  **Optical flow is blocked on the runtime, not on the maths.** NeuFlow v2
+  converts and the toolkit's simulator reproduces the float ONNX to 0.03 px on
+  known shifts — but the correlation lookups are `GridSample`, which librknnrt
+  2.3.2 does not implement on the NPU *or* on its CPU fallback path. The toolkit
+  lowers it to a generic CPU node without complaint and the runtime then
+  segfaults inside `rknn_init`, which no caller can guard against. The supported
+  route is a custom operator declared at conversion time and registered with
+  `rknn_register_custom_ops`; that facility is worth having for its own sake and
+  is the next piece of infrastructure here.
 
 - **Pipeline debt** ✅ — `AsyncVideoDetectionPipeline` is a class, built on the
   `acquireSlot` / `letterboxIntoSlot` / `commitSlot` split that exists precisely

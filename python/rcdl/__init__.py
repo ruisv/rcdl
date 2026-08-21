@@ -32,6 +32,8 @@ from rcdl_py import (
     FaceDetection,
     FaceDetector,
     FaceHeadLayout,
+    FeatureExtractor,
+    FeatureSet,
     ImageEmbedder,
     InstanceMask,
     InstanceSegConfig,
@@ -39,6 +41,7 @@ from rcdl_py import (
     Keypoint,
     NpuCore,
     ObbConfig,
+    XfeatConfig,
     ObbDetection,
     ObbDetector,
     OcrDetConfig,
@@ -72,6 +75,9 @@ from rcdl_py import (
     arcface_template,
     decode_faces,
     face_align_transform,
+    decode_xfeat,
+    match_features,
+    xfeat_preprocess,
     similarity_transform,
     decode_instance_seg,
     decode_obb,
@@ -261,6 +267,14 @@ __all__ = [
     "similarity_transform",
     "generate_priors",
     "detect_faces",
+    # tasks: sparse local features
+    "FeatureExtractor",
+    "FeatureSet",
+    "XfeatConfig",
+    "xfeat_preprocess",
+    "decode_xfeat",
+    "match_features",
+    "extract_features",
     "__version__",
 ]
 
@@ -274,8 +288,13 @@ class Engine:
     shape, already dequantized.
     """
 
-    def __init__(self, path: str, core: NpuCore = NpuCore.AUTO, init_flags: int = 0):
-        self._e = rcdl_py.Engine(path, core, init_flags)
+    def __init__(self, path: str, core: NpuCore = NpuCore.AUTO, init_flags: int = 0,
+                 float_inputs: Sequence[int] = ()):
+        """``float_inputs`` lists inputs whose tensor is a normalized MAP rather
+        than image bytes (XFeat's InstanceNorm output). Those are handed to the
+        runtime as float32; the u8 path a quantized model normally uses has no
+        negative range to put half of such a map in, and clips it silently."""
+        self._e = rcdl_py.Engine(path, core, init_flags, list(float_inputs))
 
     @classmethod
     def _wrap(cls, raw: "rcdl_py.Engine") -> "Engine":
@@ -445,6 +464,16 @@ class Engine:
         ``backend``, ``output_index``.
         """
         return ImageEmbedder(self._e, **kwargs)
+
+    def feature_extractor(self, **kwargs) -> FeatureExtractor:
+        """A FeatureExtractor driving this Engine (XFeat sparse features).
+
+        Keyword arguments: ``config`` (an :class:`XfeatConfig`), ``output_base``.
+        The Engine must have been opened with ``float_inputs=[0]`` — this model's
+        input is a normalized map, not pixels — and the extractor says so rather
+        than running if it was not.
+        """
+        return FeatureExtractor(self._e, **kwargs)
 
     def instance_segmenter(self, **kwargs) -> InstanceSegmenter:
         """An InstanceSegmenter driving this Engine (YOLO-seg head).
@@ -671,6 +700,20 @@ def embed(embedder: ImageEmbedder, img, box=None, fmt: str = "bgr888") -> np.nda
     flat, w, h = _as_buffer(img, fmt)
     x1, y1, x2, y2 = box if box is not None else (0.0, 0.0, 0.0, 0.0)
     return embedder.embed(flat, w, h, fmt, x1, y1, x2, y2)
+
+
+def extract_features(extractor: FeatureExtractor, img) -> FeatureSet:
+    """Sparse features from a numpy BGR image (HxWx3 uint8).
+
+    Unlike every other task helper here there is no ``fmt``: XFeat takes the
+    plain channel MEAN as its grey, so the channel order does not change the
+    result — but the array still has to be BGR-shaped 3-channel uint8, and a
+    non-contiguous crop has to be copied first.
+    """
+    a = np.ascontiguousarray(img)
+    if a.ndim != 3 or a.shape[2] != 3 or a.dtype != np.uint8:
+        raise ValueError("extract_features: expected an HxWx3 uint8 image")
+    return extractor.extract(a)
 
 
 def segment_instances(segmenter: InstanceSegmenter, img, fmt: str = "bgr888"):

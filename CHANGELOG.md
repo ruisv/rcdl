@@ -247,6 +247,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the graph, and a second one leaves the argmax intact while flattening the
   score from 0.939 to 0.003. Both are pinned against the framework's own
   outputs.
+- `tasks/features` — XFeat sparse local features: `xfeatPreprocess` (channel-mean
+  grey + resize + InstanceNorm), `decodeXfeat` (softmax over the 65 logits with
+  the 65th as the reject bin, scatter to full resolution, square-window NMS,
+  top-k, **bicubic** descriptor sampling with the dense map normalised before and
+  each descriptor after), `FeatureExtractor`, and `matchFeatures` — mutual
+  nearest neighbour with a cosine floor, OpenMP over one pass that keeps both
+  directions instead of materialising the similarity matrix. With
+  `xfeat_640x480_i8_rk3588.rknn`, `xfeat_demo` and Python bindings
+  (`Engine.feature_extractor()`, `extract_features`, `match_features`,
+  `decode_xfeat`, `xfeat_preprocess`).
+  This is the first head that answers a question about *two* frames, and the only
+  one whose ground truth can be manufactured: rotate a photograph by a known
+  amount and every correspondence has an exact right answer. *Verified on the
+  board: 76.6% of 2033 matches within 3 px of where a 12°/0.85 warp puts them
+  (median 1.36 px), against 77.4% / 1.35 px for the float ONNX on CPU — and 69
+  matches, not 2033, between two different scenes.*
+- `EngineOptions::float_inputs` (Python: `Engine(..., float_inputs=[0])`) — name
+  the inputs whose tensor is a normalised **map** rather than image bytes, and
+  they are presented to the runtime as float32 instead of u8. XFeat is the case:
+  its input is an InstanceNorm output, roughly ±3, and the u8 path a quantized
+  model normally takes has no negative range at all, so half of it would clip to
+  the zero point while the head went on returning keypoints that look like
+  keypoints. `FeatureExtractor` checks `inputType()` and refuses to construct on
+  an Engine that was opened the ordinary way.
 
 ### Fixed
 

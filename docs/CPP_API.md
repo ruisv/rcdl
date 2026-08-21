@@ -92,6 +92,22 @@ Reading outputs goes through `outputAsFloat(engine, i, scratch, shape)`: a
 packed f32 tensor is returned zero-copy, anything else (the usual int8-affine
 RKNN output, fp16, a stride-padded layout) is gathered into `scratch`.
 
+Writing the *input* is the mirror image, with one exception. A quantized model's
+input is presented to the runtime as u8 image bytes, which is right for anything
+a camera feeds. A model whose input is a computed **map** — XFeat takes an
+InstanceNorm output, roughly ±3 — cannot go through that path: it has no negative
+range, so half the tensor clips to the zero point and the head still returns
+plausible results. Open those with
+
+```c++
+rcdl::EngineOptions opts;
+opts.float_inputs = {0};            // input 0 is a map, not pixels
+rcdl::Engine engine("xfeat_640x480_i8_rk3588.rknn", opts);
+rcdl::FeatureExtractor extractor(engine);   // throws if the Engine was not
+```
+
+and the head checks `inputType()` rather than trusting the caller.
+
 ---
 
 ## Detection, end to end

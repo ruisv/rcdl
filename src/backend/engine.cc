@@ -61,8 +61,9 @@ Engine::Engine(const void* model_data, std::size_t model_size, const Options& op
   init(model_data, model_size, opts);
 }
 
-Engine::Engine(rknn_context dup_from, const std::string& path, NpuCore core)
-    : path_(path), core_(core) {
+Engine::Engine(rknn_context dup_from, const std::string& path, NpuCore core,
+               std::vector<int> float_inputs)
+    : path_(path), core_(core), float_inputs_(std::move(float_inputs)) {
   rknn_context in = dup_from;
   RCDL_CHECK(rknn_dup_context(&in, &ctx_));
   if (core_ != NpuCore::Auto) {
@@ -74,6 +75,7 @@ Engine::Engine(rknn_context dup_from, const std::string& path, NpuCore core)
 void Engine::init(const void* model_data, std::size_t model_size, const Options& opts) {
   RCDL_REQUIRE(model_data != nullptr && model_size > 0, "empty model image");
   core_ = opts.core;
+  float_inputs_ = opts.float_inputs;
   // rknn_init copies the model image (unless RKNN_FLAG_MODEL_BUFFER_ZERO_COPY),
   // so the caller's buffer may go away afterwards.
   RCDL_CHECK(rknn_init(&ctx_, const_cast<void*>(model_data),
@@ -98,10 +100,16 @@ void Engine::setupIo() {
     // What the caller hands us: image bytes for quantized models, float32 for
     // float models. The runtime converts to the model's own encoding on the way
     // in (pass_through == 0).
+    const bool as_float =
+        std::find(float_inputs_.begin(), float_inputs_.end(), static_cast<int>(i)) !=
+        float_inputs_.end();
     switch (t.attr.type) {
       case RKNN_TENSOR_INT8:
       case RKNN_TENSOR_UINT8:
-        t.io_attr.type = RKNN_TENSOR_UINT8;
+        // Image bytes by default; FLOAT32 when the caller said this input is a
+        // normalised map (EngineOptions::float_inputs), where the u8 path has
+        // no negative range to put half the values in.
+        t.io_attr.type = as_float ? RKNN_TENSOR_FLOAT32 : RKNN_TENSOR_UINT8;
         break;
       case RKNN_TENSOR_INT16:
         // A 16-bit quantized input cannot take image bytes, and asking the
@@ -166,7 +174,9 @@ Engine::~Engine() {
 }
 
 std::unique_ptr<Engine> Engine::dup(NpuCore core) const {
-  return std::unique_ptr<Engine>(new Engine(ctx_, path_, core));
+  // The duplicate binds its own I/O, so it has to be told the same thing about
+  // which inputs are maps rather than image bytes.
+  return std::unique_ptr<Engine>(new Engine(ctx_, path_, core, float_inputs_));
 }
 
 // --- introspection ------------------------------------------------------------

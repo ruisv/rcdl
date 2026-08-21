@@ -30,12 +30,19 @@ nothing inside the runtime. Outputs come back dequantized.
 
 | | |
 |---|---|
-| `Engine(path, core=NpuCore.AUTO, init_flags=0)` | load a `.rknn` |
+| `Engine(path, core=NpuCore.AUTO, init_flags=0, float_inputs=())` | load a `.rknn` |
 | `.dup(core)` | a second context sharing the weights, optionally on another core |
 | `.infer(inputs)` / `.run()` / `.output(i)` | run; `set_input` + `run` + `output` for the explicit form |
 | `.input_shape(i)` `.output_shape(i)` `.input_dtype(i)` `.output_quant(i)` | introspection |
 | `.input_fd(i)` `.output_fd(i)` | the dma-buf fds, for hardware hand-off |
 | `.last_run_micros()` `.perf_detail()` `.sdk_version()` `.driver_version()` | diagnostics |
+
+`float_inputs` names inputs whose tensor is a normalised **map** rather than
+image bytes — XFeat's InstanceNorm output is the case in this repo. Those are
+handed to the runtime as float32; the u8 path a quantized model normally uses has
+no negative range, so half of such a map would clip to the zero point and the
+model would still return plausible-looking results. Heads that need it check and
+refuse rather than run.
 
 Three cores at once — this is the throughput idiom, not `NpuCore.ALL`:
 
@@ -165,6 +172,35 @@ after draining; `.finished` tells you when `False` means "closed" instead.
 
 A raw elementary stream carries no timestamps, so `.pts_us` is 0 on one —
 `.frame_index` is what identifies a frame there.
+
+---
+
+## Sparse features and matching
+
+```python
+e  = rcdl.Engine("models/xfeat_640x480_i8_rk3588.rknn", float_inputs=[0])
+ex = e.feature_extractor()                       # config=rcdl.XfeatConfig()
+
+fa = rcdl.extract_features(ex, frame_a)          # BGR uint8 HxWx3
+fb = rcdl.extract_features(ex, frame_b)
+pairs, cosines = rcdl.match_features(fa, fb)     # (M,2) indices, (M,) scores
+```
+
+`fa.xy` is `(N,2)` in the ORIGINAL frame's pixels, `fa.scores` `(N,)`, and
+`fa.descriptors` `(N,64)` with L2-normalised rows — so a dot product *is* the
+cosine, and `pairs`/`cosines` drop straight into `cv2.findHomography`.
+
+`match_features` is mutual nearest neighbour with a cosine floor
+(`min_cossim=0.82`): a pair survives only if each side is the other's best, which
+is what makes it usable on repeated texture without a ratio test. It costs
+`O(|a|·|b|·64)`, so `XfeatConfig.top_k` (4096 by default) is the knob that
+decides whether a pair costs milliseconds or a quarter second — see
+`docs/MODELS.md` for the measured trade-off.
+
+The decoder is also available as a pure function on the three raw maps —
+`rcdl.decode_xfeat(feats, keypoints, reliability, config, scale_x, scale_y)` —
+with `rcdl.xfeat_preprocess(bgr, in_w, in_h)` producing the input the model
+wants. `float_inputs=[0]` above is not optional: see the Inference section.
 
 ---
 

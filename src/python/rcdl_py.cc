@@ -39,6 +39,7 @@
 #include "rcdl/tasks/detection.h"
 #include "rcdl/tasks/embedding.h"
 #include "rcdl/tasks/face.h"
+#include "rcdl/tasks/features.h"
 #include "rcdl/tasks/instance_seg.h"
 #include "rcdl/tasks/obb.h"
 #include "rcdl/tasks/ocr.h"
@@ -636,13 +637,17 @@ NB_MODULE(rcdl_py, m) {
       .def(
           "__init__",
           [](rcdl::Engine* self, const std::string& path, rcdl::NpuCore core,
-             std::uint32_t init_flags) {
+             std::uint32_t init_flags, const std::vector<int>& float_inputs) {
             rcdl::Engine::Options o;
             o.core = core;
             o.init_flags = init_flags;
+            o.float_inputs = float_inputs;
             new (self) rcdl::Engine(path, o);
           },
-          "path"_a, "core"_a = rcdl::NpuCore::Auto, "init_flags"_a = 0u)
+          "path"_a, "core"_a = rcdl::NpuCore::Auto, "init_flags"_a = 0u,
+          "float_inputs"_a = std::vector<int>(),
+          "float_inputs: indices whose input is a normalized MAP rather than image bytes "
+          "(XFeat), presented to the runtime as float32 instead of u8")
       .def("dup", &rcdl::Engine::dup, "core"_a = rcdl::NpuCore::Auto)
       .def_prop_ro("path", &rcdl::Engine::path)
       .def_prop_ro("core", &rcdl::Engine::core)
@@ -3259,4 +3264,153 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro(
           "priors", [](const PyFaceDetector& p) { return priorsArray(p.task.priors()); },
           nb::rv_policy::move, "The generated prior set as an (N, 4) array, in output-row order");
+  // ===========================================================================
+  // Sparse local features (XFeat) — tasks/features.h
+  // ===========================================================================
+  //
+  // The decoder is exposed as a free function on top of the three raw maps, the
+  // same shape the numpy oracle in tests/test_features.py checks, and the
+  // Engine-bound extractor is a thin wrapper over it. Matching comes back as
+  // numpy arrays rather than a list of objects because the next thing anyone
+  // does with correspondences is feed them to cv2.findHomography.
+
+  nb::class_<rcdl::XfeatConfig>(m, "XfeatConfig")
+      .def(nb::init<>())
+      .def_rw("detection_thresh", &rcdl::XfeatConfig::detection_thresh)
+      .def_rw("nms_kernel", &rcdl::XfeatConfig::nms_kernel)
+      .def_rw("top_k", &rcdl::XfeatConfig::top_k);
+
+  nb::class_<rcdl::FeatureSet>(m, "FeatureSet")
+      .def_prop_ro(
+          "xy",
+          [](const rcdl::FeatureSet& f) {
+            std::vector<float> xy(f.size() * 2);
+            for (std::size_t i = 0; i < f.size(); ++i) {
+              xy[2 * i] = f.keypoints[i].x;
+              xy[2 * i + 1] = f.keypoints[i].y;
+            }
+            return ownedArray<float>(xy.data(), {f.size(), 2});
+          },
+          nb::rv_policy::move, "(N, 2) keypoints in ORIGINAL-image pixels")
+      .def_prop_ro(
+          "scores",
+          [](const rcdl::FeatureSet& f) {
+            std::vector<float> s(f.size());
+            for (std::size_t i = 0; i < f.size(); ++i) s[i] = f.keypoints[i].score;
+            return ownedArray<float>(s.data(), {f.size()});
+          },
+          nb::rv_policy::move, "(N,) detector probability times neighbourhood reliability")
+      .def_prop_ro(
+          "descriptors",
+          [](const rcdl::FeatureSet& f) {
+            return ownedArray<float>(f.descriptors.data(),
+                                     {f.size(), static_cast<std::size_t>(f.dim)});
+          },
+          nb::rv_policy::move, "(N, 64) L2-normalized rows — a dot product IS the cosine")
+      .def_prop_ro("dim", [](const rcdl::FeatureSet& f) { return f.dim; })
+      .def("__len__", [](const rcdl::FeatureSet& f) { return f.size(); });
+
+  m.def(
+      "xfeat_preprocess",
+      [](const Contig& bgr, int in_w, int in_h) {
+        if (bgr.ndim() != 3 || bgr.shape(2) != 3 || bgr.dtype() != nb::dtype<std::uint8_t>()) {
+          throw std::invalid_argument("xfeat_preprocess: expected an HxWx3 uint8 BGR image");
+        }
+        const int h = static_cast<int>(bgr.shape(0));
+        const int w = static_cast<int>(bgr.shape(1));
+        std::vector<float> out;
+        float sx = 1.0f, sy = 1.0f;
+        rcdl::xfeatPreprocess(static_cast<const std::uint8_t*>(bgr.data()), w, h, w * 3, in_w,
+                              in_h, out, &sx, &sy);
+        return nb::make_tuple(
+            ownedArray<float>(out.data(), {1, 1, static_cast<std::size_t>(in_h),
+                                           static_cast<std::size_t>(in_w)}),
+            sx, sy);
+      },
+      "bgr"_a, "in_w"_a = 640, "in_h"_a = 480,
+      "Grayscale (channel MEAN, not luma) + resize + InstanceNorm into the model's "
+      "[1,1,H,W] input. Returns (input, scale_x, scale_y).");
+
+  m.def(
+      "decode_xfeat",
+      [](const Contig& feats, const Contig& kpts, const Contig& rel,
+         const rcdl::XfeatConfig& cfg, float scale_x, float scale_y) {
+        // [C,H,W] or [1,C,H,W]: the leading 1 is optional, so read the three
+        // dims that matter off the end rather than by absolute position.
+        auto dim = [](const Contig& a, std::size_t i) {
+          return static_cast<int>(a.shape(a.ndim() - 3 + i));
+        };
+        for (const Contig* a : {&feats, &kpts, &rel}) {
+          if (a->ndim() < 3 || a->ndim() > 4 || a->dtype() != nb::dtype<float>()) {
+            throw std::invalid_argument(
+                "decode_xfeat: expected float32 [C,H,W] or [1,C,H,W] maps");
+          }
+        }
+        const int fh = dim(feats, 1), fw = dim(feats, 2);
+        if (dim(feats, 0) != 64 || dim(kpts, 0) != 65 || dim(rel, 0) != 1) {
+          throw std::invalid_argument(
+              "decode_xfeat: channel counts must be 64 / 65 / 1 (feats/keypoints/reliability)");
+        }
+        if (dim(kpts, 1) != fh || dim(kpts, 2) != fw || dim(rel, 1) != fh ||
+            dim(rel, 2) != fw) {
+          throw std::invalid_argument("decode_xfeat: the three maps must share (H,W)");
+        }
+        return rcdl::decodeXfeat(static_cast<const float*>(feats.data()),
+                                 static_cast<const float*>(kpts.data()),
+                                 static_cast<const float*>(rel.data()), fh, fw, fh * 8, fw * 8,
+                                 cfg, scale_x, scale_y);
+      },
+      "feats"_a, "keypoints"_a, "reliability"_a, "config"_a = rcdl::XfeatConfig{},
+      "scale_x"_a = 1.0f, "scale_y"_a = 1.0f,
+      "Decode the three XFeat maps into sparse features (softmax -> NMS -> top-k -> "
+      "bicubic descriptor sampling), in original-image pixels.");
+
+  m.def(
+      "match_features",
+      [](const rcdl::FeatureSet& a, const rcdl::FeatureSet& b, float min_cossim) {
+        std::vector<rcdl::FeatureMatch> m2;
+        {
+          nb::gil_scoped_release nogil;  // O(|a|*|b|*64), OpenMP inside
+          m2 = rcdl::matchFeatures(a, b, min_cossim);
+        }
+        std::vector<int> pairs(m2.size() * 2);
+        std::vector<float> scores(m2.size());
+        for (std::size_t i = 0; i < m2.size(); ++i) {
+          pairs[2 * i] = m2[i].a;
+          pairs[2 * i + 1] = m2[i].b;
+          scores[i] = m2[i].score;
+        }
+        return nb::make_tuple(ownedArray<int>(pairs.data(), {m2.size(), 2}),
+                              ownedArray<float>(scores.data(), {m2.size()}));
+      },
+      "a"_a, "b"_a, "min_cossim"_a = 0.82f,
+      "Mutual nearest-neighbour matching with a cosine floor. Returns "
+      "((M,2) int32 index pairs, (M,) cosines). O(|a|*|b|*dim).");
+
+  nb::class_<rcdl::FeatureExtractor>(m, "FeatureExtractor")
+      .def(
+          "__init__",
+          [](rcdl::FeatureExtractor* self, nb::handle engine_arg, const rcdl::XfeatConfig& cfg,
+             int output_base) {
+            new (self) rcdl::FeatureExtractor(engineFrom(engine_arg), cfg, output_base);
+          },
+          "engine"_a, "config"_a = rcdl::XfeatConfig{}, "output_base"_a = 0,
+          nb::keep_alive<1, 2>())
+      .def(
+          "extract",
+          [](rcdl::FeatureExtractor& e, const Contig& bgr) {
+            if (bgr.ndim() != 3 || bgr.shape(2) != 3 || bgr.dtype() != nb::dtype<std::uint8_t>()) {
+              throw std::invalid_argument("extract: expected an HxWx3 uint8 BGR image");
+            }
+            const int h = static_cast<int>(bgr.shape(0));
+            const int w = static_cast<int>(bgr.shape(1));
+            nb::gil_scoped_release nogil;  // CPU preproc + NPU infer + CPU decode
+            return e.extract(static_cast<const std::uint8_t*>(bgr.data()), w, h, w * 3);
+          },
+          "bgr"_a, "Preprocess + infer + decode one BGR frame")
+      .def("postprocess", &rcdl::FeatureExtractor::postprocess, "scale_x"_a = 1.0f,
+           "scale_y"_a = 1.0f)
+      .def_prop_ro("input_width", &rcdl::FeatureExtractor::inputWidth)
+      .def_prop_ro("input_height", &rcdl::FeatureExtractor::inputHeight)
+      .def_prop_ro("config", &rcdl::FeatureExtractor::config, nb::rv_policy::copy);
 }

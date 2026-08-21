@@ -75,6 +75,7 @@ add_library(rcdl SHARED
   src/tasks/depth.cc
   src/tasks/ocr.cc
   src/tasks/face.cc
+  src/tasks/features.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc
@@ -154,6 +155,7 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(cls_demo)
   rcdl_example(seg_demo)
   rcdl_example(depth_demo)
+  rcdl_example(xfeat_demo)
   rcdl_example(async_check)
 endif()
 
