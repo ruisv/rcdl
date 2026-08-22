@@ -2287,3 +2287,57 @@ def test_face_recognizer_rejects_a_wrongly_sized_aligned_crop(rcdl):
     bad = np.zeros((64, 64, 3), np.uint8)
     with pytest.raises(Exception):
         rec.embed_aligned(np.ascontiguousarray(bad).reshape(-1), 64, 64, "bgr888")
+
+
+def test_the_float_yolop_runs_and_says_what_int8_costs(rcdl):
+    """The fp16 build, and the measurement that decided which build ships.
+
+    It is off every ordinary path here: its input is float32, so engineInputView
+    refuses it and no BoundTask can drive it — which is exactly why it fell out
+    of the test suite while its numbers went into docs/MODELS.md. Driving it by
+    hand is the point of this test, twice over: it pins that the float build
+    still loads and runs, and it reproduces the int8-vs-fp16 comparison rather
+    than leaving a documented number nobody can check.
+
+    Measured: the two builds agree on 99.7% of DRIVABLE pixels at IoU 0.975, and
+    on 99.8% of LANE pixels at IoU 0.762. Same masks, two verdicts — lane lines
+    are 1% of the frame, so agreement is dominated by the 99% that is correctly
+    not a lane. On a sparse structure, score IoU."""
+    need(rcdl, "AnchorDetector")
+    import cv2
+
+    fp16 = bm.require_model("yolop_cut_640_fp16_rk3588.rknn")
+    i8 = bm.require_model(YOLOP_MODEL)
+    img = bm.load_bgr("cityscapes.png")
+
+    # One canvas, both models: any difference is the number format, not the crop.
+    canvas, lb, backend = rcdl.letterbox(img, 640, 640, "bgr888", "rgb888")
+
+    def masks(model, feed):
+        e = rcdl.Engine(model)
+        feed(e)
+        e.run()
+        return [np.asarray(e.output(i)).reshape(2, 640, 640).argmax(0).astype(np.uint8)
+                for i in (3, 4)]
+
+    da8, ll8 = masks(i8, lambda e: e.set_input(0, np.ascontiguousarray(canvas)))
+    # float32 STILL IN 0..255 — the (x-mean)/std is folded into the .rknn, and
+    # feeding 0..1 here returns a well-formed mask of a picture 255x too dark.
+    da16, ll16 = masks(fp16,
+                       lambda e: e.set_input(0, np.ascontiguousarray(canvas.astype(np.float32))))
+
+    for name, a, b, lo in (("drivable", da8, da16, 0.90), ("lane", ll8, ll16, 0.60)):
+        agree = float((a == b).mean())
+        iou = float(np.logical_and(a, b).sum()) / max(1, int(np.logical_or(a, b).sum()))
+        print(f"\n  {name}: agreement {100 * agree:.2f}%  IoU {iou:.3f}")
+        assert b.any(), f"the float build produced an empty {name} mask"
+        assert agree > 0.99
+        assert iou > lo, f"{name} IoU {iou:.3f} — the two builds disagree more than measured"
+
+    # The point of the whole comparison: on the sparse head, the two metrics
+    # disagree wildly, and only one of them is telling the truth.
+    lane_agree = float((ll8 == ll16).mean())
+    lane_iou = float(np.logical_and(ll8, ll16).sum()) / max(1, int(np.logical_or(ll8, ll16).sum()))
+    assert lane_agree - lane_iou > 0.15, (
+        "pixel agreement and IoU no longer diverge on the lane mask — if that is "
+        "real the docs' argument for reading IoU needs revisiting")
