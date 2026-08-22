@@ -330,6 +330,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- `tasks/face` — **identity embeddings** (`FaceRecognizer`, `FaceRecogConfig`),
+  completing the face stack: RetinaFace finds the face and its five landmarks,
+  `faceAlignTransform` puts them on the ArcFace template, and this returns the
+  512-d unit vector that `cosineSimilarity` / `EmbeddingBank` already consume.
+  With `arcface_r50_112_fp16_rk3588.rknn`, `Engine.face_recognizer()` and
+  `rcdl.embed_face()`. The class owns the WARP, unlike the OCR crop it otherwise
+  resembles, and reads `inputType(0)` to feed u8 or float32-in-0..255.
+  *Why it owns the warp is measured, not asserted: the same face box-cropped
+  instead of five-point aligned scores 0.493 against its aligned self, while
+  rotation, scale, brightness, blur and JPEG q40 all stay in 0.980-0.999 and the
+  four different people in the samples sit between -0.10 and +0.08. A box crop
+  returns a well-formed unit vector with half the identity gone and nothing in
+  the output says so. Float for a DATA reason: int8 needs a calibration set of
+  aligned crops, which this repo cannot supply, while fp16 needs none and
+  reproduces the fp32 ONNX to cosine 1.00000 on an identical crop — so on this
+  network the choice of RESAMPLER (0.982-0.999 between the internal warp and
+  cv2.warpAffine) moves the embedding more than the quantization does. Not
+  established: an operating threshold, which would need two genuinely different
+  photographs of one person.*
 - `tasks/open_vocab` — open-vocabulary detection (YOLOE) with **no new decode**.
   The text side of YOLOE runs on the conversion host: a CLIP text embedding per
   prompt is folded into the classification convolution, so what reaches the board

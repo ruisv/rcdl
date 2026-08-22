@@ -160,21 +160,20 @@ equivalent of its M5.
 | | BCDL | RCDL |
 |---|---|---|
 | Task heads in `src/tasks/` | 22 | **17** |
-| Models in the registry | ~38 | **31** |
+| Models in the registry | ~38 | **32** |
 | Pipeline classes | 5 | 3 |
 
 The core CV set — detection, classification, pose, instance and semantic
 segmentation, oriented boxes, OCR, face detection, monocular depth,
 embedding/ReID — was there from M4, each with a model and a board test. M7–M10
 added the textline angle classifier, sparse features, super-resolution, optical
-flow, promptable segmentation, whole-body pose, open-vocabulary detection and
-panoptic driving. What is still missing splits into two kinds, and they are not
+flow, promptable segmentation, whole-body pose, open-vocabulary detection,
+panoptic driving and face recognition. What is still missing splits into two kinds, and they are not
 equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
 * OCR is PP-OCRv4 det + rec against BCDL's v5/v6 stacks, and has **no textline
   angle classifier at all** — so rotated text decodes wrong today, silently.
-* Face is detection only. BCDL pairs SCRFD with ArcFace for identity.
 * Embedding is person ReID only; there is no image-text tower.
 * Semantic segmentation has one model where BCDL has three.
 * Detection, classification, pose, instance seg and OBB sit a YOLO generation
@@ -215,7 +214,7 @@ with a board-verified result and a pinned test.
   the deployed recogniser, and the search for a newer one that survives float16
   moves to the model-zoo side. The numbers are in [`MODELS.md`](MODELS.md).
 
-- **M8 — face recognition** (alignment ✅, identity model blocked on data)
+- **M8 — face recognition** ✅ (threshold still needs data)
   The geometry half is done and is the half that is easy to get subtly wrong:
   `similarityTransform` / `faceAlignTransform` map a detection's five landmarks
   onto the ArcFace template, in the closed form that **cannot produce a
@@ -225,16 +224,31 @@ with a board-verified result and a pinned test.
   own residual is 1.3–7.3 px mean (five points, four degrees of freedom — the
   worst is the turned head), RetinaFace re-finds every aligned crop at 0.99–1.00,
   and the re-detected eyes and mouths land within a few pixels of the template's
-  rows.* With an aligned crop in hand, the identity model is the existing
-  `ImageEmbedder` path unchanged — crop, embed, compare by cosine.
+  rows.*
 
-  The model itself waits on **data this repository does not have**. Its four
-  faces cannot calibrate an int8 ArcFace, and — the harder problem — they cannot
-  validate one: there is no pair of pictures of the same person, so nothing here
-  can distinguish a working identity model from a broken one. What is needed is
-  a handful of identities with two or more images each, and the calibration must
-  use ALIGNED crops (a same-shaped model calibrated on centre crops is a
-  different model, with figures that do not transfer).
+  **The identity half is now there too**, and the route past the data problem was
+  to stop needing calibration data: an fp16 ArcFace R50 needs none, where an int8
+  one would need a set of ALIGNED crops (a same-shaped model calibrated on centre
+  crops is a different model whose published figures do not transfer). It
+  reproduces the fp32 ONNX to **cosine 1.00000** on an identical crop, at 32 ms
+  per face.
+
+  `FaceRecognizer` owns the warp rather than handing the caller a matrix, and
+  the reason is the measurement: the same face **box-cropped instead of
+  five-point aligned scores 0.493 against its aligned self**, while rotation,
+  scale, brightness, blur and JPEG q40 all stay between 0.980 and 0.999, and the
+  four different people in the samples sit between −0.10 and +0.08. A box crop
+  returns a well-formed unit vector with half the identity gone and nothing in
+  the output says so. A second number makes the same point about care: the
+  internal resampler and `cv2.warpAffine` differ by 0.982–0.999 — **more than
+  fp16 costs** — and differ most on the small faces.
+
+  What is still missing is an **operating threshold**, and that genuinely needs
+  data: nuisance transforms of one photograph are the same identity by
+  construction, not two different pictures of a person. This repository cannot
+  acquire such a pair without redistributing photographs of an identifiable
+  person, so the pattern is to stage your own (gitignored, never committed) and
+  pick the threshold there.
 
 - **M9 — YOLO generation refresh** (detection ✅, the other four heads to do)
   The premise held exactly: **YOLO26n detection required no code at all.** Its

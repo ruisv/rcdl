@@ -12,6 +12,7 @@
 #include "rcdl/backend/output_reader.h"
 #include "rcdl/core/status.h"
 #include "rcdl/tasks/detection.h"
+#include "rcdl/tracks/reid.h"
 
 namespace rcdl {
 
@@ -474,6 +475,188 @@ void faceLandmarkArray(const FaceDetection& face, float out[10]) {
     out[2 * i] = face.landmarks[static_cast<std::size_t>(i)].first;
     out[2 * i + 1] = face.landmarks[static_cast<std::size_t>(i)].second;
   }
+}
+
+// ===========================================================================
+// FaceRecognizer
+// ===========================================================================
+
+namespace {
+
+/// Bilinear sample of one channel, with `pad` outside the frame. Same sampler
+/// the whole-body crop uses: a face at the edge of the frame is normal, and the
+/// template reaches past it, so the outside has to be a defined value rather
+/// than a clamped column of skin smeared along the border.
+float sampleFaceChannel(const std::uint8_t* base, int w, int h, std::size_t stride, int bpp,
+                        float x, float y, int c, std::uint8_t pad) {
+  const int x0 = static_cast<int>(std::floor(x));
+  const int y0 = static_cast<int>(std::floor(y));
+  const float fx = x - static_cast<float>(x0);
+  const float fy = y - static_cast<float>(y0);
+  float acc = 0.0f;
+  for (int j = 0; j < 2; ++j) {
+    const int sy = y0 + j;
+    const float wy = j ? fy : 1.0f - fy;
+    for (int i = 0; i < 2; ++i) {
+      const int sx = x0 + i;
+      const float wx = i ? fx : 1.0f - fx;
+      const float wgt = wy * wx;
+      if (wgt == 0.0f) continue;
+      const bool inside = sx >= 0 && sx < w && sy >= 0 && sy < h;
+      acc += wgt * static_cast<float>(
+                       inside ? base[static_cast<std::size_t>(sy) * stride +
+                                     static_cast<std::size_t>(sx) * bpp + c]
+                              : pad);
+    }
+  }
+  return acc;
+}
+
+/// Invert a 2x3 similarity/affine. The forward matrix maps SOURCE -> template;
+/// resampling walks the template and needs the other direction.
+bool invertAffine(const float m[6], float inv[6]) {
+  const float det = m[0] * m[4] - m[1] * m[3];
+  if (std::abs(det) < 1e-12f) return false;
+  const float id = 1.0f / det;
+  inv[0] = m[4] * id;
+  inv[1] = -m[1] * id;
+  inv[3] = -m[3] * id;
+  inv[4] = m[0] * id;
+  inv[2] = -(inv[0] * m[2] + inv[1] * m[5]);
+  inv[5] = -(inv[3] * m[2] + inv[4] * m[5]);
+  return true;
+}
+
+}  // namespace
+
+FaceRecognizer::FaceRecognizer(Engine& engine, FaceRecogConfig cfg, int output_index)
+    : engine_(engine), cfg_(cfg), out_idx_(output_index) {
+  RCDL_REQUIRE(engine_.numInputs() == 1,
+               "FaceRecognizer: an identity model takes exactly one input");
+  RCDL_REQUIRE(out_idx_ >= 0 && out_idx_ < engine_.numOutputs(),
+               "FaceRecognizer: output index out of range");
+
+  const rknn_tensor_attr& in = engine_.inputAttr(0);
+  RCDL_REQUIRE(in.n_dims == 4, "FaceRecognizer: input 0 is not a 4-D image tensor");
+  if (in.fmt == RKNN_TENSOR_NHWC) {
+    in_h_ = static_cast<int>(in.dims[1]);
+    in_w_ = static_cast<int>(in.dims[2]);
+  } else {
+    in_h_ = static_cast<int>(in.dims[2]);
+    in_w_ = static_cast<int>(in.dims[3]);
+  }
+  RCDL_REQUIRE(in_w_ > 0 && in_h_ > 0, "FaceRecognizer: could not read the input size");
+
+  const rknn_tensor_type it = engine_.inputType(0);
+  RCDL_REQUIRE(it == RKNN_TENSOR_UINT8 || it == RKNN_TENSOR_FLOAT32,
+               "FaceRecognizer: the model takes neither u8 image bytes nor float32");
+  float_input_ = it == RKNN_TENSOR_FLOAT32;
+
+  const std::vector<int> os = engine_.outputShape(out_idx_);
+  dim_ = os.empty() ? 0 : os.back();
+  if (dim_ <= 1) {
+    throw Error(-1, "FaceRecognizer: output " + std::to_string(out_idx_) +
+                        " is not an embedding vector");
+  }
+}
+
+void FaceRecognizer::feed(const ImageView& src, const float m[6]) {
+  RCDL_REQUIRE(src.data != nullptr && src.width > 0 && src.height > 0,
+               "FaceRecognizer: the source needs a CPU mapping");
+  const int bpp = bytesPerPixel(src.format);
+  RCDL_REQUIRE(bpp == 3 || bpp == 4, "FaceRecognizer: expected a packed RGB/BGR source");
+  const bool src_bgr =
+      src.format == PixelFormat::BGR888 || src.format == PixelFormat::BGRA8888;
+  const bool want_bgr =
+      cfg_.model_input == PixelFormat::BGR888 || cfg_.model_input == PixelFormat::BGRA8888;
+  const bool swap = src_bgr != want_bgr;
+
+  float inv[6];
+  RCDL_REQUIRE(invertAffine(m, inv),
+               "FaceRecognizer: the alignment transform is degenerate (are the five landmarks "
+               "distinct?)");
+
+  const std::uint8_t* base = static_cast<const std::uint8_t*>(src.data);
+  const std::size_t stride = src.rowBytes();
+
+  // The transform is a rotation + uniform scale about an arbitrary centre, which
+  // the hardware letterbox cannot express (it centres a whole image), so the
+  // resample runs here. 112x112 samples is nothing next to a 50-layer network.
+  if (float_input_) {
+    scratch_.resize(static_cast<std::size_t>(in_w_) * in_h_ * 3);
+    for (int y = 0; y < in_h_; ++y) {
+      float* row = scratch_.data() + static_cast<std::size_t>(y) * in_w_ * 3;
+      for (int x = 0; x < in_w_; ++x) {
+        const float fx = static_cast<float>(x) + 0.5f;
+        const float fy = static_cast<float>(y) + 0.5f;
+        const float sx = inv[0] * fx + inv[1] * fy + inv[2] - 0.5f;
+        const float sy = inv[3] * fx + inv[4] * fy + inv[5] - 0.5f;
+        for (int c = 0; c < 3; ++c) {
+          const int chan = swap ? 2 - c : c;
+          // 0..255, NOT 0..1: the model's own (x-127.5)/127.5 is folded into
+          // the .rknn, so scaling here would darken the face by 255x and still
+          // return a well-formed unit vector.
+          row[x * 3 + c] =
+              sampleFaceChannel(base, src.width, src.height, stride, bpp, sx, sy, chan, cfg_.pad);
+        }
+      }
+    }
+    engine_.setInput(0, scratch_.data(), scratch_.size() * sizeof(float));
+    return;
+  }
+
+  // Quantized build: the destination IS the NPU's input tensor.
+  const ImageView dst = engineInputView(engine_, 0, cfg_.model_input);
+  std::uint8_t* out = static_cast<std::uint8_t*>(dst.data);
+  const std::size_t dstride = dst.rowBytes();
+  const int dbpp = bytesPerPixel(dst.format);
+  for (int y = 0; y < in_h_; ++y) {
+    std::uint8_t* row = out + static_cast<std::size_t>(y) * dstride;
+    for (int x = 0; x < in_w_; ++x) {
+      const float fx = static_cast<float>(x) + 0.5f;
+      const float fy = static_cast<float>(y) + 0.5f;
+      const float sx = inv[0] * fx + inv[1] * fy + inv[2] - 0.5f;
+      const float sy = inv[3] * fx + inv[4] * fy + inv[5] - 0.5f;
+      for (int c = 0; c < 3; ++c) {
+        const int chan = swap ? 2 - c : c;
+        const float v =
+            sampleFaceChannel(base, src.width, src.height, stride, bpp, sx, sy, chan, cfg_.pad);
+        row[static_cast<std::size_t>(x) * dbpp + c] =
+            static_cast<std::uint8_t>(std::lround(std::min(255.0f, std::max(0.0f, v))));
+      }
+    }
+  }
+}
+
+std::vector<float> FaceRecognizer::embed(const ImageView& src, const float landmarks[10]) {
+  RCDL_REQUIRE(landmarks != nullptr, "FaceRecognizer: null landmarks");
+  float m[6];
+  faceAlignTransform(landmarks, in_w_, in_h_, m);
+  std::copy(m, m + 6, last_m_.begin());
+  feed(src, m);
+  engine_.infer();
+  return postprocess();
+}
+
+std::vector<float> FaceRecognizer::embedAligned(const ImageView& aligned) {
+  if (aligned.width != in_w_ || aligned.height != in_h_) {
+    throw Error(-1, "FaceRecognizer: an already-aligned crop must be " + std::to_string(in_w_) +
+                        "x" + std::to_string(in_h_) + ", got " + std::to_string(aligned.width) +
+                        "x" + std::to_string(aligned.height));
+  }
+  const float identity[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+  std::copy(identity, identity + 6, last_m_.begin());
+  feed(aligned, identity);
+  engine_.infer();
+  return postprocess();
+}
+
+std::vector<float> FaceRecognizer::postprocess() const {
+  std::vector<float> scratch;
+  std::vector<int> shape;
+  const float* v = outputAsFloat(engine_, out_idx_, scratch, shape);
+  if (!cfg_.normalize) return std::vector<float>(v, v + dim_);
+  return normalizeEmbedding(v, dim_);
 }
 
 }  // namespace rcdl

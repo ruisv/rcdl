@@ -319,6 +319,35 @@ def bench_wholebody(name, model):
     return name, run
 
 
+def bench_face_recognition(name, model):
+    """Identity embedding. `infer` is the NPU alone; the gap to `e2e` is the
+    five-point warp, which is CPU because a similarity transform is not
+    something the hardware letterbox can express. The result column reports the
+    separation actually achieved, since a broken alignment still returns
+    well-formed unit vectors."""
+    def run():
+        path = bm.require_model(model)
+        det = rcdl.Engine(bm.require_model("retinaface_rk3588.rknn")).face_detector()
+        e = rcdl.Engine(path)
+        rec = e.face_recognizer()
+        vecs, one = [], None
+        for img_name in ("zidane.jpg", "bus.jpg"):
+            img = bm.load_bgr(img_name)
+            for f in rcdl.detect_faces(det, img):
+                lm = np.array(f.landmarks, np.float32).reshape(5, 2)
+                vecs.append(rcdl.embed_face(rec, img, lm))
+                if one is None:
+                    one = (img, lm)
+        if not vecs:
+            raise RuntimeError("no faces to embed")
+        e2e = timed(lambda: rcdl.embed_face(rec, one[0], one[1]))
+        m = np.stack(vecs) @ np.stack(vecs).T
+        off = max(float(m[i, j]) for i in range(len(vecs)) for j in range(i + 1, len(vecs)))
+        return npu_ms(e), e2e, model_mb(path), \
+            f"{len(vecs)} faces, worst cross-identity similarity {off:.3f}"
+    return name, run
+
+
 def bench_open_vocab(name, model):
     """Open-vocabulary detection. The `result` column names what the PROMPTS
     found, which is the only thing that distinguishes this from any other
@@ -389,6 +418,7 @@ TASKS = [
     bench_promptable("promptable_seg", "edge_sam_3x_encoder_fp16_rk3588.rknn",
                      "edge_sam_3x_decoder_fp16_rk3588.rknn"),
     bench_wholebody("wholebody", "rtmw_s_133_256x192_fp16_rk3588.rknn"),
+    bench_face_recognition("face_recognition", "arcface_r50_112_fp16_rk3588.rknn"),
     bench_open_vocab("open_vocab", "yoloe_11s_coco80_rk3588.rknn"),
     bench_open_vocab("open_vocab_prompts", "yoloe_11s_streetwear_rk3588.rknn"),
     bench_panoptic_drive("panoptic_drive", "yolop_cut_640_i8_rk3588.rknn"),

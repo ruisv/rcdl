@@ -118,6 +118,13 @@ REGISTRY=(
   # docs/MODELS.md.
   "yolop_cut_640_fp16_rk3588.rknn|convert|yolop_cut_640_fp16_rk3588.rknn"
   "yolop_cut_640_i8_rk3588.rknn|convert|yolop_cut_640_i8_rk3588.rknn"
+  # Face recognition (ArcFace R50). FLOAT for a DATA reason rather than an
+  # accuracy one: int8 would need a calibration set of ALIGNED 112x112 crops —
+  # calibrating this network on centre crops gives a different model whose
+  # published accuracy does not apply — and this repo carries four faces, all
+  # different people. fp16 needs no calibration set and reproduces the fp32 ONNX
+  # to cosine 1.00000 on an identical crop. Input is float32 still in 0..255.
+  "arcface_r50_112_fp16_rk3588.rknn|convert|arcface_r50_112_fp16_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

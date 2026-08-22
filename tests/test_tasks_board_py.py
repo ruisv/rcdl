@@ -2168,3 +2168,122 @@ def test_yolop_is_reproducible(rcdl):
             b.x1, b.y1, b.x2, b.y2, b.score, b.class_id)
     np.testing.assert_array_equal(np.asarray(dr1.labels), np.asarray(dr2.labels))
     np.testing.assert_array_equal(np.asarray(ln1.labels), np.asarray(ln2.labels))
+
+
+# --------------------------------------------------------------------------- #
+# Face recognition — ArcFace R50 identity embeddings                            #
+# --------------------------------------------------------------------------- #
+ARCFACE_MODEL = "arcface_r50_112_fp16_rk3588.rknn"
+
+
+def _faces_with_landmarks(rcdl, names=("zidane.jpg", "bus.jpg")):
+    """Every face the detector finds, with its five landmarks in source pixels."""
+    det = rcdl.Engine(bm.require_model("retinaface_rk3588.rknn")).face_detector()
+    out = []
+    for name in names:
+        img = bm.load_bgr(name)
+        for i, f in enumerate(rcdl.detect_faces(det, img)):
+            lm = np.array(f.landmarks, np.float32).reshape(5, 2)
+            out.append((f"{name}#{i}", img, lm))
+    return out
+
+
+def test_identity_embeddings_separate_different_people(rcdl):
+    """The only claim an identity model makes: two vectors of one person score
+    high, two of different people score low. This repo carries four faces and
+    they are four DIFFERENT people, so this is the negative half — every pair
+    must be near zero. Measured: -0.10 to +0.08, against a same-face floor of
+    0.98 in the test below."""
+    need(rcdl, "FaceRecognizer")
+    rec = rcdl.Engine(bm.require_model(ARCFACE_MODEL)).face_recognizer()
+    faces = _faces_with_landmarks(rcdl)
+    assert len(faces) >= 4, f"expected four faces across the samples, got {len(faces)}"
+
+    vecs = {n: rcdl.embed_face(rec, img, lm) for n, img, lm in faces}
+    for n, v in vecs.items():
+        assert v.shape == (rec.dim,)
+        assert float(np.linalg.norm(v)) == pytest.approx(1.0, abs=1e-4), "not unit length"
+
+    names = list(vecs)
+    worst = -1.0
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            c = float(np.dot(vecs[names[i]], vecs[names[j]]))
+            print(f"\n  {names[i]:<13} vs {names[j]:<13} {c:+.3f}")
+            worst = max(worst, c)
+    assert worst < 0.35, f"two different people scored {worst:.3f} — identities are not separated"
+
+
+def test_identity_survives_nuisance_but_not_a_missing_alignment(rcdl):
+    """Two halves of one contract, and the second is why alignment lives inside
+    the recognizer.
+
+    The same face rotated, scaled, dimmed, blurred or JPEG-crushed is the same
+    identity by construction, and must stay near 1.0 — measured 0.980-0.999.
+    The same face CROPPED TO ITS BOX instead of warped onto the five-point
+    template scores 0.493 against its own aligned vector: still positive, so
+    nothing looks broken, but half the identity is gone. Nothing in the output
+    says the crop was wrong, which is exactly the failure this pins."""
+    need(rcdl, "FaceRecognizer")
+    import cv2
+
+    rec = rcdl.Engine(bm.require_model(ARCFACE_MODEL)).face_recognizer()
+    name, img, lm = _faces_with_landmarks(rcdl, ("zidane.jpg",))[0]
+    base = rcdl.embed_face(rec, img, lm)
+    h, w = img.shape[:2]
+
+    def warped(m):
+        p = np.hstack([lm, np.ones((5, 1), np.float32)])
+        return cv2.warpAffine(img, m, (w, h)), (p @ m.T).astype(np.float32)
+
+    worst = 1.0
+    cases = [("rot +8", cv2.getRotationMatrix2D((w / 2, h / 2), 8, 1.0).astype(np.float32)),
+             ("rot -8", cv2.getRotationMatrix2D((w / 2, h / 2), -8, 1.0).astype(np.float32)),
+             ("scale 0.85", cv2.getRotationMatrix2D((w / 2, h / 2), 0, 0.85).astype(np.float32))]
+    for label, m in cases:
+        im, pts = warped(m)
+        c = float(np.dot(base, rcdl.embed_face(rec, im, pts)))
+        print(f"\n  {label:<11} {c:+.3f}")
+        worst = min(worst, c)
+    for label, im in (("bright", np.clip(img.astype(np.float32) * 1.3, 0, 255).astype(np.uint8)),
+                      ("dark", np.clip(img.astype(np.float32) * 0.7, 0, 255).astype(np.uint8)),
+                      ("blur", cv2.GaussianBlur(img, (3, 3), 0)),
+                      ("jpeg40", cv2.imdecode(cv2.imencode(
+                          ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 40])[1], 1))):
+        c = float(np.dot(base, rcdl.embed_face(rec, im, lm)))
+        print(f"  {label:<11} {c:+.3f}")
+        worst = min(worst, c)
+    assert worst > 0.90, f"a nuisance transform moved the identity to {worst:.3f}"
+
+    # The contrast: same face, box crop instead of the five-point warp.
+    x1, y1 = lm[:, 0].min() - 30, lm[:, 1].min() - 40
+    x2, y2 = lm[:, 0].max() + 30, lm[:, 1].max() + 40
+    box = img[max(0, int(y1)):int(y2), max(0, int(x1)):int(x2)]
+    crop = cv2.resize(box, (rec.input_width, rec.input_height))
+    v = rec.embed_aligned(np.ascontiguousarray(crop).reshape(-1),
+                          rec.input_width, rec.input_height, "bgr888")
+    v = v / np.linalg.norm(v)
+    misaligned = float(np.dot(base, v))
+    print(f"  box crop    {misaligned:+.3f}   (nuisance floor {worst:+.3f})")
+    assert misaligned < worst - 0.3, (
+        "a box crop scored as well as a real nuisance transform — either the "
+        "alignment is not being applied, or this contrast has stopped meaning anything")
+
+
+def test_face_embeddings_are_reproducible(rcdl):
+    need(rcdl, "FaceRecognizer")
+    rec = rcdl.Engine(bm.require_model(ARCFACE_MODEL)).face_recognizer()
+    name, img, lm = _faces_with_landmarks(rcdl, ("zidane.jpg",))[0]
+    np.testing.assert_array_equal(rcdl.embed_face(rec, img, lm),
+                                  rcdl.embed_face(rec, img, lm))
+
+
+def test_face_recognizer_rejects_a_wrongly_sized_aligned_crop(rcdl):
+    """embed_aligned takes the model's input size and nothing else: a crop of
+    another size would be read as though it were aligned, and the vector would
+    look perfectly normal."""
+    need(rcdl, "FaceRecognizer")
+    rec = rcdl.Engine(bm.require_model(ARCFACE_MODEL)).face_recognizer()
+    bad = np.zeros((64, 64, 3), np.uint8)
+    with pytest.raises(Exception):
+        rec.embed_aligned(np.ascontiguousarray(bad).reshape(-1), 64, 64, "bgr888")

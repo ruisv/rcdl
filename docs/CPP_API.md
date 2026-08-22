@@ -115,6 +115,17 @@ correlation-based optical-flow model loadable at all — librknnrt 2.3.2 has no
 `GridSample` on the NPU *or* on its CPU fallback path, and a model built without
 that node declared as a custom operator segfaults inside `rknn_init`.
 
+`FaceRecognizer` is the other shape worth knowing: a head that owns a **host
+image transform** because the transform is part of the model contract. An
+identity embedding is computed on a five-point similarity warp onto a fixed
+template, not on the detector's box, and a box crop returns a perfectly
+well-formed vector with half the identity gone. `faceAlignTransform()` exposes
+the geometry for a caller that wants to warp elsewhere; the class does it
+internally so the template, the output size, the channel order and whether the
+model wants bytes or floats cannot drift apart. It reads `inputType(0)` and
+feeds u8 or float32-in-0..255 accordingly, which is what lets one class serve a
+quantized and a float build.
+
 One head here is **anchor-based**, and it is worth knowing why it is separate.
 Everything above decodes anchor-free LTRB, where a cell predicts distances to the
 four box edges. A panoptic driving model built on the YOLOv5 backbone predicts,

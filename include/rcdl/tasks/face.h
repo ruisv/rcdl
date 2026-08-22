@@ -1,10 +1,13 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "rcdl/preproc/geometry.h"
+#include "rcdl/preproc/image.h"
 
 namespace rcdl {
 
@@ -224,9 +227,12 @@ class FaceDetector {
 // between two different people. Nothing in the output says the crop was wrong.
 //
 // So alignment is part of the task, not a preprocessing nicety, and it is the
-// part this header owns. The warp itself is a host image operation (cv2, RGA,
-// whatever the caller has) and stays with the caller, exactly as the OCR crop
-// does; what lives here is the geometry.
+// part this header owns. The geometry below is public so a caller can do the
+// warp with whatever it already has (cv2, RGA); FaceRecognizer additionally
+// does it internally, and that is the path to prefer — the conventions the warp
+// has to respect (template, output size, channel order, and whether the model
+// wants bytes or floats still scaled 0..255) are all model contract, and a
+// caller-side warp is exactly where they get lost without any error.
 
 /// The canonical 5-point template ArcFace-family models are trained on, written
 /// as x0,y0..x4,y4 in the order the detector produces: left eye, right eye,
@@ -257,6 +263,73 @@ void similarityTransform(const float src[10], const float dst[10], float m[6]);
 /// `out_w` x `out_h` — `similarityTransform` against `arcFaceTemplate`.
 /// `landmarks` is the flat x0,y0..x4,y4 form of FaceDetection::landmarks.
 void faceAlignTransform(const float landmarks[10], int out_w, int out_h, float m[6]);
+
+// ===========================================================================
+// Face recognition — the identity embedding itself
+// ===========================================================================
+//
+// One aligned crop in, one unit-length vector out. Two vectors of the same
+// person score high on cosine similarity, two of different people score low,
+// and that threshold is the whole API. `tracks/reid.h`'s normalizeEmbedding /
+// cosineSimilarity are the same primitives and work on these vectors unchanged.
+//
+// The class reads the model's own input type and feeds it accordingly: a
+// quantized build takes the crop as u8 bytes, a float build takes float32
+// STILL SCALED 0..255, because the (x-127.5)/127.5 the reference applies is
+// folded into the `.rknn`. Handing a float model 0..1 is not an error anywhere
+// in the stack — it returns a well-formed unit vector computed from a picture
+// 255 times too dark.
+
+/// Post-processing parameters for an identity embedding.
+struct FaceRecogConfig {
+  /// Channel order the model was trained on. ArcFace/insightface is RGB.
+  PixelFormat model_input = PixelFormat::RGB888;
+  /// L2-normalise the output, so cosine similarity is a dot product.
+  bool normalize = true;
+  /// Value used where the aligned crop falls outside the source frame. A face
+  /// at the edge of the frame is normal and the template reaches past it.
+  std::uint8_t pad = 0;
+};
+
+/// Engine-bound identity embedder. Input size comes from the model.
+class FaceRecognizer {
+ public:
+  explicit FaceRecognizer(Engine& engine, FaceRecogConfig cfg = FaceRecogConfig(),
+                          int output_index = 0);
+
+  /// Warp `src` onto the ArcFace template through the face's five landmarks
+  /// (x0,y0..x4,y4 in SOURCE pixels, the order FaceDetection produces), run the
+  /// model, and return the embedding. This is the entry point to prefer.
+  std::vector<float> embed(const ImageView& src, const float landmarks[10]);
+
+  /// Embed a crop that is ALREADY aligned to the template at the model's input
+  /// size — for a caller that did the warp itself, or is replaying stored crops.
+  std::vector<float> embedAligned(const ImageView& aligned);
+
+  /// Decode the CURRENT contents of the bound output (i.e. after an infer()).
+  std::vector<float> postprocess() const;
+
+  int dim() const noexcept { return dim_; }
+  int inputWidth() const noexcept { return in_w_; }
+  int inputHeight() const noexcept { return in_h_; }
+  /// The affine used by the most recent embed(), row-major 2x3.
+  const std::array<float, 6>& lastTransform() const noexcept { return last_m_; }
+
+  const FaceRecogConfig& config() const noexcept { return cfg_; }
+
+ private:
+  void feed(const ImageView& src, const float m[6]);
+
+  Engine& engine_;
+  FaceRecogConfig cfg_;
+  int out_idx_;
+  int in_w_ = 0;
+  int in_h_ = 0;
+  int dim_ = 0;
+  bool float_input_ = false;
+  std::vector<float> scratch_;      ///< float input staging, when the model wants floats
+  std::array<float, 6> last_m_{};
+};
 
 /// Flatten FaceDetection::landmarks into the x0,y0..x4,y4 form the two functions
 /// above take. Throws rcdl::Error unless there are exactly five of them, because

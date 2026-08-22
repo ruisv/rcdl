@@ -3271,6 +3271,57 @@ NB_MODULE(rcdl_py, m) {
       "The (2,3) affine that warps a face's five landmarks onto the ArcFace template — "
       "feed it to cv2.warpAffine to get the crop an identity model expects");
 
+  // --- face recognition (identity embedding) -----------------------------------------
+  nb::class_<rcdl::FaceRecognizer>(m, "FaceRecognizer")
+      .def(
+          "__init__",
+          [](rcdl::FaceRecognizer* self, nb::handle engine_arg, const std::string& model_input,
+             bool normalize, std::uint8_t pad, int output_index) {
+            rcdl::FaceRecogConfig cfg;
+            cfg.model_input = formatFromName(model_input);
+            cfg.normalize = normalize;
+            cfg.pad = pad;
+            new (self) rcdl::FaceRecognizer(engineFrom(engine_arg), cfg, output_index);
+          },
+          "engine"_a, "model_input"_a = "rgb888", "normalize"_a = true,
+          "pad"_a = std::uint8_t(0), "output_index"_a = 0, nb::keep_alive<1, 2>())
+      .def(
+          "embed",
+          [](rcdl::FaceRecognizer& r, const Contig& img, int w, int h, const std::string& fmt,
+             const Contig& landmarks) {
+            float l[10];
+            quadOrFive(landmarks, l, "FaceRecognizer.embed landmarks");
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, 0, 0);
+            std::vector<float> e;
+            {
+              nb::gil_scoped_release nogil;  // CPU warp + NPU
+              e = r.embed(v, l);
+            }
+            return ownedArray<float>(e.data(), {e.size()});
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a, "landmarks"_a,
+          "Warp the five landmarks onto the ArcFace template and embed — the entry point to "
+          "prefer, because it owns the conventions the warp has to respect")
+      .def(
+          "embed_aligned",
+          [](rcdl::FaceRecognizer& r, const Contig& img, int w, int h, const std::string& fmt) {
+            const rcdl::ImageView v = viewFromArray(img, w, h, fmt, 0, 0);
+            std::vector<float> e;
+            {
+              nb::gil_scoped_release nogil;
+              e = r.embedAligned(v);
+            }
+            return ownedArray<float>(e.data(), {e.size()});
+          },
+          "image"_a, "w"_a, "h"_a, "fmt"_a,
+          "Embed a crop ALREADY aligned to the template at the model's input size")
+      .def_prop_ro("dim", &rcdl::FaceRecognizer::dim)
+      .def_prop_ro("input_width", &rcdl::FaceRecognizer::inputWidth)
+      .def_prop_ro("input_height", &rcdl::FaceRecognizer::inputHeight)
+      .def_prop_ro("last_transform", [](const rcdl::FaceRecognizer& r) {
+        return ownedArray<float>(r.lastTransform().data(), {std::size_t(2), std::size_t(3)});
+      });
+
   nb::class_<PyFaceDetector>(m, "FaceDetector")
       .def(
           "__init__",

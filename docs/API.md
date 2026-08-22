@@ -363,6 +363,34 @@ crops; geometry-only tracking never touches it.
 
 ---
 
+## Face recognition
+
+```python
+det = rcdl.Engine("models/retinaface_rk3588.rknn").face_detector()
+rec = rcdl.Engine("models/arcface_r50_112_fp16_rk3588.rknn").face_recognizer()
+
+vecs = []
+for f in rcdl.detect_faces(det, frame):
+    lm = np.array(f.landmarks, np.float32)          # 5 points, source pixels
+    vecs.append(rcdl.embed_face(rec, frame, lm))    # (512,) unit length
+
+same = float(np.dot(vecs[0], vecs[1]))              # cosine: > ~0.5 same person
+```
+
+`embed_face` does the **five-point warp itself**, and that is the entry point to
+prefer. The crop is the model's contract — template, size, channel order, and
+(for a float build) values still scaled 0..255 rather than 0..1 — and a
+caller-side warp is where those get lost silently. Measured: the same face
+box-cropped instead of aligned scores 0.493 against its aligned self, where
+nuisance transforms of the same photo stay above 0.98. See `docs/MODELS.md`.
+
+`rcdl.face_align_transform(landmarks)` is still there for a caller that wants to
+warp with `cv2.warpAffine` or RGA, and `recognizer.embed_aligned(crop)` takes the
+result. Vectors are unit length, so `rcdl.cosine_similarity` is a dot product and
+`EmbeddingBank` indexes them like any other appearance vector.
+
+---
+
 ## Open-vocabulary detection
 
 ```python

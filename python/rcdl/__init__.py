@@ -32,6 +32,7 @@ from rcdl_py import (
     FaceDetection,
     FaceDetector,
     FaceHeadLayout,
+    FaceRecognizer,
     FeatureExtractor,
     FeatureSet,
     ImageEmbedder,
@@ -291,6 +292,8 @@ __all__ = [
     "FaceDetection",
     "FaceDetector",
     "FaceHeadLayout",
+    "FaceRecognizer",
+    "embed_face",
     "decode_faces",
     "arcface_template",
     "face_align_transform",
@@ -637,6 +640,14 @@ class Engine:
         lm.require_size(yolo_head_classes(self._e, len(lm)))
         return lm
 
+    def face_recognizer(self, **kwargs) -> FaceRecognizer:
+        """A FaceRecognizer driving this Engine (identity embedding).
+
+        Keyword arguments: ``model_input`` (channel order the model was trained
+        on — ArcFace is rgb888), ``normalize``, ``pad``, ``output_index``.
+        """
+        return FaceRecognizer(self._e, **kwargs)
+
     def depth_estimator(self, **kwargs) -> DepthEstimator:
         """A DepthEstimator driving this Engine (monocular depth).
 
@@ -953,6 +964,18 @@ def recognize_text(recognizer: TextRecognizer, img, fmt: str = "bgr888") -> Text
     """
     flat, w, h = _as_buffer(img, fmt)
     return recognizer.process(flat, w, h, fmt)
+
+
+def embed_face(recognizer: FaceRecognizer, img, landmarks, fmt: str = "bgr888") -> np.ndarray:
+    """Identity embedding for one face, given its five landmarks in SOURCE pixels.
+
+    ``landmarks`` is a (5, 2) or (10,) float32 array in the order the detector
+    produces: left eye, right eye, nose, left mouth corner, right mouth corner.
+    The alignment warp happens inside — see docs/MODELS.md for why that is not
+    left to the caller.
+    """
+    flat, w, h = _as_buffer(img, fmt)
+    return recognizer.embed(flat, w, h, fmt, np.ascontiguousarray(landmarks, np.float32))
 
 
 def detect_faces(detector: FaceDetector, img, fmt: str = "bgr888"):

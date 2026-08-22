@@ -68,6 +68,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `yoloe_11s_coco80_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | 9 outputs, the yolov8n layout with `cls[1,80,H,W]`. The class axis is **80 words chosen at conversion time**; pair it with `yoloe_11s_coco80_rk3588.labels.txt` |
 | `yoloe_11s_streetwear_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | same head with `cls[1,6,H,W]` — six prompts COCO has no class for. Pair with its own `.labels.txt` |
 | `yolop_cut_640_i8_rk3588.rknn` | panoptic driving | 640×640 u8 | rgb | 5 outputs: three **anchor-based** raw heads `[1,18,H,W]` (3 priors × (5 + 1 class), NCHW, **unactivated**) + `drivable[1,2,640,640]` + `lane[1,2,640,640]` (sigmoid in-graph). ImageNet mean/std baked in |
+| `arcface_r50_112_fp16_rk3588.rknn` | face recognition (identity) | 112×112 **f32** | rgb | `[1,512]` f16 embedding, L2-normalised on read-out. Input is float32 **still in 0..255** — the (x−127.5)/127.5 is in the model. The crop is a **five-point warp**, not a box — see below |
 | `yolop_cut_640_fp16_rk3588.rknn` | panoptic driving | 640×640 **f32** | rgb | the same 5 outputs, float. Keeps the lane mask the int8 build blurs — but its float32 input cannot be letterboxed straight into the NPU tensor, so it is off the zero-copy path. See below |
 
 **YOLO26 needs no decoder changes, and that is the whole point of resolving the
@@ -613,6 +614,55 @@ fed a float32 tensor still in 0..255, and that is how the table above was
 measured. If lane geometry is what a deployment needs rather than drivable area
 and vehicles, take it and pay for the CPU input pass.
 
+### Face recognition: the crop is the model contract
+
+An identity embedding is not computed on the detector's box. Every ArcFace-family
+model is trained on a crop in a fixed canonical pose — the five landmarks mapped
+onto a template so the eyes land on the same pixels for every face the network
+ever sees. Hand it the bounding box instead and it still returns a 512-d unit
+vector that still compares. It is just a worse one, and nothing says so.
+
+That is now measured rather than asserted. Taking one face from `zidane.jpg`:
+
+| what it is compared against | cosine |
+|---|---|
+| itself, rotated ±8°, scaled 0.85, dimmed, blurred, JPEG q40 | **0.980 – 0.999** |
+| itself, **box-cropped instead of five-point aligned** | **0.493** |
+| the three other (different) people in the samples | −0.10 – +0.08 |
+
+The box crop keeps enough to look plausible and loses half the identity. That is
+why `FaceRecognizer` owns the warp instead of handing the caller a matrix: the
+template, the output size, the channel order and whether the model wants bytes
+or floats are all model contract, and a caller-side warp is where they get lost.
+`faceAlignTransform()` is still public for a caller that wants to warp with
+something else — `cv2.warpAffine` with that matrix agrees with the internal
+resampler to cosine 0.982–0.999.
+
+**Which is the more interesting number here, because it is larger than the
+quantization error.** On an identical crop the fp16 build reproduces the fp32
+ONNX to **cosine 1.00000** on all four faces. So on this network the choice of
+*resampler* moves the embedding more than fp16 does — and it moves it most on
+the small, low-resolution faces (0.982 on the `bus.jpg` pair against 0.9988 on
+the large `zidane.jpg` ones), which is where a recognition system is already
+weakest.
+
+**Float for a data reason, not an accuracy one.** int8 would need a calibration
+set of aligned 112×112 crops, and bcdl's experience is that this exact network
+calibrated on centre crops is a different model whose published accuracy does
+not apply. This repo carries four faces, all different people — not a
+calibration set. fp16 needs none, so it is the build that can be made and
+measured here; int8 stays open until there is licensed aligned-crop data.
+
+**What is NOT established here.** The 0.980–0.999 figures come from *nuisance
+transforms of one photograph*, which is the same identity by construction. They
+are not two genuinely different pictures of one person — different pose,
+lighting, expression, age — where published ArcFace cosines are far lower and
+where an operating threshold would actually have to be chosen. This repo has no
+such pair and cannot acquire one without redistributing photographs of an
+identifiable person. What the numbers above do establish is that the embedding
+separates identities, is stable under nuisance, and depends on the alignment.
+Stage your own pairs (gitignored, never committed) to pick a threshold.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -639,6 +689,7 @@ RK3588S, single-frame latency unless stated:
 | EdgeSAM 1024×1024, encode a frame | 350–450 ms |
 | EdgeSAM, one prompt against that embedding | 140–165 ms |
 | RTMW whole-body, one person (crop + 133 keypoints) | 23–47 ms |
+| ArcFace R50, one face (five-point warp + 512-d embedding) | 32 ms (31.5 ms NPU) |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 
