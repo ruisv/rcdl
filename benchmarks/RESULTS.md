@@ -3,9 +3,15 @@
 RK3588S · librknnrt 2.3.2 · NPU driver 0.9.8. Regenerate with
 
 ```bash
-PYTHONPATH=build:python python benchmarks/bench.py \
+PYTHONPATH=build:python python benchmarks/bench.py --figures \
     --json benchmarks/results.json --markdown benchmarks/RESULTS.md
 ```
+
+`--figures` also draws one annotated check image per task into
+`benchmarks/figures/` (the gallery in the README). They come out of the SAME run
+as the numbers, so a figure cannot end up describing a different build from the
+row beside it; a task whose figure fails to draw is re-measured without it
+rather than dropped from the table.
 
 Every row runs a real `.rknn` from `models/` on a real sample image. **`infer` is
 the NPU alone** (the runtime's own `RKNN_QUERY_PERF_RUN`); **`e2e` is the whole
@@ -22,28 +28,28 @@ produced. A model that is not staged is reported as skipped rather than dropped
 <!-- BENCH:BEGIN -->
 | task | infer ms | e2e ms | model MB | result |
 |---|---|---|---|---|
-| det | 21.79 | 45.3 | 4.1 | 1 bus, 4 person |
-| det_yolo11 | 32.43 | 77.2 | 4.0 | 1 bus, 4 person |
-| det_yolo26 | 36.04 | 78.4 | 4.1 | 1 bus, 4 person |
-| cls | 4.69 | 5.2 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
-| cls_yolo26 | 3.60 | 3.7 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
-| instance_seg | 32.84 | 128.8 | 4.5 | 5 instances |
-| semantic_seg | 75.07 | 145.6 | 9.1 | 810x1080 map, 9 classes present |
-| pose | 38.02 | 82.1 | 5.0 | 4 people, 43 joints over 0.5 |
-| obb | 28.59 | 79.5 | 4.2 | 33 rotated boxes |
-| depth | 276.51 | 298.0 | 28.3 | 810x1080 disparity [0.00,0.90] |
-| ocr | 39.60 | 1108.1 | 9.2 | 16 boxes, 15 lines read |
-| face | 5.34 | 9.2 | 18.0 | 2 faces, best 0.995 |
-| reid | 13.65 | 15.4 | 2.3 | 4 crops, cross-similarity max 0.471 |
-| features | 33.20 | 79.1 | 1.3 | 4096+4096 features, 1989 matches (+199 ms to match) |
-| superres | 62.87 | 78.4 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
-| flow | 1493.66 | 1504.7 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
-| promptable_seg | 364.57 | 585.7 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 438 ms + prompt 147 ms) |
-| wholebody | 31.33 | 33.8 | 32.1 | 133/133 keypoints over 0.3, one person |
-| face_recognition | 26.73 | 31.1 | 83.9 | 4 faces, worst cross-identity similarity 0.072 |
-| open_vocab | 44.60 | 96.4 | 10.7 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
-| open_vocab_prompts | 51.59 | 82.1 | 10.7 | 6 prompts -> 4 sneakers |
-| panoptic_drive | 110.45 | 180.1 | 9.8 | 18 vehicles, drivable 21.5%, lane 1.8% of the frame |
+| det | 25.15 | 54.0 | 4.1 | 1 bus, 4 person |
+| det_yolo11 | 32.87 | 82.0 | 4.0 | 1 bus, 4 person |
+| det_yolo26 | 37.63 | 78.5 | 4.1 | 1 bus, 4 person |
+| cls | 4.62 | 5.0 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
+| cls_yolo26 | 2.77 | 2.6 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
+| instance_seg | 33.61 | 100.9 | 4.5 | 5 instances |
+| semantic_seg | 68.15 | 128.6 | 9.1 | 810x1080 map, 9 classes present |
+| pose | 47.02 | 106.2 | 5.0 | 4 people, 43 joints over 0.5 |
+| obb | 28.17 | 75.9 | 4.2 | 33 rotated boxes |
+| depth | 318.67 | 324.0 | 28.3 | 810x1080 disparity [0.00,0.90] |
+| ocr | 35.55 | 1319.3 | 9.2 | 16 boxes, 15 lines read |
+| face | 5.54 | 9.3 | 18.0 | 2 faces, best 0.995 |
+| reid | 7.16 | 18.5 | 2.3 | 4 crops, cross-similarity max 0.471 |
+| features | 42.91 | 96.7 | 1.3 | 4096+4096 features, 1989 matches (+200 ms to match) |
+| superres | 62.97 | 79.3 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
+| flow | 1683.47 | 1508.9 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
+| promptable_seg | 263.32 | 587.4 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 434 ms + prompt 153 ms) |
+| wholebody | 33.01 | 37.7 | 32.1 | 133/133 keypoints over 0.3, one person |
+| face_recognition | 25.33 | 30.6 | 83.9 | 4 faces, worst cross-identity similarity 0.072 |
+| open_vocab | 53.05 | 101.2 | 10.7 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
+| open_vocab_prompts | 51.25 | 84.5 | 10.7 | 6 prompts -> 4 sneakers |
+| panoptic_drive | 130.94 | 190.1 | 9.8 | 18 vehicles, drivable 21.5%, lane 1.8% of the frame |
 <!-- BENCH:END -->
 
 Reading the table:

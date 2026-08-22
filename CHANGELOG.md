@@ -330,6 +330,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- **Check figures** — `benchmarks/bench.py --figures` draws one annotated image
+  per task into `benchmarks/figures/`, and the README leads with the gallery.
+  They exist because a timing table cannot be checked: a row reading `22 ms` and
+  `18 vehicles` is perfectly consistent with eighteen boxes in the sky. Drawing
+  happens in the SAME run that produces the numbers, so a figure cannot end up
+  describing a different build from the row beside it, and a task whose figure
+  throws is re-measured without it rather than dropped from the table.
+  Several figures are about a contrast rather than a picture — the
+  open-vocabulary one names a class COCO does not have, the face-recognition one
+  shows the ALIGNED crops because the canonical pose is the model's contract, and
+  the flow and feature ones use a known warp so every match has an exact right
+  answer.
+  *One OpenCV 5 behaviour change is baked into the text drawing: glyph advance
+  now depends on stroke thickness (the same string measures 456 px at thickness 1
+  and 496 px at thickness 2+), so the usual "fat black stroke behind a thin
+  coloured one" outline renders the halo ~9% wider than the fill it is supposed
+  to sit behind, leaving a ghost of the last few characters. The outline is drawn
+  by repeating one thickness at 1 px offsets instead.*
 - `tasks/face` — **identity embeddings** (`FaceRecognizer`, `FaceRecogConfig`),
   completing the face stack: RetinaFace finds the face and its five landmarks,
   `faceAlignTransform` puts them on the ArcFace template, and this returns the

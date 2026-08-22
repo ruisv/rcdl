@@ -27,6 +27,32 @@ RK3588S 实测（librknnrt 2.3.2 / 驱动 0.9.8）：
 | 1080p H.264 编码（直接读解码帧的 fd） | **197 fps**，往返亮度 PSNR 47.2 dB |
 | YOLOv8n / YOLO11n on `bus.jpg` | 各自独立得到 1 bus + 4 person |
 
+## 检查图
+
+每一张都由 `benchmarks/bench.py --figures` 在板上生成，**和上面那张时间表来自同一次运行**，
+所以图和数字不会各说各话。它们回答的是时间表回答不了的那个问题：*模型找对东西了吗*——
+一行写着 `22 ms` / `18 vehicles` 的记录，和"在天上框出十八个目标"是完全兼容的。
+
+| | | |
+|:--:|:--:|:--:|
+| <img src="benchmarks/figures/det.jpg" width="250"> | <img src="benchmarks/figures/instance_seg.jpg" width="250"> | <img src="benchmarks/figures/semantic_seg.jpg" width="250"> |
+| 检测 | 实例分割 | 语义分割 |
+| <img src="benchmarks/figures/pose.jpg" width="250"> | <img src="benchmarks/figures/wholebody.jpg" width="250"> | <img src="benchmarks/figures/obb.jpg" width="250"> |
+| 姿态（17 点） | 全身姿态（133 点） | 旋转框 |
+| <img src="benchmarks/figures/depth.jpg" width="250"> | <img src="benchmarks/figures/flow.jpg" width="250"> | <img src="benchmarks/figures/superres.jpg" width="250"> |
+| 单目深度 | 稠密光流 | ×4 超分 |
+| <img src="benchmarks/figures/face.jpg" width="250"> | <img src="benchmarks/figures/face_recognition.jpg" width="250"> | <img src="benchmarks/figures/reid.jpg" width="250"> |
+| 人脸 + 5 点 | 人脸识别（对齐后的 crop） | 行人 ReID |
+| <img src="benchmarks/figures/ocr.jpg" width="250"> | <img src="benchmarks/figures/features.jpg" width="250"> | <img src="benchmarks/figures/promptable_seg.jpg" width="250"> |
+| OCR（检测 + 识别） | 稀疏特征 + 匹配 | 可提示分割 |
+| <img src="benchmarks/figures/open_vocab_prompts.jpg" width="250"> | <img src="benchmarks/figures/panoptic_drive.jpg" width="250"> | <img src="benchmarks/figures/cls.jpg" width="250"> |
+| 开放词表检测（`sneakers`） | 全景驾驶（一次推理，三个头） | 分类 |
+
+有几张的重点是**对照**而不是画面本身：开放词表那张里的词表是转换期定的，`sneakers`
+在 COCO 里根本没有这个类；人脸识别那张画的是**对齐后**的 crop，因为规范姿态才是模型契约
+（拿检测框裁出来喂进去，对同一张脸只能拿到 0.493）；光流和特征那两张的形变是**已知的**，
+所以每个匹配都有精确的正确答案可以打分。
+
 ```python
 import rcdl, numpy as np
 

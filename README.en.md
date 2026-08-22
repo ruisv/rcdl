@@ -27,6 +27,36 @@ Measured on RK3588S (librknnrt 2.3.2 / driver 0.9.8):
 | 1080p H.264 encode straight from decoded frames | **197 fps**, round-trip luma PSNR 47.2 dB |
 | YOLOv8n / YOLO11n on `bus.jpg` | each independently finds 1 bus + 4 people |
 
+## Check figures
+
+Every one is drawn on the board by `benchmarks/bench.py --figures`, **in the same
+run that produced the table above**, so a figure cannot drift away from its own
+row. They answer the question the timing table cannot: *did the model find the
+right thing?* A row reading `22 ms` and `18 vehicles` is perfectly consistent
+with eighteen boxes in the sky.
+
+| | | |
+|:--:|:--:|:--:|
+| <img src="benchmarks/figures/det.jpg" width="250"> | <img src="benchmarks/figures/instance_seg.jpg" width="250"> | <img src="benchmarks/figures/semantic_seg.jpg" width="250"> |
+| detection | instance segmentation | semantic segmentation |
+| <img src="benchmarks/figures/pose.jpg" width="250"> | <img src="benchmarks/figures/wholebody.jpg" width="250"> | <img src="benchmarks/figures/obb.jpg" width="250"> |
+| pose (17 kpt) | whole-body pose (133 kpt) | oriented boxes |
+| <img src="benchmarks/figures/depth.jpg" width="250"> | <img src="benchmarks/figures/flow.jpg" width="250"> | <img src="benchmarks/figures/superres.jpg" width="250"> |
+| monocular depth | dense optical flow | x4 super-resolution |
+| <img src="benchmarks/figures/face.jpg" width="250"> | <img src="benchmarks/figures/face_recognition.jpg" width="250"> | <img src="benchmarks/figures/reid.jpg" width="250"> |
+| face + 5 landmarks | face recognition (aligned crops) | person ReID |
+| <img src="benchmarks/figures/ocr.jpg" width="250"> | <img src="benchmarks/figures/features.jpg" width="250"> | <img src="benchmarks/figures/promptable_seg.jpg" width="250"> |
+| OCR (detect + read) | sparse features + matching | promptable segmentation |
+| <img src="benchmarks/figures/open_vocab_prompts.jpg" width="250"> | <img src="benchmarks/figures/panoptic_drive.jpg" width="250"> | <img src="benchmarks/figures/cls.jpg" width="250"> |
+| open-vocabulary detection (`sneakers`) | panoptic driving (one inference, three heads) | classification |
+
+Several are about a CONTRAST rather than the picture. The open-vocabulary
+vocabulary is chosen at conversion time and `sneakers` is not a COCO class at
+all. The face-recognition figure shows the ALIGNED crops, because the canonical
+pose is the model's contract — a box crop of the same face scores 0.493 against
+it. And the flow and feature figures use a KNOWN warp, so every match has an
+exact right answer to be scored against.
+
 ```python
 import rcdl, numpy as np
 

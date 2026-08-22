@@ -25,14 +25,23 @@ import time
 
 import numpy as np
 
-_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(_HERE)
+sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_REPO, "tests"))
 
 import board_models as bm  # noqa: E402  (needs the path above)
 
 import rcdl  # noqa: E402
 
+import figures as fg  # noqa: E402  (benchmarks/ is on the path as this file's dir)
+
 WARMUP, ITERS = 2, 5
+
+# Set by main() when --figures is given; a task that can draw one appends it as a
+# fifth element of its return tuple, so the picture and the number always come
+# from the same run.
+DRAW = False
 
 
 def timed(fn, iters=ITERS, warmup=WARMUP):
@@ -73,7 +82,17 @@ def bench_detection(name, model):
         for d in dets:
             n = rcdl.coco_class_name(d.class_id)
             names[n] = names.get(n, 0) + 1
-        return infer, e2e, model_mb(path), ", ".join(f"{v} {k}" for k, v in sorted(names.items()))
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(names.items()))
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            for d in dets:
+                fg.box(fig, d.x1, d.y1, d.x2, d.y2,
+                       f"{rcdl.coco_class_name(d.class_id)} {d.score:.2f}",
+                       fg.class_color(d.class_id))
+            fg.caption(fig, f"{name}: {summary}",
+                       "boxes in SOURCE pixels — the letterbox is undone by the decoder")
+        return infer, e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -85,8 +104,18 @@ def bench_classification(name, model, softmax=True):
         cls = e.classifier(apply_softmax=softmax)
         top = rcdl.classify(cls, img)
         e2e = timed(lambda: rcdl.classify(cls, img))
-        return npu_ms(e), e2e, model_mb(path), \
-            ", ".join(f"{c.class_id}:{c.score:.3f}" for c in top[:3])
+        summary = ", ".join(f"{c.class_id}:{c.score:.3f}" for c in top[:3])
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            if fig.shape[0] < 320:
+                import cv2
+                s_ = 320 / fig.shape[0]
+                fig = cv2.resize(fig, (int(fig.shape[1] * s_), 320))
+            fg.bars(fig, [(f"class {c.class_id}", float(c.score), fg.class_color(c.class_id))
+                          for c in top[:3]],
+                    title=f"{name}: top-3 (softmax {'in the graph' if not softmax else 'on the CPU'})")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -98,7 +127,22 @@ def bench_instance_seg(name, model):
         seg = e.instance_segmenter()
         inst = rcdl.segment_instances(seg, img)
         e2e = timed(lambda: rcdl.segment_instances(seg, img))
-        return npu_ms(e), e2e, model_mb(path), f"{len(inst)} instances"
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            for m in inst:
+                col = fg.class_color(m.class_id)
+                arr = np.asarray(m.mask() if callable(getattr(m, "mask", None)) else m.mask)
+                full = np.zeros(img.shape[:2], bool)
+                y0, x0 = max(0, m.mask_y0), max(0, m.mask_x0)
+                sub = arr.astype(bool)[: img.shape[0] - y0, : img.shape[1] - x0]
+                full[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] = sub
+                fg.blend_mask(fig, full, col)
+                fg.box(fig, m.x1, m.y1, m.x2, m.y2,
+                       f"{rcdl.coco_class_name(m.class_id)} {m.score:.2f}", col)
+            fg.caption(fig, f"{name}: {len(inst)} instances",
+                       "per-instance masks, cropped to their own box — not a semantic map")
+        return npu_ms(e), e2e, model_mb(path), f"{len(inst)} instances", fig
     return name, run
 
 
@@ -112,8 +156,16 @@ def bench_semantic_seg(name, model):
         m = rcdl.segment(seg, img)
         e2e = timed(lambda: rcdl.segment(seg, img))
         labels = np.asarray(m.labels)
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{labels.shape[1]}x{labels.shape[0]} map, {len(np.unique(labels))} classes present"
+        summary = (f"{labels.shape[1]}x{labels.shape[0]} map, "
+                   f"{len(np.unique(labels))} classes present")
+        fig = None
+        if DRAW:
+            import cv2
+            colored = np.asarray(rcdl.seg_colorize(np.ascontiguousarray(labels, np.int32)))
+            fig = cv2.addWeighted(img, 0.45, colored, 0.55, 0)
+            fg.caption(fig, f"{name}: {summary}",
+                       "argmax over the channel axis, projected back onto the frame")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -126,7 +178,24 @@ def bench_pose(name, model):
         poses = rcdl.estimate_pose(pose, img)
         e2e = timed(lambda: rcdl.estimate_pose(pose, img))
         vis = sum(1 for p in poses for k in p.keypoints if k.score > 0.5)
-        return npu_ms(e), e2e, model_mb(path), f"{len(poses)} people, {vis} joints over 0.5"
+        fig = None
+        if DRAW:
+            import cv2
+            fig = img.copy()
+            for i, p in enumerate(poses):
+                col = fg.class_color(i * 3)
+                kp = p.keypoints
+                for a, b in rcdl.coco_skeleton():
+                    if a < len(kp) and b < len(kp) and kp[a].score > 0.5 and kp[b].score > 0.5:
+                        cv2.line(fig, (int(kp[a].x), int(kp[a].y)), (int(kp[b].x), int(kp[b].y)),
+                                 col, 2, cv2.LINE_AA)
+                for k in kp:
+                    if k.score > 0.5:
+                        cv2.circle(fig, (int(k.x), int(k.y)), 3, (255, 255, 255), -1, cv2.LINE_AA)
+                fg.box(fig, p.box.x1, p.box.y1, p.box.x2, p.box.y2, None, col)
+            fg.caption(fig, f"{name}: {len(poses)} people, {vis} joints over 0.5",
+                       "every confident joint has to fall inside its OWN person's box")
+        return npu_ms(e), e2e, model_mb(path), f"{len(poses)} people, {vis} joints over 0.5", fig
     return name, run
 
 
@@ -138,7 +207,20 @@ def bench_obb(name, model):
         obb = e.obb_detector()
         dets = rcdl.detect_obb(obb, img)
         e2e = timed(lambda: rcdl.detect_obb(obb, img))
-        return npu_ms(e), e2e, model_mb(path), f"{len(dets)} rotated boxes"
+        fig = None
+        if DRAW:
+            import cv2
+            fig = img.copy()
+            for d in dets:
+                c = d.rrect.corners
+                pts = np.int32(np.asarray(c() if callable(c) else c).reshape(4, 2))
+                col = fg.class_color(d.class_id)
+                cv2.polylines(fig, [pts], True, col, 2, cv2.LINE_AA)
+                fg.put(fig, rcdl.dota_class_name(d.class_id),
+                       (int(pts[:, 0].min()), max(14, int(pts[:, 1].min()) - 6)), 0.5, col)
+            fg.caption(fig, f"{name}: {len(dets)} rotated boxes",
+                       "the angle convention is per-generation — a wrong one still lands on the object")
+        return npu_ms(e), e2e, model_mb(path), f"{len(dets)} rotated boxes", fig
     return name, run
 
 
@@ -151,8 +233,14 @@ def bench_depth(name, model):
         m = rcdl.estimate_depth(dep, img)
         e2e = timed(lambda: rcdl.estimate_depth(dep, img), iters=3)
         d = np.asarray(m.data)
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{m.width}x{m.height} disparity [{d.min():.2f},{d.max():.2f}]"
+        summary = f"{m.width}x{m.height} disparity [{d.min():.2f},{d.max():.2f}]"
+        fig = None
+        if DRAW:
+            colored = np.asarray(rcdl.depth_colorize(m))
+            fig = fg.side_by_side(img, colored, labels=("frame", "relative inverse depth"))
+            fg.caption(fig, f"{name}: {summary}",
+                       "int8 keeps the ORDER, not the values — hence the per-frame normalisation")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -191,8 +279,21 @@ def bench_ocr(name, det_model, rec_model):
         lines = read_all()
         e2e = timed(read_all, iters=2, warmup=1)
         good = [l for l in lines if l.text]
-        return npu_ms(de), e2e, model_mb(det_path) + model_mb(rec_path), \
-            f"{len(boxes)} boxes, {len(good)} lines read"
+        summary = f"{len(boxes)} boxes, {len(good)} lines read"
+        fig = None
+        if DRAW:
+            import cv2
+            fig = img.copy()
+            for b in boxes:
+                cv2.polylines(fig, [np.int32(np.asarray(b.pts).reshape(4, 2))], True,
+                              (90, 210, 120), 2, cv2.LINE_AA)
+            # The text itself is CJK here, which cv2's Hershey fonts cannot draw —
+            # so the figure shows WHERE the lines are and how many were read, and
+            # the exact strings stay pinned in the board test where they belong.
+            fg.panel(fig, [(f"{summary} — detector + CTC recogniser", (255, 255, 255)),
+                           ("scores: " + ", ".join(f"{l.score:.2f}" for l in good[:8]),
+                            (190, 220, 255))])
+        return npu_ms(de), e2e, model_mb(det_path) + model_mb(rec_path), summary, fig
     return name, run
 
 
@@ -204,8 +305,18 @@ def bench_face(name, model):
         fd = e.face_detector()
         faces = rcdl.detect_faces(fd, img)
         e2e = timed(lambda: rcdl.detect_faces(fd, img))
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(faces)} faces, best {max((f.score for f in faces), default=0):.3f}"
+        summary = f"{len(faces)} faces, best {max((f.score for f in faces), default=0):.3f}"
+        fig = None
+        if DRAW:
+            import cv2
+            fig = img.copy()
+            for f in faces:
+                fg.box(fig, f.x1, f.y1, f.x2, f.y2, f"{f.score:.3f}", (80, 220, 100))
+                for (lx, ly) in np.asarray(f.landmarks, np.float32).reshape(5, 2):
+                    cv2.circle(fig, (int(lx), int(ly)), 3, (60, 200, 240), -1, cv2.LINE_AA)
+            fg.caption(fig, f"{name}: {summary}",
+                       "five landmarks per face — feeding this model RGB instead of BGR loses one")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -222,8 +333,26 @@ def bench_reid(name, model):
         e2e = timed(lambda: rcdl.embed(emb, img, (people[0].x1, people[0].y1,
                                                   people[0].x2, people[0].y2)))
         sims = [float(np.dot(a, b)) for i, a in enumerate(vecs) for b in vecs[i + 1:]]
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(vecs)} crops, cross-similarity max {max(sims, default=0):.3f}"
+        summary = f"{len(vecs)} crops, cross-similarity max {max(sims, default=0):.3f}"
+        fig = None
+        if DRAW:
+            import cv2
+            # The crops themselves ARE the figure: these are different people, so
+            # every off-diagonal similarity has to stay low. A vector that looked
+            # fine and separated nothing would be invisible in a photograph.
+            strip = []
+            for d in people:
+                c = img[max(0, int(d.y1)):int(d.y2), max(0, int(d.x1)):int(d.x2)]
+                if c.size:
+                    strip.append(cv2.resize(c, (160, 320)))
+            if strip:
+                fig = np.hstack(strip)
+                fg.panel(fig, [(f"{name}: {len(vecs)} person crops, all DIFFERENT people",
+                                (255, 255, 255)),
+                               ("pairwise cosine: " + ", ".join(f"{v:+.2f}" for v in sims[:8]),
+                                (190, 220, 255)),
+                               ("crops are SQUASHED to 128x256, not letterboxed", (150, 200, 150))])
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -243,8 +372,24 @@ def bench_features(name, model):
         pairs, _ = rcdl.match_features(a, b)
         e2e = timed(lambda: rcdl.extract_features(ex, img), iters=3)
         match_ms = timed(lambda: rcdl.match_features(a, b), iters=3)
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(a)}+{len(b)} features, {len(pairs)} matches (+{match_ms:.0f} ms to match)"
+        summary = (f"{len(a)}+{len(b)} features, {len(pairs)} matches "
+                   f"(+{match_ms:.0f} ms to match)")
+        fig = None
+        if DRAW:
+            fig = fg.side_by_side(img, warped, labels=("frame", "known warp: 12 deg, 0.85x"))
+            off = img.shape[1] + 8
+            xa, xb = np.asarray(a.xy), np.asarray(b.xy)
+            # ~25 lines, not 2000: a figure showing every match is a solid block
+            # of colour that says nothing about whether the matches are right.
+            pr = np.asarray(pairs)
+            for k, (i, j) in enumerate(pr[:: max(1, len(pr) // 25)]):
+                p0 = (int(xa[i][0]), int(xa[i][1]))
+                p1 = (int(xb[j][0]) + off, int(xb[j][1]))
+                import cv2
+                cv2.line(fig, p0, p1, fg.class_color(k * 5), 1, cv2.LINE_AA)
+            fg.caption(fig, f"{name}: {len(pairs)} mutual-nearest matches",
+                       "the warp is KNOWN, so every match has an exact right answer to score against")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -257,8 +402,16 @@ def bench_superres(name, model):
         sr = e.upscaler()
         up = rcdl.upscale(sr, img)
         e2e = timed(lambda: rcdl.upscale(sr, img), iters=3)
-        return npu_ms(e), e2e, model_mb(path), \
-            f"128x128 -> {up.shape[1]}x{up.shape[0]}, {sr.last_tile_count} tile(s)"
+        summary = f"128x128 -> {up.shape[1]}x{up.shape[0]}, {sr.last_tile_count} tile(s)"
+        fig = None
+        if DRAW:
+            # Nearest-neighbour on the left so the comparison is against the SAME
+            # pixels enlarged, not against a second interpolation.
+            naive = cv2.resize(img, (up.shape[1], up.shape[0]), interpolation=cv2.INTER_NEAREST)
+            fig = fg.side_by_side(naive, up, labels=("input, nearest x4", "model x4"))
+            fg.caption(fig, f"{name}: {summary}",
+                       "PSNR cannot judge this family — it is trained to invent plausible texture")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -275,8 +428,14 @@ def bench_flow(name, model):
         e2e = timed(lambda: rcdl.estimate_flow(est, a, b), iters=3)
         inner = f[48:-48, 48:-48]
         err = np.hypot(inner[..., 0] + 8.0, inner[..., 1])
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{f.shape[1]}x{f.shape[0]} field, EPE {err.mean():.3f} px vs an 8 px shift"
+        summary = f"{f.shape[1]}x{f.shape[0]} field, EPE {err.mean():.3f} px vs an 8 px shift"
+        fig = None
+        if DRAW:
+            colored = np.asarray(rcdl.flow_colorize(np.ascontiguousarray(f, np.float32)))
+            fig = fg.side_by_side(a, colored, labels=("frame A", "flow (hue = direction)"))
+            fg.caption(fig, f"{name}: EPE {err.mean():.3f} px vs a known 8 px shift",
+                       "a uniform shift is ground truth with no dataset — one colour is the answer")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -293,9 +452,18 @@ def bench_promptable(name, enc_model, dec_model):
                           iters=3)
         m = sam.box(36, 230, 799, 771)
         prompt_ms = timed(lambda: sam.box(36, 230, 799, 771), iters=3)
+        summary = (f"box -> {100 * m.area:.1f}% of the frame @ {m.score:.3f} "
+                   f"(encode {encode_ms:.0f} ms + prompt {prompt_ms:.0f} ms)")
+        fig = None
+        if DRAW:
+            import cv2
+            fig = img.copy()
+            fg.blend_mask(fig, np.asarray(m.mask), (60, 200, 240), 0.5)
+            cv2.rectangle(fig, (36, 230), (799, 771), (255, 255, 255), 2)
+            fg.caption(fig, f"{name}: prompt box -> {100 * m.area:.1f}% of the frame",
+                       "the mask fills 74% of the PROMPT — segmenting the bus, not returning the box")
         return npu_ms(enc), encode_ms + prompt_ms, model_mb(enc_path) + model_mb(dec_path), \
-            f"box -> {100 * m.area:.1f}% of the frame @ {m.score:.3f} " \
-            f"(encode {encode_ms:.0f} ms + prompt {prompt_ms:.0f} ms)"
+            summary, fig
     return name, run
 
 
@@ -314,8 +482,26 @@ def bench_wholebody(name, model):
         box = (p.x1, p.y1, p.x2, p.y2)
         kp = rcdl.estimate_wholebody(wb, img, box)
         e2e = timed(lambda: rcdl.estimate_wholebody(wb, img, box))
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{int((kp[:, 2] >= 0.3).sum())}/{len(kp)} keypoints over 0.3, one person"
+        summary = f"{int((kp[:, 2] >= 0.3).sum())}/{len(kp)} keypoints over 0.3, one person"
+        fig = None
+        if DRAW:
+            import cv2
+            x1, y1 = max(0, int(p.x1) - 20), max(0, int(p.y1) - 20)
+            x2, y2 = min(img.shape[1], int(p.x2) + 20), min(img.shape[0], int(p.y2) + 20)
+            fig = np.ascontiguousarray(img[y1:y2, x1:x2])
+            part_color = {rcdl.BodyPart.BODY: (80, 220, 100),
+                          rcdl.BodyPart.FOOT: (240, 180, 60),
+                          rcdl.BodyPart.FACE: (60, 200, 240),
+                          rcdl.BodyPart.LEFT_HAND: (240, 120, 200),
+                          rcdl.BodyPart.RIGHT_HAND: (200, 120, 240)}
+            for i, (kx, ky, ks) in enumerate(kp):
+                if ks < 0.3:
+                    continue
+                cv2.circle(fig, (int(kx) - x1, int(ky) - y1), 2,
+                           part_color.get(rcdl.body_part(i), (200, 200, 200)), -1, cv2.LINE_AA)
+            fg.caption(fig, f"{name}: 133/133 keypoints, one person",
+                       "body / feet / face / hands, by region")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -343,8 +529,28 @@ def bench_face_recognition(name, model):
         e2e = timed(lambda: rcdl.embed_face(rec, one[0], one[1]))
         m = np.stack(vecs) @ np.stack(vecs).T
         off = max(float(m[i, j]) for i in range(len(vecs)) for j in range(i + 1, len(vecs)))
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(vecs)} faces, worst cross-identity similarity {off:.3f}"
+        summary = f"{len(vecs)} faces, worst cross-identity similarity {off:.3f}"
+        fig = None
+        if DRAW:
+            import cv2
+            # The ALIGNED crops are the figure: the canonical pose is the whole
+            # contract, and a photograph of a face cannot show whether it held.
+            crops = []
+            for img_name in ("zidane.jpg", "bus.jpg"):
+                im = bm.load_bgr(img_name)
+                for f in rcdl.detect_faces(det, im):
+                    lm = np.array(f.landmarks, np.float32).reshape(5, 2)
+                    mat = np.asarray(rcdl.face_align_transform(lm.reshape(-1), 112, 112), np.float32)
+                    crops.append(cv2.warpAffine(im, mat, (112, 112)))
+            if crops:
+                fig = np.hstack([cv2.resize(c, (224, 224)) for c in crops])
+                fg.panel(fig, [(f"{name}: {len(crops)} faces on the ArcFace template",
+                                (255, 255, 255)),
+                               (f"worst cross-identity cosine {off:+.3f} — all different people",
+                                (190, 220, 255)),
+                               ("box-cropping instead of this scores 0.493 against the same face",
+                                (150, 200, 150))])
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -364,9 +570,19 @@ def bench_open_vocab(name, model):
         for d in dets:
             n = labels.name(d.class_id)
             names[n] = names.get(n, 0) + 1
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(labels)} prompts -> " + (", ".join(f"{v} {k}" for k, v in sorted(names.items()))
-                                            or "nothing")
+        summary = f"{len(labels)} prompts -> " + (
+            ", ".join(f"{v} {k}" for k, v in sorted(names.items())) or "nothing")
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            for d in dets:
+                fg.box(fig, d.x1, d.y1, d.x2, d.y2,
+                       f"{labels.name(d.class_id)} {d.score:.2f}", fg.class_color(d.class_id))
+            vocab = ", ".join(list(labels.names)[:6]) + ("..." if len(labels) > 6 else "")
+            fg.panel(fig, [(f"{name}: vocabulary chosen at CONVERSION time", (255, 255, 255)),
+                           (f"prompts: {vocab}", (190, 220, 255)),
+                           (summary, (150, 220, 150))])
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -393,8 +609,17 @@ def bench_panoptic_drive(name, model):
         e2e = timed(lambda: once())
         da = np.asarray(drivable.labels).astype(bool).mean() * 100
         ll = np.asarray(lanes.labels).astype(bool).mean() * 100
-        return npu_ms(e), e2e, model_mb(path), \
-            f"{len(dets)} vehicles, drivable {da:.1f}%, lane {ll:.1f}% of the frame"
+        summary = f"{len(dets)} vehicles, drivable {da:.1f}%, lane {ll:.1f}% of the frame"
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            fg.blend_mask(fig, np.asarray(drivable.labels), (60, 200, 90), 0.40)
+            fg.blend_mask(fig, np.asarray(lanes.labels), (60, 90, 240), 0.75)
+            for d in dets:
+                fg.box(fig, d.x1, d.y1, d.x2, d.y2, None, (255, 220, 60), 2)
+            fg.caption(fig, f"{name}: {summary}",
+                       "ONE inference, three decoders — vehicles, drivable area, lane lines")
+        return npu_ms(e), e2e, model_mb(path), summary, fig
     return name, run
 
 
@@ -430,22 +655,62 @@ def main():
     ap.add_argument("--only", help="comma-separated task names")
     ap.add_argument("--json", help="write the rows here as JSON")
     ap.add_argument("--markdown", help="write a table here")
+    ap.add_argument("--figures", nargs="?", const=os.path.join(_HERE, "figures"),
+                    help="also draw a check figure per task into this directory "
+                         "(default benchmarks/figures)")
     args = ap.parse_args()
     wanted = set(args.only.split(",")) if args.only else None
+
+    global DRAW
+    DRAW = args.figures is not None
+    if DRAW:
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            print("  note: OpenCV is missing, so no figures — the table still runs")
+            DRAW = False
 
     rows, skipped = [], []
     for name, run in TASKS:
         if wanted and name not in wanted:
             continue
         try:
-            infer, e2e, mb, result = run()
+            out = run()
         except Exception as exc:  # a missing model raises through require_model's skip
-            skipped.append((name, str(exc).splitlines()[0][:80]))
-            print(f"  skip {name}: {skipped[-1][1]}")
-            continue
+            first = str(exc).splitlines()[0][:80]
+            # A figure is a nice-to-have; the row is the point. If drawing threw,
+            # take the measurement again without it rather than losing the task.
+            if DRAW:
+                DRAW = False
+                try:
+                    out = run()
+                    print(f"  note: {name} figure failed ({first}), row kept")
+                except Exception as exc2:
+                    first = str(exc2).splitlines()[0][:80]
+                    out = None
+                finally:
+                    DRAW = True
+            else:
+                out = None
+            if out is None:
+                skipped.append((name, first))
+                print(f"  skip {name}: {first}")
+                continue
+        # A task that can draw returns its figure as a fifth element; the ones
+        # whose output is not a picture simply do not.
+        infer, e2e, mb, result = out[:4]
+        fig = out[4] if len(out) > 4 else None
+        figure_path = None
+        if DRAW and fig is not None:
+            try:
+                figure_path = os.path.relpath(fg.save(fig, args.figures, name), _REPO)
+            except Exception as exc:
+                print(f"  note: {name} figure failed: {exc}")
         rows.append(dict(task=name, infer_ms=round(infer, 2) if infer == infer else None,
-                         e2e_ms=round(e2e, 2), model_mb=round(mb, 2), result=result))
-        print(f"  {name:16s} infer {infer:8.2f} ms   e2e {e2e:8.2f} ms   {result}")
+                         e2e_ms=round(e2e, 2), model_mb=round(mb, 2), result=result,
+                         figure=figure_path))
+        print(f"  {name:16s} infer {infer:8.2f} ms   e2e {e2e:8.2f} ms   {result}"
+              + ("   [fig]" if figure_path else ""))
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
