@@ -25,6 +25,7 @@
 #include "rcdl/backend/engine.h"
 #include "rcdl/backend/output_reader.h"
 #include "rcdl/core/dma_buf.h"
+#include "rcdl/core/status.h"
 #include "rcdl/media/jpeg_codec.h"
 #include "rcdl/media/video_codec.h"
 #include "rcdl/media/video_frame.h"
@@ -991,19 +992,34 @@ NB_MODULE(rcdl_py, m) {
         // gives that away is the box width it implies: 80/4 = reg_max 20, which
         // no export produces. Real heads are 4 channels (plain LTRB) or 64
         // (ultralytics DFL, reg_max 16).
-        const rcdl::YoloHeadLayout layout = rcdl::resolveYoloHead(engineFrom(engine_arg), claim);
-        if (claim > 0 && layout.reg_max != 0 && layout.reg_max != 16) {
+        rcdl::Engine& engine = engineFrom(engine_arg);
+        int num_classes = 0, reg_max = 0;
+        try {
+          const rcdl::YoloHeadLayout layout = rcdl::resolveYoloHead(engine, claim);
+          num_classes = layout.num_classes;
+          reg_max = layout.reg_max;
+        } catch (const rcdl::Error&) {
+          // Not a detection head. An open-vocabulary SEG build carries four
+          // tensors per scale rather than three, and the caller asking "how many
+          // classes does this model declare" should not have to know which head
+          // family answered.
+          const rcdl::InstanceSegHeadLayout seg = rcdl::resolveInstanceSegHead(engine, claim);
+          num_classes = seg.num_classes;
+          reg_max = seg.reg_max;
+        }
+        if (claim > 0 && reg_max != 0 && reg_max != 16) {
           throw std::invalid_argument(
               "yolo_head_classes: claiming " + std::to_string(claim) +
-              " classes leaves a box branch of " + std::to_string(4 * layout.reg_max) +
-              " channels (reg_max " + std::to_string(layout.reg_max) +
+              " classes leaves a box branch of " + std::to_string(4 * reg_max) +
+              " channels (reg_max " + std::to_string(reg_max) +
               "), which no export produces — the claim almost certainly belongs to a "
               "different model");
         }
-        return layout.num_classes;
+        return num_classes;
       },
       "engine"_a, "claim"_a = 0,
-      "The class count an LTRB head declares. With claim=0 it is resolved from the output "
+      "The class count a YOLO head declares — detection or instance-seg. With claim=0 it is "
+      "resolved from the output "
       "signature alone; with claim>0 that count is asserted against the model and the "
       "resulting head checked for plausibility");
 

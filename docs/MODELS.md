@@ -67,6 +67,9 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `rtmw_s_133_256x192_fp16_rk3588.rknn` | whole-body pose (133 kpts) | 192×256 **f32** | rgb | `simcc_x[1,133,384]` + `simcc_y[1,133,512]` f16. Top-down: one person per inference. Input is float32 in 0..255 |
 | `yoloe_11s_coco80_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | 9 outputs, the yolov8n layout with `cls[1,80,H,W]`. The class axis is **80 words chosen at conversion time**; pair it with `yoloe_11s_coco80_rk3588.labels.txt` |
 | `yoloe_11s_streetwear_rk3588.rknn` | open-vocab detection | 640×640 u8 | rgb | same head with `cls[1,6,H,W]` — six prompts COCO has no class for. Pair with its own `.labels.txt` |
+| `yoloe_11s_coco80_seg_rk3588.rknn` | open-vocab instance seg | 640×640 u8 | rgb | the same checkpoint with the mask branch: 13 outputs, the yolov8n-seg layout. `InstanceSegmenter` reads it unchanged |
+| `yolo26n_sem_640_i8_rk3588.rknn` | semantic seg | 640×640 u8 | rgb | `[1,19,80,80]` int8 **logits** (Cityscapes 19, the same taxonomy as PP-LiteSeg) — argmax on the CPU, `segToSource` upscales |
+| `yolo26n_sem_640_fp16_rk3588.rknn` | semantic seg | 640×640 **f32** | rgb | the same, float. Reproduces its ONNX to 99.6% of pixels, but its float32 input is off the zero-copy path — see below |
 | `yolop_cut_640_i8_rk3588.rknn` | panoptic driving | 640×640 u8 | rgb | 5 outputs: three **anchor-based** raw heads `[1,18,H,W]` (3 priors × (5 + 1 class), NCHW, **unactivated**) + `drivable[1,2,640,640]` + `lane[1,2,640,640]` (sigmoid in-graph). ImageNet mean/std baked in |
 | `arcface_r50_112_fp16_rk3588.rknn` | face recognition (identity) | 112×112 **f32** | rgb | `[1,512]` f16 embedding, L2-normalised on read-out. Input is float32 **still in 0..255** — the (x−127.5)/127.5 is in the model. The crop is a **five-point warp**, not a box — see below |
 | `yolop_cut_640_fp16_rk3588.rknn` | panoptic driving | 640×640 **f32** | rgb | the same 5 outputs, float. Keeps the lane mask the int8 build blurs — but its float32 input cannot be letterboxed straight into the NPU tensor, so it is off the zero-copy path. See below |
@@ -663,6 +666,79 @@ identifiable person. What the numbers above do establish is that the embedding
 separates identities, is stable under nuisance, and depends on the alignment.
 Stage your own pairs (gitignored, never committed) to pick a threshold.
 
+### A second semantic model, and what a calibration domain is worth
+
+YOLO26n-sem predicts the **same 19 Cityscapes classes** as PP-LiteSeg, which is
+the point: two independently trained models over one taxonomy can each check the
+other, which no single model's "that looks like a street" ever can. On
+`cityscapes.png` they label **92.1% of pixels identically**, road at IoU 0.967,
+and their class mixes agree to within a point (road 41% both, vegetation 30%
+against 31%). It is also **2.3x faster** — 21 ms of NPU against 45.
+
+It is exported as LOGITS at `[1,19,80,80]`. Ultralytics' ONNX export bakes the
+class reduction in and returns a `[1,H,W]` map, which is a sensible default and
+the wrong one here: `Segmenter` already argmaxes a logit volume, so logits mean
+PP-LiteSeg and this decode through the same path with no new code — and an
+argmax inside the graph cannot be scored against anything. The usual argument for
+baking it (an 80x smaller device-to-host copy) also disappears once the 8x
+upsample is dropped: 19x80x80 is 121k values, smaller than the baked
+full-resolution map, and `segToSource` does the upscale on the label map exactly
+as it does for PP-LiteSeg.
+
+**The calibration set is dashcam frames, not the COCO subset the other YOLO
+builds use, and that choice is most of the accuracy.** bcdl measured an int8
+build of this network agreeing with its float model on 61% of pixel decisions
+while passing every per-tensor cosine gate — a dense 19-way argmax is a decision,
+and one aggregate cosine cannot see a decision boundary move. Their fix was
+calibration domain rather than bit width. Calibrated here on street scenes shot
+from a car (`cityscapes.png` held out of that set):
+
+| build | pixel agreement vs float | mIoU vs float | classes found |
+|---|---|---|---|
+| int8, dashcam calibration | **91.8%** | 0.746 | 10 of 11 |
+| fp16 | 99.6% | 0.987 | 11 of 11 |
+
+Read the mIoU next to the agreement: 91.8% of pixels is dominated by road and
+building, and 0.746 mIoU is where the cost actually sits — on the thin and rare
+classes, one of which int8 stops finding altogether. Worth putting beside the
+cross-model number: int8 differs from its OWN float model by about as much
+(8.2% of pixels) as PP-LiteSeg differs from it (7.9%). The quantization error on
+this head is the size of the difference between two different networks.
+
+int8 is what ships and what the tests use, because its u8 input is the zero-copy
+VPU → RGA → NPU path and the fp16 build's float32 input is not — the same trade
+as the YOLOP builds above, and `Segmenter` refuses the float build at
+construction rather than quantizing the caller's frame behind their back.
+
+### The open-vocabulary mask branch needed no decoder either
+
+Exporting YOLOE's mask branch alongside the detection head gives 13 outputs,
+which is exactly the yolov8n-seg layout, so `InstanceSegmenter` reads it with no
+changes — the same result the detection build gave, one head further on. Checked
+against a separately trained closed-vocabulary model on the same frame: all 5 of
+yolov8n-seg's instances matched at **IoU 0.76–0.98**, with masks covering 32–86%
+of their boxes.
+
+### PP-OCRv5 recognition: the second build that this runtime will not run
+
+`docs/MODELS.md` already recorded that the v5 **mobile** recogniser reproduces
+its Paddle reference value-for-value in the toolkit simulator and then reads 1 of
+16 lines correctly on the board. The **server** variant — a different, larger
+network, and the one bcdl ships — now fails the same way on the same page:
+
+| recogniser | non-empty lines | mean score | strings identical to v4 |
+|---|---|---|---|
+| PP-OCRv4 (shipped) | 15 of 16 | 0.661 | — |
+| PP-OCRv5 server | 15 of 16 | **0.085** | **1 of 16** |
+
+The failure has a shape: every line starts correctly and then stops — `纯臻` where
+v4 reads `纯臻营养护发素`. The sequence collapses to the CTC blank after a few
+steps, which is what the earlier per-tensor comparison showed too. Two
+independent v5 recognisers failing identically makes this a property of the
+**18385-class softmax on this runtime's f16 path**, not of one export. Neither
+ships; the registry stays on v4 rec, and the v5 **detector** — which is
+measurably equivalent to v4's — remains registered.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -690,6 +766,8 @@ RK3588S, single-frame latency unless stated:
 | EdgeSAM, one prompt against that embedding | 140–165 ms |
 | RTMW whole-body, one person (crop + 133 keypoints) | 23–47 ms |
 | ArcFace R50, one face (five-point warp + 512-d embedding) | 32 ms (31.5 ms NPU) |
+| YOLO26n-sem 640, frame → full-res label map | 37 ms (21 ms NPU) — PP-LiteSeg is 86 ms (45 ms NPU) |
+| YOLOE-11s seg, frame → instances + masks | 34 ms NPU, masks on top |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 

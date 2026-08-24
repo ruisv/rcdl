@@ -149,7 +149,10 @@ def bench_instance_seg(name, model):
 def bench_semantic_seg(name, model):
     def run():
         path = bm.require_model(model)
-        img = bm.load_bgr("street.jpg") if os.path.isfile(bm.find_image("street.jpg")) \
+        # A Cityscapes-trained model deserves a street from a car: both semantic
+        # models here predict the 19 Cityscapes classes, and this is the frame
+        # their cross-model agreement is quoted on in docs/MODELS.md.
+        img = bm.load_bgr("cityscapes.png") if os.path.isfile(bm.find_image("cityscapes.png")) \
             else bm.load_bgr("bus.jpg")
         e = rcdl.Engine(path)
         seg = e.segmenter()
@@ -586,6 +589,41 @@ def bench_open_vocab(name, model):
     return name, run
 
 
+def bench_open_vocab_seg(name, model):
+    """Open-vocabulary instance segmentation — the same checkpoint as the
+    detector with the mask branch exported, read by the ordinary segmenter."""
+    def run():
+        path = bm.require_model(model)
+        img = bm.load_bgr("bus.jpg")
+        e = rcdl.Engine(path)
+        labels = e.label_map()
+        seg = e.instance_segmenter(num_classes=len(labels))
+        inst = rcdl.segment_instances(seg, img)
+        e2e = timed(lambda: rcdl.segment_instances(seg, img))
+        names = {}
+        for m in inst:
+            n = labels.name(m.class_id)
+            names[n] = names.get(n, 0) + 1
+        fig = None
+        if DRAW:
+            fig = img.copy()
+            for m in inst:
+                col = fg.class_color(m.class_id)
+                arr = np.asarray(m.mask() if callable(getattr(m, "mask", None)) else m.mask)
+                full = np.zeros(img.shape[:2], bool)
+                y0, x0 = max(0, m.mask_y0), max(0, m.mask_x0)
+                sub = arr.astype(bool)[: img.shape[0] - y0, : img.shape[1] - x0]
+                full[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] = sub
+                fg.blend_mask(fig, full, col)
+                fg.box(fig, m.x1, m.y1, m.x2, m.y2, f"{labels.name(m.class_id)} {m.score:.2f}", col)
+            fg.caption(fig, f"{name}: {len(inst)} instances from {len(labels)} prompts",
+                       "the mask branch of the same YOLOE — 13 outputs, the v8-seg layout")
+        return npu_ms(e), e2e, model_mb(path), \
+            f"{len(labels)} prompts -> " + ", ".join(f"{v} {k}" for k, v in sorted(names.items())), \
+            fig
+    return name, run
+
+
 def bench_panoptic_drive(name, model):
     """Three heads off one inference, so `infer` is that single NPU pass and
     `e2e` covers the anchor decode plus BOTH masks. The result column reports
@@ -631,6 +669,7 @@ TASKS = [
     bench_classification("cls_yolo26", "yolo26n-cls_rk3588.rknn", softmax=False),
     bench_instance_seg("instance_seg", "yolov8n-seg_rk3588.rknn"),
     bench_semantic_seg("semantic_seg", "ppseg_rk3588.rknn"),
+    bench_semantic_seg("semantic_seg_yolo26", "yolo26n_sem_640_i8_rk3588.rknn"),
     bench_pose("pose", "yolov8n-pose_rk3588.rknn"),
     bench_obb("obb", "yolov8n-obb_rk3588.rknn"),
     bench_depth("depth", "depth_anything_v2_vits_308_rk3588.rknn"),
@@ -646,6 +685,7 @@ TASKS = [
     bench_face_recognition("face_recognition", "arcface_r50_112_fp16_rk3588.rknn"),
     bench_open_vocab("open_vocab", "yoloe_11s_coco80_rk3588.rknn"),
     bench_open_vocab("open_vocab_prompts", "yoloe_11s_streetwear_rk3588.rknn"),
+    bench_open_vocab_seg("open_vocab_seg", "yoloe_11s_coco80_seg_rk3588.rknn"),
     bench_panoptic_drive("panoptic_drive", "yolop_cut_640_i8_rk3588.rknn"),
 ]
 

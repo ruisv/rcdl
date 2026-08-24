@@ -2341,3 +2341,91 @@ def test_the_float_yolop_runs_and_says_what_int8_costs(rcdl):
     assert lane_agree - lane_iou > 0.15, (
         "pixel agreement and IoU no longer diverge on the lane mask — if that is "
         "real the docs' argument for reading IoU needs revisiting")
+
+
+# --------------------------------------------------------------------------- #
+# Open-vocabulary INSTANCE SEGMENTATION — the same YOLOE, mask branch included  #
+# --------------------------------------------------------------------------- #
+def test_open_vocabulary_masks_decode_through_the_ordinary_segmenter(rcdl):
+    """The detection build's argument, one head further on: exporting YOLOE's
+    mask branch gives the 13-output yolov8n-seg layout, so InstanceSegmenter
+    reads it with no new code. The check is cross-model — a separately trained
+    closed-vocabulary seg model on the same frame — because "seven masks" on its
+    own says nothing about whether they are in the right places. Measured: all 5
+    of yolov8n-seg's instances matched at IoU 0.76-0.98."""
+    need(rcdl, "LabelMap", "InstanceSegmenter")
+    model = bm.require_model("yoloe_11s_coco80_seg_rk3588.rknn")
+    img = bm.load_bgr("bus.jpg")
+    e = rcdl.Engine(model)
+    labels = _labels_for(rcdl, model)
+    masks = rcdl.segment_instances(e.instance_segmenter(num_classes=len(labels)), img)
+
+    counts = {}
+    for m in masks:
+        counts[labels.name(m.class_id)] = counts.get(labels.name(m.class_id), 0) + 1
+    print(f"\nYOLOE-seg: {counts}")
+    assert counts.get("bus", 0) == 1 and counts.get("person", 0) >= 4
+
+    for m in masks:
+        arr = np.asarray(m.mask() if callable(getattr(m, "mask", None)) else m.mask)
+        frac = arr.astype(bool).sum() / max(1.0, (m.x2 - m.x1) * (m.y2 - m.y1))
+        assert 0.10 < frac < 0.95, f"implausible mask coverage {frac:.2f}"
+
+    ref = rcdl.segment_instances(
+        rcdl.Engine(bm.require_model("yolov8n-seg_rk3588.rknn")).instance_segmenter(), img)
+    best = [max((_iou(a, b) for b in masks), default=0.0) for a in ref]
+    print(f"  vs yolov8n-seg: {sum(v > 0.5 for v in best)}/{len(ref)} matched, "
+          f"{[round(v, 2) for v in sorted(best, reverse=True)]}")
+    assert sum(v > 0.5 for v in best) >= len(ref) - 1
+
+
+# --------------------------------------------------------------------------- #
+# Semantic segmentation, second model — YOLO26n-sem against PP-LiteSeg          #
+# --------------------------------------------------------------------------- #
+def test_two_semantic_models_agree_on_the_same_street(rcdl):
+    """YOLO26n-sem and PP-LiteSeg are independently trained on the same 19
+    Cityscapes classes, which makes each a real check on the other — the kind of
+    evidence a single model's "looks like a street" cannot provide.
+
+    Measured on `cityscapes.png`: 92% of pixels labelled identically, road at
+    IoU 0.967, and the class mix within a point of each other (road 41%,
+    vegetation 30-31%). Where they disagree is where a 19-way argmax is genuinely
+    ambiguous — building against wall and fence."""
+    need(rcdl, "Segmenter")
+    a_model = bm.require_model("yolo26n_sem_640_i8_rk3588.rknn")
+    b_model = bm.require_model("ppseg_rk3588.rknn")
+    img = bm.load_bgr("cityscapes.png")
+
+    labels = {}
+    for tag, model in (("yolo26n-sem", a_model), ("ppseg", b_model)):
+        e = rcdl.Engine(model)
+        m = rcdl.segment(e.segmenter(num_classes=19), img)
+        lab = np.asarray(m.labels)
+        assert lab.shape == img.shape[:2], "the map is not projected onto the frame"
+        ids, cnt = np.unique(lab, return_counts=True)
+        frac = cnt / cnt.sum()
+        print(f"\n  {tag}: {len(ids)} classes, road {100 * frac[ids == 0].sum():.0f}%, "
+              f"npu {e.last_run_micros() / 1000:.0f} ms")
+        assert 4 <= len(ids) <= 19, f"{len(ids)} classes is not a street scene"
+        assert frac.max() < 0.75, "one class covers the frame — the argmax is not discriminating"
+        labels[tag] = lab
+
+    agree = float((labels["yolo26n-sem"] == labels["ppseg"]).mean())
+    road = (np.logical_and(labels["yolo26n-sem"] == 0, labels["ppseg"] == 0).sum() /
+            max(1, np.logical_or(labels["yolo26n-sem"] == 0, labels["ppseg"] == 0).sum()))
+    print(f"  agreement {100 * agree:.1f}%, road IoU {road:.3f}")
+    assert agree > 0.80, (
+        f"two models trained on the same taxonomy agree on only {100 * agree:.1f}% of pixels — "
+        "one of them is decoding wrong, or a class axis is permuted")
+    assert road > 0.85, "they disagree about where the road is"
+
+
+def test_the_float_semantic_build_refuses_the_u8_path(rcdl):
+    """A float build cannot be letterboxed straight into the NPU tensor, and the
+    library says so at construction rather than quantizing the caller's image
+    behind their back. Same shape as the YOLOP fp16 build — this is the price of
+    the zero-copy path, and it should be a loud one."""
+    need(rcdl, "Segmenter")
+    fp16 = bm.require_model("yolo26n_sem_640_fp16_rk3588.rknn")
+    with pytest.raises(Exception):
+        rcdl.Engine(fp16).segmenter(num_classes=19)

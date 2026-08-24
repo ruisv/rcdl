@@ -125,6 +125,18 @@ REGISTRY=(
   # different people. fp16 needs no calibration set and reproduces the fp32 ONNX
   # to cosine 1.00000 on an identical crop. Input is float32 still in 0..255.
   "arcface_r50_112_fp16_rk3588.rknn|convert|arcface_r50_112_fp16_rk3588.rknn"
+  # Open-vocabulary INSTANCE SEGMENTATION, from the same YOLOE checkpoint as the
+  # detector above with the mask branch exported too: 13 outputs, which is the
+  # yolov8n-seg layout, so InstanceSegmenter reads it with no changes at all.
+  "yoloe_11s_coco80_seg_rk3588.rknn|convert|yoloe_11s_coco80_seg_rk3588.rknn"
+  "yoloe_11s_coco80_seg_rk3588.labels.txt|convert|yoloe_11s_coco80_seg_rk3588.labels.txt"
+  # YOLO semantic segmentation, the same 19 Cityscapes classes PP-LiteSeg has —
+  # which is what makes the two checkable against each other. Exported as LOGITS
+  # at [1,19,80,80]: ultralytics' ONNX export bakes the argmax in and returns a
+  # [1,H,W] map, which cannot be scored and would need its own decode path.
+  # Calibrated on dashcam frames rather than COCO — see docs/MODELS.md.
+  "yolo26n_sem_640_i8_rk3588.rknn|convert|yolo26n_sem_640_i8_rk3588.rknn"
+  "yolo26n_sem_640_fp16_rk3588.rknn|convert|yolo26n_sem_640_fp16_rk3588.rknn"
 )
 
 if [ "${1:-}" = "--list" ]; then

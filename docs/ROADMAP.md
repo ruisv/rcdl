@@ -160,7 +160,7 @@ equivalent of its M5.
 | | BCDL | RCDL |
 |---|---|---|
 | Task heads in `src/tasks/` | 22 | **17** |
-| Models in the registry | ~38 | **32** |
+| Models in the registry | ~38 | **35** |
 | Pipeline classes | 5 | 3 |
 
 The core CV set — detection, classification, pose, instance and semantic
@@ -172,10 +172,11 @@ panoptic driving and face recognition. What is still missing splits into two kin
 equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
-* OCR is PP-OCRv4 det + rec against BCDL's v5/v6 stacks, and has **no textline
-  angle classifier at all** — so rotated text decodes wrong today, silently.
+* OCR is PP-OCRv4 rec against BCDL's v5/v6 stacks. The v5 detector is registered
+  and measurably equivalent; the v5 recogniser is not, and **two independent v5
+  builds now fail identically on this runtime** — see `docs/MODELS.md`.
 * Embedding is person ReID only; there is no image-text tower.
-* Semantic segmentation has one model where BCDL has three.
+* Semantic segmentation has two models where BCDL has three.
 * Detection, classification, pose, instance seg and OBB sit a YOLO generation
   behind.
 

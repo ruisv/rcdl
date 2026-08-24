@@ -330,6 +330,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- **A second semantic-segmentation model and an open-vocabulary mask branch**,
+  both of which decode through existing code. `yolo26n_sem_640_{i8,fp16}` predicts
+  the same 19 Cityscapes classes as PP-LiteSeg, so the two check each other:
+  they label 92.1% of pixels identically with road at IoU 0.967, and it is 2.3x
+  faster (21 ms of NPU against 45). `yoloe_11s_coco80_seg` adds YOLOE's mask
+  branch, giving the 13-output yolov8n-seg layout that `InstanceSegmenter` reads
+  unchanged — all 5 of yolov8n-seg's instances matched at IoU 0.76-0.98.
+  *The semantic model is exported as LOGITS rather than the baked `[1,H,W]` class
+  map ultralytics' ONNX export produces by default: an argmax inside the graph
+  cannot be scored, and the copy-size argument for baking it disappears once the
+  8x upsample is dropped too. Its calibration set is dashcam frames rather than
+  the COCO subset the other YOLO builds use, and that choice is most of the
+  accuracy — bcdl measured this network's int8 build agreeing with float on 61%
+  of pixel decisions with a general stand-in; on street scenes it reaches 91.8%,
+  with mIoU 0.746 showing where the cost really sits (the thin and rare classes,
+  one of which int8 stops finding). Worth stating plainly: int8 differs from its
+  own float by about as much as PP-LiteSeg differs from it.*
+- **`yolo_head_classes()` answers for instance-seg heads too** — an
+  open-vocabulary SEG build carries four tensors per scale instead of three, and
+  a caller asking how many classes a model declares should not have to know
+  which head family answers. It now falls back to the instance-seg resolver.
 - **Check figures** — `benchmarks/bench.py --figures` draws one annotated image
   per task into `benchmarks/figures/`, and the README leads with the gallery.
   They exist because a timing table cannot be checked: a row reading `22 ms` and
