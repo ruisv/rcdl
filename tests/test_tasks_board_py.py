@@ -755,7 +755,12 @@ def test_the_v5_detector_agrees_with_the_v4_one(rcdl):
         out = []
         for b in boxes:
             c = _warp_upright(img, b)
-            if c.shape[0] < 6 or c.shape[1] < 12:
+            # Taller than wide is a 90-degree line the warp step is supposed to
+            # rotate upright, not a horizontal one; handing it to the recogniser
+            # as-is is a pipeline error, and what it reads out of one is junk
+            # that depends on the crop's exact width. Skip it, as an application
+            # composing these two stages would.
+            if c.shape[0] < 6 or c.shape[1] < 12 or c.shape[0] > c.shape[1]:
                 continue
             line = rcdl.recognize_text(rec, c, "bgr888")
             if line.text:
@@ -767,6 +772,135 @@ def test_the_v5_detector_agrees_with_the_v4_one(rcdl):
     assert n5 == n4, f"v5 found {n5} regions, v4 found {n4}"
     assert t5 == t4, f"the two detectors led to different text:\n  v4 {t4}\n  v5 {t5}"
     assert len(t5) >= 14, f"only {len(t5)} lines came back — the page should give 15"
+
+
+def test_the_v6_detector_matches_v4_under_its_own_thresholds(rcdl):
+    """The third detector generation, and the config that comes with it.
+
+    PP-OCRv6 ships its DB post-processing constants in the same `inference.yml`
+    as its weights, and they are NOT this library's defaults: bin 0.2 against
+    0.3, box 0.45 against 0.6, unclip 1.4 against 1.5. Both settings find the
+    same 16 regions on the sample page — the map is that unambiguous — but the
+    boxes are not the same size, and a crop that is a few pixels tighter is
+    handed to the recogniser, which reads its last character differently
+    (泛酸 against 泛醌 on the ingredient line). So this pins two things: the
+    non-regression against v4 under the model's OWN thresholds, and the fact
+    that the thresholds are part of the model rather than a global preference.
+    """
+    need(rcdl, "TextDetector", "TextRecognizer")
+    import os
+    v6 = bm.find_model("ppocrv6_medium_det_rk3588.rknn")
+    if v6 is None:
+        pytest.skip("PP-OCRv6 detection model not staged")
+    rec_model = bm.require_model("ppocrv4_rec_rk3588.rknn")
+    dict_path = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")
+    if not os.path.isfile(dict_path):
+        pytest.skip(f"character dictionary missing: {dict_path}")
+
+    img = bm.load_bgr("ocr.jpg")
+    rec = rcdl.Engine(rec_model).text_recognizer(dict_path)
+
+    def read(det):
+        boxes = sorted(rcdl.detect_text(det, img, "bgr888"), key=lambda b: (b.y1, b.x1))
+        out = []
+        for b in boxes:
+            c = _warp_upright(img, b)
+            # Taller than wide is a 90-degree line the warp step is supposed to
+            # rotate upright, not a horizontal one; handing it to the recogniser
+            # as-is is a pipeline error, and what it reads out of one is junk
+            # that depends on the crop's exact width. Skip it, as an application
+            # composing these two stages would.
+            if c.shape[0] < 6 or c.shape[1] < 12 or c.shape[0] > c.shape[1]:
+                continue
+            line = rcdl.recognize_text(rec, c, "bgr888")
+            if line.text:
+                out.append(line.text)
+        return len(boxes), out
+
+    own = rcdl.OcrDetConfig()
+    own.bin_thresh, own.box_thresh, own.unclip_ratio = 0.2, 0.45, 1.4
+
+    n4, t4 = read(rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector())
+    engine6 = rcdl.Engine(v6)
+    n6, t6 = read(engine6.text_detector(config=own))
+    n6d, t6d = read(engine6.text_detector())
+
+    assert n6 == n4 == n6d, f"v6 found {n6}/{n6d} regions, v4 found {n4}"
+    assert len(t4) >= 14, f"only {len(t4)} lines came back from v4 — the page should give 15"
+    assert t6 == t4, (
+        f"under PP-OCRv6's own thresholds the two detectors led to different text:"
+        f"\n  v4 {t4}\n  v6 {t6}")
+    # The library defaults are not wrong here, just tighter — the difference has
+    # to stay small enough to be a crop-boundary effect rather than a decode one.
+    differing = sum(1 for a, b in zip(t6d, t4) if a != b)
+    assert len(t6d) == len(t4) and differing <= 1, (
+        f"the library defaults changed {differing} lines, not a crop boundary:"
+        f"\n  own thresholds {t6}\n  defaults       {t6d}")
+
+
+def test_a_stretch_costs_short_crops_and_pp_ocrs_own_fit_does_not(rcdl):
+    """Why the recogniser's default fit is "pad" and not a stretch.
+
+    PP-OCR scales a line crop to the model's HEIGHT, caps the width there and
+    pads the remainder. For anything WIDER than the input's aspect ratio (48x320
+    is 6.7:1, which most page lines are) the cap makes that identical to a
+    stretch — which is why the whole sample page cannot tell the two apart, and
+    why this was easy to get wrong and not notice.
+
+    Ground truth is manufactured rather than labelled: cut the leading 30% of a
+    line whose full reading is already known, and whatever comes back must be a
+    PREFIX of that reading. Measured on the board with PP-OCRv4, the deployed
+    recogniser: 15 of 15 crops decode to a prefix under the pad fit against 10
+    of 15 under a stretch (at 20% it is 13 against 8). PP-OCRv6 is indifferent
+    to the difference — a newer model absorbing a preprocessing error is not a
+    reason to keep making it.
+    """
+    need(rcdl, "TextRecognizer", "TextDetector")
+    import os
+    rec_model = bm.require_model("ppocrv4_rec_rk3588.rknn")
+    dict_path = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")
+    if not os.path.isfile(dict_path):
+        pytest.skip(f"character dictionary missing: {dict_path}")
+
+    img = bm.load_bgr("ocr.jpg")
+    lines = [c for c in _ocr_line_crops(rcdl, img) if c.shape[1] > 4 * c.shape[0]]
+    assert len(lines) >= 12, f"only {len(lines)} wide text lines to cut down"
+
+    engine = rcdl.Engine(rec_model)
+    full = engine.text_recognizer(dict_path)
+    truth = [rcdl.recognize_text(full, c, "bgr888").text for c in lines]
+
+    def prefixes(fit):
+        rec = engine.text_recognizer(dict_path, fit=fit)
+        hits = total = 0
+        for c, t in zip(lines, truth):
+            if not t:
+                continue
+            sub = np.ascontiguousarray(c[:, :max(12, int(c.shape[1] * 0.3))])
+            got = rcdl.recognize_text(rec, sub, "bgr888").text
+            total += 1
+            hits += bool(got) and t.startswith(got)
+        return hits, total
+
+    pad_hits, total = prefixes("pad")
+    stretch_hits, _ = prefixes("stretch")
+    print(f"\n30% crops: pad {pad_hits}/{total}, stretch {stretch_hits}/{total}")
+    assert total >= 12, f"only {total} lines produced a full reading to compare against"
+    assert pad_hits >= total - 1, f"the reference fit only got {pad_hits}/{total} prefixes"
+    assert pad_hits > stretch_hits, (
+        f"pad {pad_hits}/{total} vs stretch {stretch_hits}/{total} — if a stretch has stopped "
+        "costing anything, this test no longer justifies the default")
+
+    # And the fit itself, not just its effect: a wide crop fills the width, a
+    # short one does not and the remainder is padding.
+    wide = max(lines, key=lambda c: c.shape[1] / c.shape[0])
+    rec = engine.text_recognizer(dict_path, fit="pad")
+    rcdl.recognize_text(rec, wide, "bgr888")
+    assert rec.fit_width == rec.input_width, "a wide line should fill the input's width"
+    short = np.ascontiguousarray(wide[:, :wide.shape[1] // 4])
+    rcdl.recognize_text(rec, short, "bgr888")
+    assert rec.fit_width < rec.input_width, (
+        f"a {short.shape[1]}x{short.shape[0]} crop should be padded, not stretched")
 
 
 def test_text_angle_classifier_reads_the_direction_of_every_line(rcdl):

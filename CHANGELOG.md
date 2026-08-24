@@ -330,6 +330,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- **PP-OCRv6 medium detection** (`ppocrv6_medium_det_rk3588.rknn`), which also
+  removes the blocker recorded against it here. `paddle2onnx` aborts with SIGABRT
+  on the v6 Paddle export — but for v6 upstream **publishes ONNX directly**, so
+  that step was never needed: fix the fully dynamic shapes with `onnxslim` and
+  the export is done. Same int8 recipe and 20-image calibration set as the v4 and
+  v5 detectors, so the three are comparable.
+  *Finds the same 16 regions as v4 and v5 on the sample page and leads to the
+  same 15 strings — a non-regression, which is all one page can show. What it
+  also shows is that **the DB thresholds ship with the weights**: v6's own are
+  `bin 0.2 / box 0.45 / unclip 1.4` against this library's `0.3 / 0.6 / 1.5`,
+  both find all 16 regions, and the tighter defaults hand the recogniser a crop a
+  few pixels smaller that reads its last character differently. Registered with
+  the thresholds recorded next to it; 17.8 MB.*
+- **`TextRecognizer` is now fed PP-OCR's own fit, and that is a behaviour
+  change**: `fit="pad"` — scale the crop to the model's height, cap the width
+  there, anchor it left and pad the remainder — is the default in place of
+  `fit="stretch"`. It is the same rule `ocrLineFitWidth()` already applied to the
+  direction classifier, and the same rule PaddleOCR's `resize_norm_img` applies.
+  *Why it went unnoticed: for any crop WIDER than the input's aspect ratio (48x320
+  is 6.7:1, which most page lines are) the width cap makes the two identical, so
+  a page of long lines cannot tell them apart. Cut each line of the sample page to
+  its leading 30% (1.5:1 to 5.7:1) and PP-OCRv4, the deployed recogniser, decodes
+  15 of 15 of them to a prefix of the full line under the reference fit against 10
+  of 15 under a stretch; at 20% it is 13 against 8. PP-OCRv6 is indifferent to the
+  difference, which is not a reason to keep making it. `fit="stretch"` and
+  `fit="letterbox"` remain available and `fit_width` reports what the last crop
+  occupied.*
 - **SigLIP base/16 — an image-text pair with one tower on the board**
   (`siglip_b16_224_fp16_rk3588.rknn` plus a precomputed text table and its label
   list). Same split as YOLOE: once the label set is chosen the text side is a
@@ -524,6 +551,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   normal, and overflow to infinity, rather than a handful of spot values.
 
 ### Fixed
+
+- The two OCR line-crop paths asked RGA for blits the hardware refuses. A crop
+  fitted into a 320×48 recogniser input can land in a rectangle 11 px wide, and
+  librga's `imcheck` **accepts** that and then fails at submit — an ioctl and a
+  page of driver log per crop, before `PreprocBackend::Auto` falls back to the
+  CPU and produces the right answer anyway. Measured on RK3588: a destination
+  rectangle 32, 48, 64 or 80 px wide fails and 96 px works, so the recogniser and
+  the direction classifier now go straight to the CPU below that, where a crop
+  that small belongs regardless. *`docs/RGA.md`'s minimum-size row said "rejected
+  → CPU"; that was the intent and not the behaviour, and it now says so — the
+  measured boundary is not a simple minimum (a 320×80 source scaled up into
+  320×96 works, an 80×128 source into the same destination does not), which is
+  why the rule is applied where it is known rather than inside `rgaCanHandle()`.*
 
 - `VideoDecoder` treated `MPP_NOK` from `decode_get_frame` as fatal. MPP returns
   it with a null frame to mean "nothing ready yet", so the frame pointer — not

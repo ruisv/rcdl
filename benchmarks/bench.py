@@ -247,16 +247,33 @@ def bench_depth(name, model):
     return name, run
 
 
-def bench_ocr(name, det_model, rec_model):
+def bench_ocr(name, det_model, rec_model, dict_name="ppocr_keys_v1_6625.txt",
+              det_thresholds=None, logits=False):
+    """One OCR generation end to end: detect, then recognise every box.
+
+    `det_thresholds` is (bin, box, unclip) when the detector ships its own DB
+    constants — PP-OCRv6 does, and they are not this library's defaults.
+    `logits` marks a recogniser whose softmax was taken out of the graph (v5, v6):
+    it takes raw 0..255 and the softmax runs on the CPU for the score.
+    """
     def run():
         det_path = bm.require_model(det_model)
         rec_path = bm.require_model(rec_model)
         img = bm.load_bgr("ocr.jpg")
-        dict_path = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")
+        dict_path = os.path.join(os.path.dirname(bm.IMAGES), dict_name)
         de = rcdl.Engine(det_path)
         re_ = rcdl.Engine(rec_path)
-        det = de.text_detector()
-        rec = re_.text_recognizer(dict_path)
+        if det_thresholds is None:
+            det = de.text_detector()
+        else:
+            cfg = rcdl.OcrDetConfig()
+            cfg.bin_thresh, cfg.box_thresh, cfg.unclip_ratio = det_thresholds
+            det = de.text_detector(config=cfg)
+        rcfg = rcdl.OcrRecConfig()
+        rcfg.apply_softmax = logits
+        rec = re_.text_recognizer(dict_path, config=rcfg,
+                                  **(dict(input_scale=1.0, input_shift=0.0,
+                                          model_input="rgb888") if logits else {}))
         boxes = rcdl.detect_text(det, img, "bgr888")
 
         def read_all():
@@ -274,7 +291,10 @@ def bench_ocr(name, det_model, rec_model):
                 dst = np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)
                 crop = cv2.warpPerspective(img, cv2.getPerspectiveTransform(pts, dst),
                                            (max(w, 1), max(h, 1)))
-                if crop.shape[0] < 4 or crop.shape[1] < 4:
+                # Taller than wide is a 90-degree line the warp step should have
+                # rotated upright; handing it over as-is is a pipeline error and
+                # what comes back is junk, so skip it as the board tests do.
+                if crop.shape[0] < 4 or crop.shape[1] < 4 or crop.shape[0] > crop.shape[1]:
                     continue
                 out.append(rcdl.recognize_text(rec, crop, "bgr888"))
             return out
@@ -674,6 +694,10 @@ TASKS = [
     bench_obb("obb", "yolov8n-obb_rk3588.rknn"),
     bench_depth("depth", "depth_anything_v2_vits_308_rk3588.rknn"),
     bench_ocr("ocr", "ppocrv4_det_rk3588.rknn", "ppocrv4_rec_rk3588.rknn"),
+    bench_ocr("ocr_v6", "ppocrv6_medium_det_rk3588.rknn",
+              "ppocrv6_medium_rec_logits_rk3588.rknn",
+              dict_name="ppocr_keys_v6_18710.txt", det_thresholds=(0.2, 0.45, 1.4),
+              logits=True),
     bench_face("face", "retinaface_rk3588.rknn"),
     bench_reid("reid", "osnet_x0_25_msmt17_rk3588.rknn"),
     bench_features("features", "xfeat_640x480_i8_rk3588.rknn"),

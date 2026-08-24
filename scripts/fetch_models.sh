@@ -149,6 +149,14 @@ REGISTRY=(
   # sample page against v5's 0.928 and v4's 0.661), and it agrees with v5 on the
   # one character v4 reads differently. Needs data/ppocr_keys_v6_18710.txt.
   "ppocrv6_medium_rec_logits_rk3588.rknn|convert|ppocrv6_medium_rec_logits_rk3588.rknn"
+  # PP-OCRv6 medium detection, 480x480. Converted from the ONNX PaddleOCR
+  # PUBLISHES for v6, not from its Paddle inference model: paddle2onnx aborts on
+  # the v6 PIR export, and going through it is unnecessary because upstream ships
+  # ONNX (fix the dynamic shapes with onnxslim and that is the whole export).
+  # Same int8 recipe and calibration set as the v4 and v5 detectors so the three
+  # are comparable; decode it with PP-OCRv6's own DB thresholds (bin 0.2,
+  # box 0.45, unclip 1.4) rather than the library defaults — see docs/MODELS.md.
+  "ppocrv6_medium_det_rk3588.rknn|convert|ppocrv6_medium_det_rk3588.rknn"
   # SigLIP base/16 — the image half of an image-text pair. The TEXT tower runs on
   # the conversion host once per label set, exactly as YOLOE's does, so what
   # reaches the board is an ordinary image encoder and zero-shot classification

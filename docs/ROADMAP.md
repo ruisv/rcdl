@@ -160,7 +160,7 @@ equivalent of its M5.
 | | BCDL | RCDL |
 |---|---|---|
 | Task heads in `src/tasks/` | 22 | **17** |
-| Models in the registry | ~38 | **38** |
+| Models in the registry | ~38 | **39** |
 | Pipeline classes | 5 | 3 |
 
 The core CV set — detection, classification, pose, instance and semantic
@@ -172,10 +172,12 @@ panoptic driving and face recognition. What is still missing splits into two kin
 equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
-* OCR has v4 det+rec, the v5 detector, and the v5 and v6 recognisers. Both newer
-  recognisers needed their softmax taken out of the graph to run at all, and the
-  v6 DETECTOR is blocked upstream (paddle2onnx aborts on it); see
-  `docs/MODELS.md`.
+* OCR is at parity for detection and recognition — v4, v5 and v6 detectors, v4,
+  v5 and v6 recognisers — with the two newer recognisers needing their softmax
+  taken out of the graph to run at all, and the v6 detector needing the ONNX
+  upstream publishes rather than its Paddle export; see `docs/MODELS.md`. The
+  direction classifier is one generation behind (`ch_ppocr_mobile_v2.0_cls`,
+  which reads 16 of 16 lines here; upstream ships none for v6).
 * Semantic segmentation has two models where BCDL has three.
 * Detection, classification, pose, instance seg and OBB sit a YOLO generation
   behind.
@@ -190,7 +192,7 @@ carried here.
 Milestones follow that split, cheapest and most-broken first. Each still ends
 with a board-verified result and a pinned test.
 
-- **M7 — OCR stack refresh** (angle classifier ✅, v5/v6 det+rec to do)
+- **M7 — OCR stack refresh** ✅
   `TextAngleClassifier` came first because its absence was not a missing feature
   but a wrong answer, and the measurement says so: of the 16 lines on the sample
   page, every one rotated 180° comes back from the recogniser as the empty
@@ -204,16 +206,29 @@ with a board-verified result and a pinned test.
   Its preprocessing is **not** the letterbox the rest of the library uses — PP-OCR
   fits the crop to the model's height and pads to the right, and a centred
   letterbox costs 16/16 → 9/16 on the same lines (see
-  [`MODELS.md`](MODELS.md)).
+  [`MODELS.md`](MODELS.md)). The **recogniser** is fitted the same way, which is
+  the half that had been missed: for a line wider than the input's aspect ratio
+  the fit and a plain stretch are the same operation, so a page of long lines
+  cannot tell them apart. Cut those lines to their leading 30% and PP-OCRv4 reads
+  15 of 15 correctly under the reference fit against 10 of 15 under a stretch, so
+  `fit="pad"` is now the default.
 
-  PP-OCRv5 was then converted and measured. The **detector** ships as a
-  non-regression — same regions, same text, same confidence as v4 on the sample
-  page, pinned by a parity test — while the **recogniser cannot be deployed on
-  this board at all**: correct in the toolkit's simulator (0.9997 mean winning
-  probability), 1 line in 16 correct on the NPU in float16, worse in int8, and
-  int16 fails to submit its first Conv on this driver. PP-OCRv4 therefore stays
-  the deployed recogniser, and the search for a newer one that survives float16
-  moves to the model-zoo side. The numbers are in [`MODELS.md`](MODELS.md).
+  PP-OCRv5 and v6 were then converted and measured. Both **detectors** ship as
+  non-regressions — same regions, same strings as v4 on the sample page, pinned
+  by parity tests — with one thing learned from v6: its DB thresholds ship *with
+  the weights* and are not the library's defaults, and decoding it with the
+  wrong ones changes a character. The v6 detector also settled a blocker: it
+  comes from the ONNX PaddleOCR **publishes** for v6, so the `paddle2onnx`
+  SIGABRT that stopped the first attempt was avoidable rather than fatal.
+
+  Both newer **recognisers** at first appeared undeployable — the v5 build reads
+  1 line in 16 on the NPU while the toolkit simulator reproduces its Paddle
+  original exactly. The correction is worth more than the model: the failing
+  piece is the **18385-way softmax op** in this runtime's float16 path, not the
+  network, and CTC decoding only needs the argmax. Re-export to logits and both
+  v5 and v6 run — 15 of 16 lines at mean confidence 0.928 and 0.930 against v4's
+  0.661 — with the softmax applied on the CPU. PP-OCRv4 stays the default on
+  size and latency, not accuracy. The numbers are in [`MODELS.md`](MODELS.md).
 
 - **M8 — face recognition** ✅ (threshold still needs data)
   The geometry half is done and is the half that is easy to get subtly wrong:

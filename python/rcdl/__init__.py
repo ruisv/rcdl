@@ -705,7 +705,11 @@ class Engine:
         of tokens (the right form when several Engines share one 6625-entry
         table). Keyword arguments: ``config`` (an :class:`OcrRecConfig`),
         ``paddle_special`` (path form only), ``model_input``, ``fit``
-        ("stretch", what every PP-OCR export is fed, or "letterbox"),
+        (``"pad"``, the default and PP-OCR's own rule — scale to the model's
+        height, cap the width there, anchor left and pad the remainder;
+        ``"stretch"``, which is the same thing for any crop wider than the
+        input's aspect ratio and squashes anything narrower; or
+        ``"letterbox"``),
         ``input_scale`` / ``input_shift``, ``backend``, ``output_index``.
 
         Unlike the other heads this one preprocesses on the host, because the

@@ -45,7 +45,7 @@ constraints that trigger that:
 | Constraint | Value | What happens outside it |
 |---|---|---|
 | Scale factor | 1/16 .. 16 | rejected → CPU |
-| Minimum source for a scaled op | 68 × 2 | rejected → CPU |
+| Minimum source for a scaled op | 68 × 2 (documented) | **not** rejected — see below |
 | Maximum dimension | 8192 | rejected → CPU |
 | YUV row stride | 16-byte aligned | rejected → CPU |
 | YUV width/height | even | rejected → CPU |
@@ -53,6 +53,22 @@ constraints that trigger that:
 `rcdl::Image::alloc()` and `strideAlign()` apply the 16-pixel YUV alignment for
 you, so buffers RCDL allocates are always acceptable; a buffer from somewhere
 else may not be.
+
+**The minimum-size row is the one `imcheck` does not enforce**, and it is worth
+knowing before trusting `rgaCanHandle()` on small rectangles. Measured on this
+board with a scaled RGB888 blit, a destination rectangle 32, 48, 64 or 80 px
+wide is *accepted by the check* and then fails at SUBMIT — `Failed to call
+RockChipRga interface`, an ioctl and a page of driver log per call — while 96 px
+wide works. The op still produces the right answer, because `PreprocBackend::Auto`
+falls back to the CPU after the failure; what it costs is the wasted submit and
+the noise. OCR hits this on every short line crop, so the two line-crop paths in
+the Python layer go straight to the CPU below 96 px rather than asking.
+
+The rule was not pushed into `rgaCanHandle()` because the measured boundary is
+not a simple minimum: a 320×80 source scaled *up* into a 320×96 destination
+works, while an 80×128 source scaled into the same destination does not. Encoding
+half a rule there would trade a loud failure for a silent slowdown on shapes that
+do work.
 
 Ask before you commit, without an exception:
 

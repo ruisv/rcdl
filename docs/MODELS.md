@@ -54,6 +54,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `ppocrv5_det_rk3588.rknn` | text detection | 480×480 u8 | rgb | as the v4 detector, and measurably the same on the sample page — see below |
 | `ppocrv5_server_rec_logits_rk3588.rknn` | text recognition | 48×320 **f32** | rgb | `[1,40,18385]` f16 **logits** — the softmax is deliberately NOT in the graph. Decode with `apply_softmax=True`, feed raw 0..255. Needs `data/ppocr_keys_v5_18385.txt` |
 | `ppocrv6_medium_rec_logits_rk3588.rknn` | text recognition | 48×320 **f32** | rgb | `[1,40,18710]` f16 logits, same export as v5. The most confident of the three. Needs `data/ppocr_keys_v6_18710.txt` |
+| `ppocrv6_medium_det_rk3588.rknn` | text detection | 480×480 u8 | rgb | as the v4/v5 detectors, from the ONNX upstream **publishes** for v6. Decode with PP-OCRv6's own DB thresholds (`bin_thresh=0.2`, `box_thresh=0.45`, `unclip_ratio=1.4`), not the library defaults — see below |
 | `siglip_b16_224_fp16_rk3588.rknn` | image embedding (image-text) | 224×224 **f32** | rgb | `[1,768]` f16, unit length. Pair with `siglip_b16_224_text_coco80.npy` + `..._labels.txt`. **Float on measurement — int8 names nothing** |
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
@@ -172,19 +173,53 @@ gets it wrong: fed the identical input tensor, the NPU returns a flattened
 softmax (peak 0.47 where the simulator has 1.00) and the argmax at the first
 character collapses to the CTC blank. An 18385-class head in float16 is past
 what this runtime keeps accurate, and neither quantization escape is open. So
-**PP-OCRv4 remains the deployed recogniser** and the v5 build is not in the
-registry. This is the sharper form of a lesson already in this file: a model
+**PP-OCRv4 remains the deployed recogniser**, and at the time this was written
+the v5 build was not in the registry at all. This is the sharper form of a lesson already in this file: a model
 that compiles, and even one that a simulator reproduces exactly, is not
 therefore a model that works.
 
-**The direction classifier is fed differently from everything else, and it
-matters.** PP-OCR fits a line crop to the model's HEIGHT, caps the width at the
-input's, anchors it top-left and pads the remainder — `ocrLineFitWidth()`. Feed
-it the centred letterbox the rest of the library uses and, measured on the 16
-lines of `data/images/ocr.jpg`, it drops from **16/16 orientations right (mean
+*(That verdict was later narrowed, and the correction is worth more than the
+model — the failing piece is the softmax OP, not the network. See “PP-OCRv5
+recognition: the softmax, not the model” below: with the softmax cut out of the
+graph the v5 and v6 recognisers both run, and both are registered.)*
+
+**The line crops are fed differently from everything else, and it matters.**
+PP-OCR fits a line crop to the model's HEIGHT, caps the width at the input's,
+anchors it top-left and pads the remainder — `ocrLineFitWidth()`. Both heads that
+take a crop are fitted this way, the direction classifier and the recogniser.
+Feed the classifier the centred letterbox the rest of the library uses and,
+measured on the 16 lines of `data/images/ocr.jpg`, it drops from **16/16 orientations right (mean
 confidence 0.98) to 9/16 upright and 11/16 rotated (0.78)**. Nothing errors; the
 model is simply looking at a thin band of text between two thick bars, which is
 not what it was trained on.
+
+**The recogniser is fitted the same way, and its failure hides until the crop is
+short.** A line wider than the input's aspect ratio (48×320 is 6.7:1, which most
+page lines are) is capped at the full width, and there this fit and a plain
+stretch are the *same operation* — which is why the whole sample page cannot tell
+them apart, and why RCDL fed the recogniser a stretch for as long as it did. Cut
+the leading 30% of each line instead (1.5:1 to 5.7:1, ground truth manufactured:
+whatever comes back must be a prefix of the full line's reading) and the
+difference appears:
+
+| leading fraction of the line | aspect | `fit="pad"` | `fit="stretch"` |
+|---|---|---|---|
+| 50% | 2.5–9.6:1 | 15 of 15 | 14 of 15 |
+| 30% | 1.5–5.7:1 | **15 of 15** | **10 of 15** |
+| 20% | 1.0–3.8:1 | 13 of 15 | 8 of 15 |
+
+(PP-OCRv4, the deployed recogniser. PP-OCRv6 is indifferent to the difference —
+15/15, 15/15, 11/15 either way. A newer model absorbing a preprocessing error is
+not a reason to keep making it.) `fit="pad"` is therefore the default;
+`fit="stretch"` and `fit="letterbox"` remain available, and `TextRecognizer`'s
+`fit_width` reports what the last crop actually occupied.
+
+One consequence to know about: under a stretch a crop that is not a line at all —
+the 17×73 vertical strip on this page — is squashed into an unreadable band and
+comes back empty, while under the reference fit it becomes a thin sliver on a
+black canvas and comes back with a *hallucinated* character. Neither is right; a
+box taller than it is wide is a 90° line that the crop-and-warp step is supposed
+to rotate upright, and the board tests skip it as an application would.
 
 The model is `ch_ppocr_mobile_v2.0_cls`, exported to ONNX with paddle2onnx and
 quantized int8 against 96 line crops cut out of the sample page by RCDL's own
@@ -825,10 +860,36 @@ uses — ASCII parentheses where v4/v5 emit full-width ones, and a space inside
 v4 stays the default: 36 ms and 8 MB against v6's 40 MB. Point `RCDL_OCR_REC` at
 a newer one when the page is harder than the model is fast.
 
-**The v6 DETECTOR is not here**, and the reason is upstream: `paddle2onnx`
+### The v6 detector, and the export route that was never needed
+
+An earlier note here recorded the v6 detector as blocked upstream: `paddle2onnx`
 aborts with SIGABRT on `PP-OCRv6_medium_det_infer` while converting the same
-release's recogniser fine. The v4 and v5 detectors are already measurably
-equivalent on this page, so nothing is lost but the newer weights.
+release's recogniser fine. That was true and beside the point — **for v6,
+PaddleOCR publishes ONNX directly**. There is no Paddle step to crash: take the
+published `inference.onnx`, fix its fully dynamic shapes with `onnxslim`
+(`--input-shapes x:1,3,480,480`), and the export is done. The graph already ends
+in `Sigmoid`, so it is a probability map, decoded with `apply_sigmoid=false` like
+the others. Quantized int8 with the same ImageNet mean/std and the same 20-image
+calibration set as the v4 and v5 builds, it is 17.8 MB against v4's 2.4.
+
+On `data/images/ocr.jpg` it is another non-regression: the same 16 regions, the
+same 15 strings out of the v4 recogniser. What it adds is a lesson about where a
+model's post-processing configuration lives:
+
+| | `bin_thresh` | `box_thresh` | `unclip_ratio` |
+|---|---|---|---|
+| RCDL `OcrDetConfig` defaults (v4-era) | 0.3 | 0.6 | 1.5 |
+| **PP-OCRv6's own `inference.yml`** | **0.2** | **0.45** | **1.4** |
+
+Both settings find all 16 regions — the map is that unambiguous — but the boxes
+are not the same size, and the tighter defaults hand the recogniser a crop a few
+pixels smaller, which reads its last character differently (泛酸 against 泛醌 on
+the ingredient line). **The DB thresholds ship with the weights**, so the
+registry records v6's next to the model and the board test decodes it both ways.
+
+The v6 recogniser in the registry predates this route and works as it is, so it
+stays; the published ONNX is the place to start from for both halves next time —
+note that it, too, ends in the softmax that has to come out of the graph.
 
 ## Measured performance
 
@@ -861,6 +922,7 @@ RK3588S, single-frame latency unless stated:
 | YOLOE-11s seg, frame → instances + masks | 34 ms NPU, masks on top |
 | SigLIP base/16, frame → 768-d embedding | 96 ms (fp16) |
 | PP-OCRv6 medium rec, one line | 40 ms; v5 server 88 ms; v4 36 ms |
+| PP-OCRv6 medium det 480×480, frame → 16 regions | 62 ms NPU against v4's 42 — 17.8 MB against 2.4, and the same regions on this page |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 

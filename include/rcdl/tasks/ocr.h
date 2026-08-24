@@ -30,8 +30,9 @@ class Engine;  // backend/engine.h — referenced by ref, not owned.
 //               confident nonsense. See TextAngleClassifier.
 //
 // The middle step — crop each detected quadrilateral out of the ORIGINAL frame,
-// warp it upright, and letterbox it into the recogniser's input — is a host
-// image operation, not a decode, so it is deliberately NOT assembled here. The
+// warp it upright, and fit it into the recogniser's input (see ocrLineFitWidth,
+// which is the rule for the recogniser and the orientation head alike) — is a
+// host image operation, not a decode, so it is deliberately NOT assembled here. The
 // application (or the Python layer) composes the two stages; see sortTextBoxes()
 // for the reading order the reference pipeline feeds the recogniser in.
 //
@@ -346,15 +347,28 @@ class TextRecognizer {
 /// narrower than the input's aspect ratio keeps its shape; a wide one — which a
 /// text line almost always is — is squashed to the full width.
 ///
-/// It matters more than a preprocessing detail usually does. Feeding this head a
-/// CENTRED letterbox instead, measured on the 16 lines of the sample page,
-/// drops it from 16/16 orientations right to 9/16 upright and 11/16 rotated,
-/// with mean confidence 0.98 -> 0.78 — the model is looking at a thin strip of
-/// text between two thick bars, which is not what it was trained on. Nothing
-/// errors; the answers just get worse.
+/// BOTH heads that take a line crop are fitted this way — the orientation
+/// classifier here and the RECOGNISER — and getting it wrong costs accuracy in
+/// two different ways, neither of which raises.
+///
+/// For this head, feeding it a CENTRED letterbox instead, measured on the 16
+/// lines of the sample page, drops it from 16/16 orientations right to 9/16
+/// upright and 11/16 rotated, with mean confidence 0.98 -> 0.78 — the model is
+/// looking at a thin strip of text between two thick bars, which is not what it
+/// was trained on.
+///
+/// For the recogniser, the failure hides until the crop is SHORT. A line wider
+/// than the input's aspect ratio (48x320 => 6.7:1, which most page lines are) is
+/// capped at the full width, and there a plain stretch and this fit are the same
+/// operation — which is why a page of long lines cannot tell them apart. Cut the
+/// leading 30% of each line of the sample page instead (1.5:1 to 5.7:1) and the
+/// deployed PP-OCRv4 recogniser reads 15 of 15 of them as a prefix of the full
+/// line under this fit against 10 of 15 under a stretch; at 20% it is 13 against
+/// 8. The PP-OCRv6 recogniser is indifferent to the difference — a newer model
+/// absorbing a preprocessing error is not a reason to keep making it.
 ///
 /// Returns the destination width in [1, dst_w]; the caller fills
-/// [width, dst_w) with the pad value.
+/// [width, dst_w) with the pad value (zero, as PaddleOCR pads).
 int ocrLineFitWidth(int src_w, int src_h, int dst_w, int dst_h);
 
 /// A text line's orientation verdict.

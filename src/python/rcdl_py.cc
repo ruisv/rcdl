@@ -430,6 +430,19 @@ nb::ndarray<nb::numpy, float> priorsArray(const std::vector<rcdl::PriorBox>& pri
   return ownedArray<float>(flat.data(), {priors.size(), 4});
 }
 
+/// Narrowest destination rectangle worth asking RGA for, measured on RK3588.
+///
+/// Both line-crop heads below scale into a NARROW left sub-view of a host
+/// buffer, and librga's own `imcheck` passes rectangles the hardware then
+/// refuses: a 320x48 recogniser input holding an 11-px-wide crop is accepted by
+/// the check and fails at SUBMIT ("Failed to call RockChipRga interface"),
+/// costing an ioctl and a page of driver log per crop before the CPU fallback
+/// produces the right answer anyway. Measured on this board, a destination
+/// rectangle 32, 48, 64 or 80 px wide fails and 96 px works, so anything below
+/// that goes straight to the CPU — which for a crop this small is where it
+/// belongs regardless. rgaCanHandle() cannot express this yet; see docs/RGA.md.
+constexpr int kRgaMinBlitWidth = 96;
+
 /// The Engine-bound text recogniser, which cannot be a BoundTask.
 ///
 /// The deployed PP-OCR recognition export is a FLOAT model — [1,48,320,3] f32
@@ -442,10 +455,16 @@ nb::ndarray<nb::numpy, float> priorsArray(const std::vector<rcdl::PriorBox>& pri
 /// one gets `pixel * scale + shift`, because the mean/std a quantized export
 /// carries inside its graph is not there to be folded into.
 ///
-/// It also RESIZES rather than letterboxes by default: a CRNN line crop is
-/// already the region of interest, every PP-OCR recognition export is fed a
-/// plain resize to the model's own WxH, and padding a line out to the input's
-/// aspect ratio would spend most of the sequence axis on background.
+/// It also does NOT letterbox: a CRNN line crop is already the region of
+/// interest, and centring it between two bars would spend most of the sequence
+/// axis on background. What it does instead is PP-OCR's own fit — scale to the
+/// input's HEIGHT, cap the width there, anchor left and pad the remainder, the
+/// same ocrLineFitWidth() rule the direction head uses. For any crop WIDER than
+/// the input's aspect ratio the cap makes that identical to a plain resize,
+/// which is why this code stretched for as long as it did without anyone
+/// noticing; on short crops it is measurably better and the header explains by
+/// how much. `fit="stretch"` keeps the old behaviour.
+
 struct BoundRecognizer {
   rcdl::Engine* engine;
   int in_w = 0;
@@ -454,8 +473,10 @@ struct BoundRecognizer {
   bool float_input = false;
   float scale = 1.0f / 255.0f;
   float shift = 0.0f;
-  bool stretch = true;
+  /// How the crop is fitted into the model's input; see the constructor.
+  enum class Fit { kStretch, kLetterbox, kPad } fit_mode = Fit::kStretch;
   std::uint8_t pad = 0;
+  int last_fit_w = 0;
   rcdl::PreprocBackend backend;
   rcdl::PreprocBackend last_backend = rcdl::PreprocBackend::Auto;
   std::vector<std::uint8_t> host;   ///< packed WxHxC scratch, reused per call
@@ -470,10 +491,13 @@ struct BoundRecognizer {
         in_fmt(formatFromName(model_input)),
         scale(in_scale),
         shift(in_shift),
-        stretch(fit == "stretch"),
+        fit_mode(fit == "stretch"   ? Fit::kStretch
+                 : fit == "letterbox" ? Fit::kLetterbox
+                 : fit == "pad"       ? Fit::kPad
+                                      : Fit::kStretch),
         backend(backendFromName(backend_name)),
         task(e, std::forward<Dict>(dict), cfg, output_index) {
-    if (fit != "stretch" && fit != "letterbox") {
+    if (fit != "stretch" && fit != "letterbox" && fit != "pad") {
       throw std::invalid_argument("unknown fit mode: " + fit);
     }
     const rknn_tensor_attr& a = e.inputAttr(0);
@@ -507,10 +531,28 @@ struct BoundRecognizer {
   void run(const rcdl::ImageView& src) {
     rcdl::ImageView dst = rcdl::hostView(host.data(), in_w, in_h, in_fmt);
     dst.size = host.size();
-    if (stretch) {
-      rcdl::resize(dst, src, backend, rcdl::YuvRange::kStudioToFull, &last_backend);
-    } else {
+    last_fit_w = in_w;
+    if (fit_mode == Fit::kLetterbox) {
       rcdl::letterbox(dst, src, pad, backend, rcdl::YuvRange::kStudioToFull, &last_backend);
+    } else {
+      if (fit_mode == Fit::kPad) {
+        // PP-OCR's own rule, shared with the direction head: scale to the input's
+        // HEIGHT, cap the width there, anchor left and pad the remainder. Only a
+        // crop wider than the input's aspect ratio is squeezed, and for those
+        // this is exactly what kStretch does — which is why a page of long lines
+        // cannot tell the two apart and a short crop can. Pad first, then resize
+        // into the left sub-view: both are host writes on a buffer no hardware
+        // owns (see BoundAngleClassifier for why that matters).
+        last_fit_w = rcdl::ocrLineFitWidth(src.width, src.height, in_w, in_h);
+        if (last_fit_w < in_w) {
+          std::fill(host.begin(), host.end(), pad);
+          dst.width = last_fit_w;  // left sub-view; the row stride stays in_w
+          dst.wstride = in_w;
+        }
+      }
+      const rcdl::PreprocBackend b =
+          dst.width < kRgaMinBlitWidth ? rcdl::PreprocBackend::Cpu : backend;
+      rcdl::resize(dst, src, b, rcdl::YuvRange::kStudioToFull, &last_backend);
     }
     if (float_input) {
       for (std::size_t i = 0; i < host.size(); ++i) {
@@ -589,7 +631,9 @@ struct BoundAngleClassifier {
       dst.width = last_fit_w;  // the left sub-view; the row stride stays in_w
       dst.wstride = in_w;
     }
-    rcdl::resize(dst, src, backend, rcdl::YuvRange::kStudioToFull, &last_backend);
+    const rcdl::PreprocBackend b =
+        dst.width < kRgaMinBlitWidth ? rcdl::PreprocBackend::Cpu : backend;
+    rcdl::resize(dst, src, b, rcdl::YuvRange::kStudioToFull, &last_backend);
     engine->setInput(0, host.data(), host.size());
     engine->infer();
   }
@@ -3041,7 +3085,7 @@ NB_MODULE(rcdl_py, m) {
                                         cfg, output_index);
           },
           "engine"_a, "dict_path"_a, "config"_a = rcdl::OcrRecConfig(), "paddle_special"_a = false,
-          "model_input"_a = "rgb888", "fit"_a = "stretch", "input_scale"_a = 1.0f / 255.0f,
+          "model_input"_a = "rgb888", "fit"_a = "pad", "input_scale"_a = 1.0f / 255.0f,
           "input_shift"_a = 0.0f, "backend"_a = "auto", "output_index"_a = 0,
           nb::keep_alive<1, 2>())
       .def(
@@ -3056,7 +3100,7 @@ NB_MODULE(rcdl_py, m) {
                                         backend, dict, cfg, output_index);
           },
           "engine"_a, "dict"_a, "config"_a = rcdl::OcrRecConfig(), "model_input"_a = "rgb888",
-          "fit"_a = "stretch", "input_scale"_a = 1.0f / 255.0f, "input_shift"_a = 0.0f,
+          "fit"_a = "pad", "input_scale"_a = 1.0f / 255.0f, "input_shift"_a = 0.0f,
           "backend"_a = "auto", "output_index"_a = 0, nb::keep_alive<1, 2>())
       .def(
           "process",
@@ -3094,6 +3138,9 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("input_height", [](const PyTextRecognizer& p) { return p.in_h; })
       .def_prop_ro("float_input", [](const PyTextRecognizer& p) { return p.float_input; },
                    "Does the model take f32 pixels (and so `input_scale`/`input_shift`)?")
+      .def_prop_ro("fit_width", [](const PyTextRecognizer& p) { return p.last_fit_w; },
+                   "Columns the last crop occupied, which is input_width unless fit=\"pad\" "
+                   "left a padded remainder")
       .def_prop_ro("backend",
                    [](const PyTextRecognizer& p) {
                      return std::string(rcdl::backendName(p.last_backend));

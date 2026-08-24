@@ -28,30 +28,31 @@ produced. A model that is not staged is reported as skipped rather than dropped
 <!-- BENCH:BEGIN -->
 | task | infer ms | e2e ms | model MB | result |
 |---|---|---|---|---|
-| det | 19.43 | 47.4 | 4.1 | 1 bus, 4 person |
-| det_yolo11 | 32.88 | 79.7 | 4.0 | 1 bus, 4 person |
-| det_yolo26 | 29.15 | 61.9 | 4.1 | 1 bus, 4 person |
-| cls | 4.76 | 5.5 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
-| cls_yolo26 | 5.37 | 6.0 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
-| instance_seg | 30.54 | 127.3 | 4.5 | 5 instances |
-| semantic_seg | 53.93 | 103.6 | 9.1 | 2048x1024 map, 11 classes present |
-| semantic_seg_yolo26 | 22.34 | 45.2 | 2.6 | 2048x1024 map, 10 classes present |
-| pose | 46.30 | 86.1 | 5.0 | 4 people, 43 joints over 0.5 |
-| obb | 29.98 | 70.9 | 4.2 | 33 rotated boxes |
-| depth | 258.81 | 283.1 | 28.3 | 810x1080 disparity [0.00,0.90] |
-| ocr | 37.22 | 1231.1 | 9.2 | 16 boxes, 15 lines read |
-| face | 6.48 | 8.9 | 18.0 | 2 faces, best 0.995 |
-| reid | 11.05 | 20.4 | 2.3 | 4 crops, cross-similarity max 0.471 |
-| features | 33.51 | 85.6 | 1.3 | 4096+4096 features, 1989 matches (+195 ms to match) |
-| superres | 63.11 | 80.4 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
-| flow | 1454.03 | 1420.9 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
-| promptable_seg | 307.06 | 652.3 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 461 ms + prompt 191 ms) |
-| wholebody | 39.59 | 47.4 | 32.1 | 133/133 keypoints over 0.3, one person |
-| face_recognition | 27.37 | 31.6 | 83.9 | 4 faces, worst cross-identity similarity 0.072 |
-| open_vocab | 54.85 | 112.5 | 10.7 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
-| open_vocab_prompts | 38.69 | 87.0 | 10.7 | 6 prompts -> 4 sneakers |
-| open_vocab_seg | 63.24 | 186.6 | 11.5 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
-| panoptic_drive | 139.23 | 208.8 | 9.8 | 18 vehicles, drivable 21.5%, lane 1.8% of the frame |
+| det | 18.40 | 33.3 | 4.1 | 1 bus, 4 person |
+| det_yolo11 | 27.70 | 67.9 | 4.0 | 1 bus, 4 person |
+| det_yolo26 | 36.88 | 70.5 | 4.1 | 1 bus, 4 person |
+| cls | 4.61 | 5.7 | 11.4 | 812:0.949, 404:0.011, 627:0.003 |
+| cls_yolo26 | 2.94 | 3.8 | 3.5 | 812:0.931, 404:0.003, 867:0.002 |
+| instance_seg | 31.26 | 122.1 | 4.5 | 5 instances |
+| semantic_seg | 51.13 | 128.2 | 9.1 | 2048x1024 map, 11 classes present |
+| semantic_seg_yolo26 | 19.49 | 45.1 | 2.6 | 2048x1024 map, 10 classes present |
+| pose | 35.15 | 79.7 | 5.0 | 4 people, 43 joints over 0.5 |
+| obb | 21.67 | 70.0 | 4.2 | 33 rotated boxes |
+| depth | 264.08 | 283.5 | 28.3 | 810x1080 disparity [0.00,0.90] |
+| ocr | 41.77 | 1313.5 | 9.2 | 16 boxes, 15 lines read |
+| ocr_v6 | 62.09 | 1727.5 | 55.3 | 16 boxes, 15 lines read |
+| face | 5.46 | 8.2 | 18.0 | 2 faces, best 0.995 |
+| reid | 11.86 | 23.0 | 2.3 | 4 crops, cross-similarity max 0.471 |
+| features | 43.98 | 95.1 | 1.3 | 4096+4096 features, 1989 matches (+192 ms to match) |
+| superres | 63.05 | 80.0 | 3.5 | 128x128 -> 512x512, 1 tile(s) |
+| flow | 1404.33 | 1505.8 | 263.2 | 512x384 field, EPE 0.103 px vs an 8 px shift |
+| promptable_seg | 263.94 | 555.9 | 33.3 | box -> 28.7% of the frame @ 0.969 (encode 406 ms + prompt 150 ms) |
+| wholebody | 35.62 | 38.7 | 32.1 | 133/133 keypoints over 0.3, one person |
+| face_recognition | 27.73 | 35.9 | 83.9 | 4 faces, worst cross-identity similarity 0.072 |
+| open_vocab | 60.40 | 104.5 | 10.7 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
+| open_vocab_prompts | 52.59 | 91.6 | 10.7 | 6 prompts -> 4 sneakers |
+| open_vocab_seg | 64.87 | 171.7 | 11.5 | 80 prompts -> 1 bus, 4 person, 1 stop sign, 1 tie |
+| panoptic_drive | 142.34 | 225.7 | 9.8 | 18 vehicles, drivable 21.5%, lane 1.8% of the frame |
 <!-- BENCH:END -->
 
 Reading the table:
