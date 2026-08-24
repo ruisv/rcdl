@@ -50,9 +50,15 @@ REGISTRY=(
   "ppocr_cls_rk3588.rknn|convert|ppocr_cls_rk3588.rknn"
   # PP-OCRv5 mobile detection. Measures identical to the v4 detector on the
   # sample page (same boxes, same text); kept as the newer alternative and
-  # pinned by a parity test. There is no v5 recogniser here on purpose — see
-  # docs/MODELS.md for what the board does to it.
+  # pinned by a parity test.
   "ppocrv5_det_rk3588.rknn|convert|ppocrv5_det_rk3588.rknn"
+  # PP-OCRv5 server recognition, exported to emit LOGITS: the 18385-way softmax
+  # is the one op that does not survive this runtime's f16 path (it comes back
+  # summing to 0.64-1.00 per step with no peak, where the simulator peaks at
+  # 1.000), and CTC only needs the argmax. Decode with apply_softmax=True and
+  # feed it RAW 0..255 — input_scale=1, input_shift=0. Reads the sample page at
+  # mean 0.928 against the v4 build's 0.661. See docs/MODELS.md.
+  "ppocrv5_server_rec_logits_rk3588.rknn|convert|ppocrv5_server_rec_logits_rk3588.rknn"
   "ppseg_rk3588.rknn|convert|ppseg_rk3588.rknn"
   "retinaface_rk3588.rknn|convert|retinaface_rk3588.rknn"
   "resnet18_rk3588.rknn|convert|resnet18_rk3588.rknn"

@@ -172,9 +172,9 @@ panoptic driving and face recognition. What is still missing splits into two kin
 equally hard.
 
 **Same head, older or thinner model.** Cheap: the decoder already exists.
-* OCR is PP-OCRv4 rec against BCDL's v5/v6 stacks. The v5 detector is registered
-  and measurably equivalent; the v5 recogniser is not, and **two independent v5
-  builds now fail identically on this runtime** — see `docs/MODELS.md`.
+* OCR has PP-OCRv4 det+rec, the v5 detector and the v5 server recogniser against
+  BCDL's v5/v6 stacks — v6 is still missing. The v5 recogniser needed its
+  18385-way softmax taken out of the graph to run at all; see `docs/MODELS.md`.
 * Embedding is person ReID only; there is no image-text tower.
 * Semantic segmentation has two models where BCDL has three.
 * Detection, classification, pose, instance seg and OBB sit a YOLO generation

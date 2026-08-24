@@ -52,6 +52,7 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `ppocrv4_rec_rk3588.rknn` | text recognition | CRNN | — | CTC greedy decode against `data/ppocr_keys_*.txt` |
 | `ppocr_cls_rk3588.rknn` | text-line direction | 192×48 u8 | **bgr** | `[1,2]` f16, **softmax in-graph**: argmax is the label (0 upright / 1 rotated 180°), its value the score |
 | `ppocrv5_det_rk3588.rknn` | text detection | 480×480 u8 | rgb | as the v4 detector, and measurably the same on the sample page — see below |
+| `ppocrv5_server_rec_logits_rk3588.rknn` | text recognition | 48×320 **f32** | rgb | `[1,40,18385]` f16 **logits** — the softmax is deliberately NOT in the graph. Decode with `apply_softmax=True`, feed raw 0..255. Needs `data/ppocr_keys_v5_18385.txt` |
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
 | `resnet18_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]`, softmax on the CPU |
@@ -719,25 +720,53 @@ against a separately trained closed-vocabulary model on the same frame: all 5 of
 yolov8n-seg's instances matched at **IoU 0.76–0.98**, with masks covering 32–86%
 of their boxes.
 
-### PP-OCRv5 recognition: the second build that this runtime will not run
+### PP-OCRv5 recognition: the softmax, not the model
 
-`docs/MODELS.md` already recorded that the v5 **mobile** recogniser reproduces
-its Paddle reference value-for-value in the toolkit simulator and then reads 1 of
-16 lines correctly on the board. The **server** variant — a different, larger
-network, and the one bcdl ships — now fails the same way on the same page:
+This one was written off twice before it was understood, and the correction is
+worth more than the model. Two independently exported v5 recognisers — the
+mobile one and the server one bcdl ships — each reproduced their Paddle reference
+value-for-value in the toolkit simulator and then read **1 line of 16** on the
+board, every line starting correctly and stopping after two or three characters.
+The obvious reading was that an 18385-class head does not survive this runtime.
 
-| recogniser | non-empty lines | mean score | strings identical to v4 |
+The obvious reading was too broad. Looking at the raw output rather than the
+decoded text:
+
+| head | classes | per-timestep sum | peak |
 |---|---|---|---|
-| PP-OCRv4 (shipped) | 15 of 16 | 0.661 | — |
-| PP-OCRv5 server | 15 of 16 | **0.085** | **1 of 16** |
+| PP-OCRv4 rec | 6625 | exactly 1.00 | confident |
+| PP-OCRv5 rec | 18385 | **0.64 – 1.00** | **0.00 – 0.40** |
 
-The failure has a shape: every line starts correctly and then stops — `纯臻` where
-v4 reads `纯臻营养护发素`. The sequence collapses to the CTC blank after a few
-steps, which is what the earlier per-tensor comparison showed too. Two
-independent v5 recognisers failing identically makes this a property of the
-**18385-class softmax on this runtime's f16 path**, not of one export. Neither
-ships; the registry stays on v4 rec, and the v5 **detector** — which is
-measurably equivalent to v4's — remains registered.
+A softmax whose output does not sum to one is not a model that has learned the
+wrong thing — it is an operator that has been computed wrong. **The failing piece
+is the 18385-way softmax op**, not the network in front of it, and CTC decoding
+never needed it: the argmax is invariant under softmax, which only changes what
+the confidence MEANS.
+
+So the export re-points the graph output at the softmax's input and emits
+**logits**, which land in [-42, +23] and are comfortably inside f16. The softmax
+moves to the CPU, for the score alone (`OcrRecConfig::apply_softmax`, a flag the
+header already carried for exactly this case). On the sample page:
+
+| recogniser | lines read | mean confidence | strings identical to v4 |
+|---|---|---|---|
+| PP-OCRv4 (default) | 15 of 16 | 0.661 | — |
+| PP-OCRv5 server, logits | 15 of 16 | **0.928** | **15 of 16** |
+
+The single disagreement is one character deep in a small-print ingredient list
+(泛酸 against 泛醌). v5 is the more confident model and stays a registered
+alternative rather than the default, because it is 88 ms against v4's 36 and
+44 MB against v4's 8.
+
+Feed it **raw 0..255** (`input_scale=1`, `input_shift=0`) in RGB: the mean/std is
+folded into the `.rknn`, and `BoundRecognizer`'s default of `pixel/255` is for
+builds that carry no normalization of their own.
+
+**The general lesson is about where a lost cause gets declared.** "The board
+cannot run this model" and "the board cannot run this one operator" look
+identical from the decoded output, and only the second one is fixable. The
+distinguishing evidence took one measurement — does each timestep still sum to
+one — and it was available the whole time.
 
 ## Measured performance
 

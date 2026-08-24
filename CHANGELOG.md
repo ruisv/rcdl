@@ -330,6 +330,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- **PP-OCRv5 recognition now works, and the earlier "this runtime cannot run it"
+  was wrong** — `ppocrv5_server_rec_logits_rk3588.rknn`, with
+  `data/ppocr_keys_v5_18385.txt`. Two independently exported v5 recognisers had
+  each reproduced their Paddle reference exactly in the simulator and then read 1
+  line of 16 on the board, which read as a property of an 18385-class head. It
+  was narrower than that: the per-timestep distributions came back summing to
+  0.64-1.00 with no peak, where the 6625-class v4 head sums to exactly 1.00. A
+  softmax whose output does not sum to one is a mis-computed OPERATOR, not a
+  mis-trained model — and CTC never needed it, since argmax is invariant under
+  softmax. The export now emits LOGITS (range -42..+23, comfortably inside f16)
+  and the softmax moves to the CPU for the score alone, via the
+  `OcrRecConfig::apply_softmax` flag the header already carried for this case.
+  *Reads 15 of 16 lines identically to the v4 recogniser at mean confidence 0.928
+  against v4's 0.661; the one difference is a single character deep in a
+  small-print ingredient list. It stays an alternative rather than the default:
+  88 ms against 36, and 44 MB against 8. The lesson is about where a lost cause
+  gets declared — "cannot run this model" and "cannot run this one operator" look
+  identical from the decoded text, only the second is fixable, and telling them
+  apart took one measurement that was available the whole time.*
 - **A second semantic-segmentation model and an open-vocabulary mask branch**,
   both of which decode through existing code. `yolo26n_sem_640_{i8,fp16}` predicts
   the same 19 Cityscapes classes as PP-LiteSeg, so the two check each other:

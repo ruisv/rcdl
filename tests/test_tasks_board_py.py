@@ -13,6 +13,7 @@ Everything skips cleanly when the model, the bindings or OpenCV are missing:
 """
 
 import math
+import os
 
 import numpy as np
 import pytest
@@ -2429,3 +2430,97 @@ def test_the_float_semantic_build_refuses_the_u8_path(rcdl):
     fp16 = bm.require_model("yolo26n_sem_640_fp16_rk3588.rknn")
     with pytest.raises(Exception):
         rcdl.Engine(fp16).segmenter(num_classes=19)
+
+
+def test_the_v5_recogniser_reads_the_page_once_its_softmax_is_off_the_npu(rcdl):
+    """PP-OCRv5 recognition, and the op that had to leave the graph.
+
+    This build was previously written off: the toolkit simulator reproduced its
+    Paddle reference value-for-value and the board read 1 line of 16, twice, from
+    two independently exported v5 recognisers. The cause was narrower than
+    "the model does not run" — a per-timestep distribution over 18385 classes
+    came back summing to 0.64-1.00 with no confident peak, while the 6625-class
+    v4 head sums to exactly 1.00. The 18385-way SOFTMAX is what this runtime's
+    f16 path cannot do.
+
+    CTC only needs the argmax, and argmax is invariant under softmax, so the
+    export emits LOGITS (range -42..+23, comfortably inside f16) and the softmax
+    moves to the CPU for the score alone. Measured: 15 of 16 lines identical to
+    the v4 recogniser at mean confidence 0.928 against v4's 0.661."""
+    need(rcdl, "TextRecognizer")
+    import cv2
+
+    model = bm.require_model("ppocrv5_server_rec_logits_rk3588.rknn")
+    dict_v5 = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v5_18385.txt")
+    if not os.path.isfile(dict_v5):
+        pytest.skip(f"v5 dictionary missing: {dict_v5}")
+    img = bm.load_bgr("ocr.jpg")
+
+    det = rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector()
+    crops = []
+    for b in rcdl.detect_text(det, img, "bgr888"):
+        pts = np.asarray(b.pts, np.float32).reshape(4, 2)
+        w = int(round(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[3] - pts[2]))))
+        h = int(round(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2]))))
+        dst = np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)
+        c = cv2.warpPerspective(img, cv2.getPerspectiveTransform(pts, dst), (max(w, 1), max(h, 1)))
+        if c.shape[0] >= 4 and c.shape[1] >= 4:
+            crops.append(c)
+    assert len(crops) >= 15
+
+    v4 = [rcdl.recognize_text(
+        rcdl.Engine(bm.require_model("ppocrv4_rec_rk3588.rknn")).text_recognizer(
+            os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v1_6625.txt")),
+        c, "bgr888") for c in crops]
+
+    cfg = rcdl.OcrRecConfig()
+    cfg.apply_softmax = True          # the graph no longer carries one
+    rec = rcdl.Engine(model).text_recognizer(
+        dict_v5, config=cfg, input_scale=1.0, input_shift=0.0, model_input="rgb888")
+    v5 = [rcdl.recognize_text(rec, c, "bgr888") for c in crops]
+
+    same = sum(1 for a, b in zip(v4, v5) if a.text == b.text)
+    mean5 = float(np.mean([l.score for l in v5]))
+    mean4 = float(np.mean([l.score for l in v4]))
+    print(f"\nv5 vs v4: {same}/{len(v4)} identical strings; mean score {mean5:.3f} vs {mean4:.3f}")
+    assert sum(1 for l in v5 if l.text) >= 15, "the v5 recogniser is returning empty lines again"
+    assert same >= len(v4) - 2, (
+        f"only {same}/{len(v4)} lines agree with the v4 recogniser — the softmax-free "
+        "decode has stopped working")
+    assert mean5 > mean4, "v5 should be the more confident model on this page"
+
+
+def test_the_v5_recogniser_needs_its_softmax_applied_on_the_cpu(rcdl):
+    """The other half of the contract. With apply_softmax left false the argmax —
+    and therefore the TEXT — is unchanged, because softmax is monotonic; only the
+    score becomes a raw logit. Pinning both halves keeps the flag from being
+    'fixed' by someone who notices the text is fine without it."""
+    need(rcdl, "TextRecognizer")
+    import cv2
+
+    model = bm.require_model("ppocrv5_server_rec_logits_rk3588.rknn")
+    dict_v5 = os.path.join(os.path.dirname(bm.IMAGES), "ppocr_keys_v5_18385.txt")
+    if not os.path.isfile(dict_v5):
+        pytest.skip("v5 dictionary missing")
+    img = bm.load_bgr("ocr.jpg")
+    det = rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector()
+    b = rcdl.detect_text(det, img, "bgr888")[0]
+    pts = np.asarray(b.pts, np.float32).reshape(4, 2)
+    w = int(round(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[3] - pts[2]))))
+    h = int(round(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2]))))
+    crop = cv2.warpPerspective(img, cv2.getPerspectiveTransform(
+        pts, np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)), (max(w, 1), max(h, 1)))
+
+    e = rcdl.Engine(model)
+    out = {}
+    for flag in (True, False):
+        cfg = rcdl.OcrRecConfig()
+        cfg.apply_softmax = flag
+        rec = e.text_recognizer(dict_v5, config=cfg, input_scale=1.0, input_shift=0.0,
+                                model_input="rgb888")
+        out[flag] = rcdl.recognize_text(rec, crop, "bgr888")
+    print(f"\n  softmax on : {out[True].score:.3f}  |{out[True].text}|")
+    print(f"  softmax off: {out[False].score:.3f}  |{out[False].text}|")
+    assert out[True].text == out[False].text, "softmax must not change the argmax"
+    assert 0.0 <= out[True].score <= 1.0, "a softmaxed score is a probability"
+    assert out[False].score > 1.0, "a raw logit score should be unbounded, not a probability"
