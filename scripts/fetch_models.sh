@@ -143,6 +143,21 @@ REGISTRY=(
   # Calibrated on dashcam frames rather than COCO — see docs/MODELS.md.
   "yolo26n_sem_640_i8_rk3588.rknn|convert|yolo26n_sem_640_i8_rk3588.rknn"
   "yolo26n_sem_640_fp16_rk3588.rknn|convert|yolo26n_sem_640_fp16_rk3588.rknn"
+  # PP-OCRv6 medium recognition, 18710 classes, same logits export as v5 — the
+  # softmax is out of the graph and applied on the CPU (apply_softmax=True, raw
+  # 0..255 in). The most confident of the three recognisers here (0.930 on the
+  # sample page against v5's 0.928 and v4's 0.661), and it agrees with v5 on the
+  # one character v4 reads differently. Needs data/ppocr_keys_v6_18710.txt.
+  "ppocrv6_medium_rec_logits_rk3588.rknn|convert|ppocrv6_medium_rec_logits_rk3588.rknn"
+  # SigLIP base/16 — the image half of an image-text pair. The TEXT tower runs on
+  # the conversion host once per label set, exactly as YOLOE's does, so what
+  # reaches the board is an ordinary image encoder and zero-shot classification
+  # is a dot product against the table below. FLOAT: int8 destroys this network
+  # (every label lands within noise of every other), which is what a ViT does
+  # under PTQ. See docs/MODELS.md.
+  "siglip_b16_224_fp16_rk3588.rknn|convert|siglip_b16_224_fp16_rk3588.rknn"
+  "siglip_b16_224_text_coco80.npy|convert|siglip_b16_224_text_coco80.npy"
+  "siglip_b16_224_labels.txt|convert|siglip_b16_224_labels.txt"
 )
 
 if [ "${1:-}" = "--list" ]; then

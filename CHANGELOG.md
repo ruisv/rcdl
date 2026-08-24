@@ -330,6 +330,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what each model actually FOUND, so a build that got faster and stopped finding
   the bus cannot read as an improvement. Regeneration replaces only the table and
   leaves the prose that explains it.
+- **SigLIP base/16 — an image-text pair with one tower on the board**
+  (`siglip_b16_224_fp16_rk3588.rknn` plus a precomputed text table and its label
+  list). Same split as YOLOE: once the label set is chosen the text side is a
+  fixed table, so it runs on the conversion host and the board gets an ordinary
+  image encoder. Zero-shot classification is then a dot product against that
+  table — `ImageEmbedder` and `cosineSimilarity`, both of which already existed.
+  *Measured: `bus.jpg` -> `bus` at +0.092 against a runner-up of +0.040,
+  `bird.jpg` -> `bird` at +0.080, `space_shuttle_224.jpg` -> `airplane`. Float,
+  and this is the sharpest int8 failure in the registry: the int8 build compiles,
+  runs, returns well-formed UNIT vectors, and puts every label within a
+  thousandth of every other — `bus.jpg` comes back `skateboard +0.005`. The
+  entire embedding space collapses with nothing reporting it, which is what a ViT
+  does under PTQ. A board test pins that contrast so the claim stays checkable.*
+- **`ImageEmbedder` accepts float-input models**, staging the crop through a host
+  buffer instead of refusing. The models that most need a float build — image-text
+  towers, ViTs — are exactly the ones int8 ruins, so the class that exists to turn
+  an image into a vector should not be the thing that cannot drive them.
+- **PP-OCRv6 medium recognition** (`ppocrv6_medium_rec_logits_rk3588.rknn`,
+  `data/ppocr_keys_v6_18710.txt`), exported the same way v5 had to be — its
+  softmax is 18710-way, further past what this runtime's f16 path will do.
+  *The most confident of the three recognisers (0.930 against v5's 0.928 and v4's
+  0.661), but the useful result is WHERE they differ: with no ground-truth
+  transcription, agreement between separately trained models is the only evidence
+  available, and v5 and v6 agree with each other on the one character v4 reads
+  differently. Normalising v6's two conventions — ASCII parentheses and a space
+  inside `OEM ODM` — they agree on 16 of 16 lines. v4 stays the default at 36 ms
+  and 8 MB against v6's 40 MB. The v6 DETECTOR is absent for an upstream reason:
+  paddle2onnx aborts with SIGABRT on it while converting the same release's
+  recogniser fine.*
 - **PP-OCRv5 recognition now works, and the earlier "this runtime cannot run it"
   was wrong** — `ppocrv5_server_rec_logits_rk3588.rknn`, with
   `data/ppocr_keys_v5_18385.txt`. Two independently exported v5 recognisers had

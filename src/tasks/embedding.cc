@@ -294,12 +294,18 @@ std::vector<float> ImageEmbedder::embed(const ImageView& src, float x1, float y1
                                         float y2) {
   RCDL_REQUIRE(src.valid(),
                ("RCDL ImageEmbedder::embed: invalid source view: " + src.describe()).c_str());
-  // embed() feeds raw image bytes into the input tensor. A float-input model
-  // would reinterpret them as float32 and infer on garbage instead of failing,
-  // so reject it here; such a model can still be driven through postprocess().
-  RCDL_REQUIRE(engine_.numInputs() == 1 && engine_.inputType(0) == RKNN_TENSOR_UINT8,
-               "RCDL ImageEmbedder::embed: needs a single uint8 image input; preprocess "
-               "externally and call postprocess() for a float-input model");
+  // A quantized model takes the crop as raw bytes written straight into its
+  // input tensor. A float model cannot: the bytes would be reinterpreted as
+  // float32 and it would infer on garbage rather than fail. It gets the crop
+  // staged through a host buffer and converted instead — which is what lets one
+  // class serve both, and matters because the models that most need a float
+  // build (image-text towers, ViTs) are exactly the ones int8 ruins.
+  RCDL_REQUIRE(engine_.numInputs() == 1,
+               "RCDL ImageEmbedder::embed: needs a single image input");
+  const rknn_tensor_type in_type = engine_.inputType(0);
+  RCDL_REQUIRE(in_type == RKNN_TENSOR_UINT8 || in_type == RKNN_TENSOR_FLOAT32,
+               "RCDL ImageEmbedder::embed: input 0 takes neither u8 image bytes nor float32; "
+               "preprocess externally and call postprocess()");
 
   // Optional context margin, then clip to the frame so a detection hanging off
   // the edge is croppable rather than an error.
@@ -320,12 +326,32 @@ std::vector<float> ImageEmbedder::embed(const ImageView& src, float x1, float y1
   RCDL_REQUIRE(ix2 > ix1 && iy2 > iy1,
                "RCDL ImageEmbedder::embed: box is empty after clipping to the frame");
 
-  // The crop destination IS the NPU's input tensor: engineInputView() hands its
-  // fd + virtual address + row stride to the preproc layer, so on the hardware
-  // path RGA writes the model's input directly with no intermediate canvas.
-  const ImageView dst = engineInputView(engine_, 0, pre_.model_input);
-  cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuv_range,
-                 &last_backend_);
+  if (in_type == RKNN_TENSOR_UINT8) {
+    // The crop destination IS the NPU's input tensor: engineInputView() hands
+    // its fd + virtual address + row stride to the preproc layer, so on the
+    // hardware path RGA writes the model's input directly with no intermediate
+    // canvas.
+    const ImageView dst = engineInputView(engine_, 0, pre_.model_input);
+    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuv_range,
+                   &last_backend_);
+  } else {
+    // Float build: crop into a host buffer at the model's size, then widen. The
+    // values stay 0..255 — a float export's mean/std is folded into the .rknn
+    // exactly as a quantized one's is, and dividing here would hand it a picture
+    // 255x too dark that still returns a well-formed unit vector.
+    const int w = inputWidth();
+    const int h = inputHeight();
+    const int bpp = bytesPerPixel(pre_.model_input);
+    host_.resize(static_cast<std::size_t>(w) * h * bpp);
+    ImageView dst = hostView(host_.data(), w, h, pre_.model_input, w, h);
+    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuv_range,
+                   &last_backend_);
+    input_.resize(host_.size());
+    for (std::size_t i = 0; i < host_.size(); ++i) {
+      input_[i] = static_cast<float>(host_[i]);
+    }
+    engine_.setInput(0, input_.data(), input_.size() * sizeof(float));
+  }
 
   engine_.infer();
   return postprocess();

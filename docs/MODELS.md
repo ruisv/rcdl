@@ -53,6 +53,8 @@ rknn-toolkit2 2.3.2 from the airockchip model zoo.
 | `ppocr_cls_rk3588.rknn` | text-line direction | 192×48 u8 | **bgr** | `[1,2]` f16, **softmax in-graph**: argmax is the label (0 upright / 1 rotated 180°), its value the score |
 | `ppocrv5_det_rk3588.rknn` | text detection | 480×480 u8 | rgb | as the v4 detector, and measurably the same on the sample page — see below |
 | `ppocrv5_server_rec_logits_rk3588.rknn` | text recognition | 48×320 **f32** | rgb | `[1,40,18385]` f16 **logits** — the softmax is deliberately NOT in the graph. Decode with `apply_softmax=True`, feed raw 0..255. Needs `data/ppocr_keys_v5_18385.txt` |
+| `ppocrv6_medium_rec_logits_rk3588.rknn` | text recognition | 48×320 **f32** | rgb | `[1,40,18710]` f16 logits, same export as v5. The most confident of the three. Needs `data/ppocr_keys_v6_18710.txt` |
+| `siglip_b16_224_fp16_rk3588.rknn` | image embedding (image-text) | 224×224 **f32** | rgb | `[1,768]` f16, unit length. Pair with `siglip_b16_224_text_coco80.npy` + `..._labels.txt`. **Float on measurement — int8 names nothing** |
 | `ppseg_rk3588.rknn` | semantic seg | 512×512 u8 | rgb | `[1,19,512,512]` NCHW int8 **logits** (PP-LiteSeg, Cityscapes 19 classes) — argmax on the CPU |
 | `retinaface_rk3588.rknn` | face + 5 landmarks | 320×320 u8 | **bgr** | anchor-based SSD head: `boxes[1,4200,4]`, `scores[1,4200,2]` (**softmax in-graph**), `landmarks[1,4200,10]`. 4200 priors = `(40²+20²+10²)×2` from `steps {8,16,32}`, `min_sizes {{16,32},{64,128},{256,512}}`, variances `[0.1, 0.2]` |
 | `resnet18_rk3588.rknn` | classification | 224×224 u8 | rgb | `[1,1000]`, softmax on the CPU |
@@ -768,6 +770,66 @@ identical from the decoded output, and only the second one is fixable. The
 distinguishing evidence took one measurement — does each timestep still sum to
 one — and it was available the whole time.
 
+### An image-text pair with only one tower on the board
+
+SigLIP is two towers, and only one of them has anything to do per frame: once
+the label set is chosen the text side is a fixed table. So it runs on the
+conversion host, exactly as YOLOE's CLIP text encoder does, and what reaches the
+board is an ordinary image encoder. Zero-shot classification is then a dot
+product against that table — `ImageEmbedder` plus `cosineSimilarity`, both of
+which already existed.
+
+The shipped table is COCO-80 through SigLIP's own prompt form (`a photo of a
+{name}.`, which scores measurably better than a bare noun). Regenerating it for
+another vocabulary is a host-side script, not a conversion.
+
+| frame | top-3 |
+|---|---|
+| `bus.jpg` | **bus +0.092**, car +0.040, train +0.031 |
+| `bird.jpg` | **bird +0.080**, kite +0.016, elephant +0.010 |
+| `space_shuttle_224.jpg` | **airplane +0.055**, boat +0.034, car +0.021 |
+
+**Float, and this is the sharpest int8 failure in this registry.** The int8 build
+compiles, runs, and returns well-formed unit vectors — and every label lands
+within noise of every other: `bus.jpg` comes back as `skateboard +0.005` with
+`suitcase` and `handbag` a thousandth behind. Nothing errors, the vectors are
+still unit length, and the whole embedding space has collapsed. This is what a
+ViT does under PTQ, and it is what bcdl recorded for a 24-layer ViT-L. Both
+builds exist; only fp16 is registered, and a board test pins the int8 contrast so
+the claim stays checkable.
+
+Because the float build's input is float32, `ImageEmbedder` now stages the crop
+through a host buffer and widens it rather than refusing — one class serving both
+input types, which matters precisely because the models that most need a float
+build (image-text towers, ViTs) are the ones int8 ruins.
+
+### Three recognisers, and what they disagree about
+
+`ppocrv6_medium_rec` needed the same treatment as v5 — its softmax is 18710-way,
+further past what this runtime's f16 path will do — and comes out the most
+confident of the three:
+
+| recogniser | classes | lines read | mean confidence |
+|---|---|---|---|
+| PP-OCRv4 (default) | 6625 | 15 of 16 | 0.661 |
+| PP-OCRv5 server | 18385 | 15 of 16 | 0.928 |
+| PP-OCRv6 medium | 18710 | 15 of 16 | **0.930** |
+
+What makes this more than a confidence ranking is *where* they differ. Without a
+ground-truth transcription, the available evidence is agreement between models
+trained separately: **v5 and v6 agree with each other on the one character v4
+reads differently** (泛醌 against v4's 泛酸). Normalising the two conventions v6
+uses — ASCII parentheses where v4/v5 emit full-width ones, and a space inside
+`OEM ODM` — v6 and v5 agree on **16 of 16 lines**.
+
+v4 stays the default: 36 ms and 8 MB against v6's 40 MB. Point `RCDL_OCR_REC` at
+a newer one when the page is harder than the model is fast.
+
+**The v6 DETECTOR is not here**, and the reason is upstream: `paddle2onnx`
+aborts with SIGABRT on `PP-OCRv6_medium_det_infer` while converting the same
+release's recogniser fine. The v4 and v5 detectors are already measurably
+equivalent on this page, so nothing is lost but the newer weights.
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -797,6 +859,8 @@ RK3588S, single-frame latency unless stated:
 | ArcFace R50, one face (five-point warp + 512-d embedding) | 32 ms (31.5 ms NPU) |
 | YOLO26n-sem 640, frame → full-res label map | 37 ms (21 ms NPU) — PP-LiteSeg is 86 ms (45 ms NPU) |
 | YOLOE-11s seg, frame → instances + masks | 34 ms NPU, masks on top |
+| SigLIP base/16, frame → 768-d embedding | 96 ms (fp16) |
+| PP-OCRv6 medium rec, one line | 40 ms; v5 server 88 ms; v4 36 ms |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 

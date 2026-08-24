@@ -239,6 +239,10 @@ class ImageEmbedder {
 
  private:
   Engine& engine_;
+  /// Host staging for a FLOAT-input model, where the crop cannot be written
+  /// into the NPU tensor directly. Unused (and unallocated) for a quantized one.
+  std::vector<std::uint8_t> host_;
+  std::vector<float> input_;
   EmbedConfig cfg_;
   EmbedPreproc pre_;
   int out_idx_;

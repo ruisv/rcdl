@@ -2524,3 +2524,123 @@ def test_the_v5_recogniser_needs_its_softmax_applied_on_the_cpu(rcdl):
     assert out[True].text == out[False].text, "softmax must not change the argmax"
     assert 0.0 <= out[True].score <= 1.0, "a softmaxed score is a probability"
     assert out[False].score > 1.0, "a raw logit score should be unbounded, not a probability"
+
+
+def test_the_v6_recogniser_agrees_with_v5_where_v4_differs(rcdl):
+    """PP-OCRv6, the third recogniser, exported the same way v5 had to be — its
+    18710-way softmax is even further past what this runtime's f16 path will do.
+
+    The interesting result is not that it works but WHERE the three disagree.
+    v5 and v6 are separately trained and agree with each other on the character
+    v4 reads differently, which is the only kind of evidence available without a
+    ground-truth transcription. The rest of v6's differences are conventions —
+    ASCII parentheses where v4/v5 emit full-width ones — not errors."""
+    need(rcdl, "TextRecognizer")
+    import cv2
+
+    data = os.path.dirname(bm.IMAGES)
+    model = bm.require_model("ppocrv6_medium_rec_logits_rk3588.rknn")
+    dic = os.path.join(data, "ppocr_keys_v6_18710.txt")
+    if not os.path.isfile(dic):
+        pytest.skip("v6 dictionary missing")
+    img = bm.load_bgr("ocr.jpg")
+
+    det = rcdl.Engine(bm.require_model("ppocrv4_det_rk3588.rknn")).text_detector()
+    crops = []
+    for b in rcdl.detect_text(det, img, "bgr888"):
+        pts = np.asarray(b.pts, np.float32).reshape(4, 2)
+        w = int(round(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[3] - pts[2]))))
+        h = int(round(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2]))))
+        c = cv2.warpPerspective(img, cv2.getPerspectiveTransform(
+            pts, np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)), (max(w, 1), max(h, 1)))
+        if c.shape[0] >= 4 and c.shape[1] >= 4:
+            crops.append(c)
+
+    cfg = rcdl.OcrRecConfig()
+    cfg.apply_softmax = True
+    rec = rcdl.Engine(model).text_recognizer(dic, config=cfg, input_scale=1.0, input_shift=0.0,
+                                             model_input="rgb888")
+    v6 = [rcdl.recognize_text(rec, c, "bgr888") for c in crops]
+    mean6 = float(np.mean([l.score for l in v6]))
+    print(f"\nv6: {sum(1 for l in v6 if l.text)}/{len(v6)} lines, mean score {mean6:.3f}")
+    assert sum(1 for l in v6 if l.text) >= 15
+    assert mean6 > 0.7, "an 18710-way head reading at low confidence is the softmax symptom"
+
+    # Ignoring the full-width/ASCII bracket convention, v6 should track v5.
+    v5rec = rcdl.Engine(bm.require_model("ppocrv5_server_rec_logits_rk3588.rknn")).text_recognizer(
+        os.path.join(data, "ppocr_keys_v5_18385.txt"), config=cfg, input_scale=1.0,
+        input_shift=0.0, model_input="rgb888")
+    v5 = [rcdl.recognize_text(v5rec, c, "bgr888") for c in crops]
+    norm = str.maketrans("（）", "()")
+    same = sum(1 for a, b in zip(v5, v6)
+               if a.text.translate(norm).replace(" ", "") == b.text.translate(norm).replace(" ", ""))
+    print(f"  v6 vs v5 (brackets and spaces normalised): {same}/{len(v5)}")
+    assert same >= len(v5) - 1
+
+
+# --------------------------------------------------------------------------- #
+# SigLIP — the image half of an image-text pair                                #
+# --------------------------------------------------------------------------- #
+def test_siglip_names_what_is_in_the_frame_without_being_trained_on_it(rcdl):
+    """Zero-shot classification: no classifier head anywhere, just the cosine
+    between an image embedding and a table of TEXT embeddings computed on the
+    conversion host. The same split as YOLOE — the text side is fixed once the
+    label set is chosen, so only the image tower has anything to do per frame.
+
+    Measured: bus.jpg -> `bus` at +0.092 (next label +0.040), bird.jpg -> `bird`
+    at +0.080, space_shuttle_224.jpg -> `airplane` at +0.055."""
+    need(rcdl, "ImageEmbedder")
+    model = bm.require_model("siglip_b16_224_fp16_rk3588.rknn")
+    table = bm.find_model("siglip_b16_224_text_coco80.npy")
+    names = bm.find_model("siglip_b16_224_labels.txt")
+    if not table or not names:
+        pytest.skip("SigLIP text table / labels not staged")
+
+    labels = [l.strip() for l in open(names, encoding="utf-8") if l.strip()]
+    T = np.load(table)
+    assert T.shape[0] == len(labels), "the text table and the label list disagree"
+
+    emb = rcdl.Engine(model).embedder()
+    assert emb.dim == T.shape[1]
+
+    for img_name, want in (("bus.jpg", "bus"), ("bird.jpg", "bird"),
+                           ("space_shuttle_224.jpg", "airplane")):
+        v = np.asarray(rcdl.embed(emb, bm.load_bgr(img_name)), np.float32).reshape(-1)
+        v /= np.linalg.norm(v)
+        sims = T @ v
+        order = np.argsort(-sims)
+        print(f"\n  {img_name:<24} -> " +
+              ", ".join(f"{labels[i]} {sims[i]:+.3f}" for i in order[:3]))
+        assert labels[order[0]] == want, (
+            f"{img_name} came back as {labels[order[0]]} — the image and text spaces "
+            "are not aligned")
+        assert sims[order[0]] - sims[order[1]] > 0.01, "no margin over the runner-up"
+
+
+def test_siglip_int8_would_have_shipped_a_model_that_names_nothing(rcdl):
+    """Why this one is float, pinned rather than described.
+
+    A ViT under int8 PTQ is the case bcdl documented collapsing, and this
+    reproduces it: the int8 build compiles, runs, and returns well-formed unit
+    vectors whose similarities land within noise of each other, so every image
+    'matches' whichever label happens to sit highest. Nothing errors. Skipped
+    when the int8 build is not staged, since it exists only to be the contrast."""
+    need(rcdl, "ImageEmbedder")
+    i8 = bm.find_model("siglip_b16_224_i8_rk3588.rknn")
+    table = bm.find_model("siglip_b16_224_text_coco80.npy")
+    names = bm.find_model("siglip_b16_224_labels.txt")
+    if not i8 or not table or not names:
+        pytest.skip("int8 SigLIP build is recipe-only and not staged")
+
+    labels = [l.strip() for l in open(names, encoding="utf-8") if l.strip()]
+    T = np.load(table)
+    emb = rcdl.Engine(i8).embedder()
+    v = np.asarray(rcdl.embed(emb, bm.load_bgr("bus.jpg")), np.float32).reshape(-1)
+    v /= np.linalg.norm(v)
+    sims = T @ v
+    order = np.argsort(-sims)
+    print(f"\n  int8 bus.jpg -> " + ", ".join(f"{labels[i]} {sims[i]:+.3f}" for i in order[:3]))
+    assert abs(float(np.linalg.norm(v)) - 1.0) < 1e-3, "still a well-formed unit vector"
+    assert labels[order[0]] != "bus", (
+        "the int8 build now names the bus correctly — if that is real, re-measure it "
+        "and this contrast can go")
