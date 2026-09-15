@@ -34,7 +34,7 @@ The binding surface these tests assume
         .to_numpy() -> uint8 array, display size, padding removed:
                        (h*3//2, w) for NV12, (h, w, c) for packed formats
         .letterbox(dst_w, dst_h, dst_fmt="rgb888", pad=114, backend="auto",
-                   studio_range=True) -> (image, lb_tuple, backend_name)
+                   studio_range=True, matrix="bt601") -> (image, lb_tuple, backend_name)
                        same return shape as rcdl.letterbox(), but the source is
                        the frame's dma-buf fd (the zero-copy path)
         .release() -> None                # back to the decoder pool, now

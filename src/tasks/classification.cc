@@ -45,11 +45,11 @@ std::string describeShape(const std::vector<int>& shape) {
 /// The sub-view trick needs a packed format and a CPU pointer; a planar-YUV
 /// host frame has a second plane at its own offset, so it goes to RGA too.
 LetterboxInfo cropResizeInto(const ImageView& dst, const ImageView& src, CropBox box,
-                             PreprocBackend backend, YuvRange range, PreprocBackend* used) {
+                             PreprocBackend backend, YuvColorSpace yuv, PreprocBackend* used) {
   // Whole-frame box: no cropping to express, so this is a plain resize and
   // every backend/format combination the preproc layer supports works.
   if (box.x == 0 && box.y == 0 && box.w == src.width && box.h == src.height) {
-    return resize(dst, src, backend, range, used);
+    return resize(dst, src, backend, yuv, used);
   }
 
   const int bpp = bytesPerPixel(src.format);
@@ -75,12 +75,12 @@ LetterboxInfo cropResizeInto(const ImageView& dst, const ImageView& src, CropBox
     if (!can_subview) {
       // No CPU-side fallback exists for this source, so let RGA's own error
       // (out-of-range scale, unaligned stride, ...) reach the caller.
-      rgaCropResize(dst, src, box.x, box.y, box.w, box.h, range);
+      rgaCropResize(dst, src, box.x, box.y, box.w, box.h, yuv);
       if (used) *used = PreprocBackend::Rga;
       return lb;
     }
     try {
-      rgaCropResize(dst, src, box.x, box.y, box.w, box.h, range);
+      rgaCropResize(dst, src, box.x, box.y, box.w, box.h, yuv);
       if (used) *used = PreprocBackend::Rga;
       return lb;
     } catch (const Error&) {
@@ -105,7 +105,7 @@ LetterboxInfo cropResizeInto(const ImageView& dst, const ImageView& src, CropBox
   sub.wstride = src.effWStride();  // rows still stride by the SOURCE's pitch
   sub.hstride = box.h;
   sub.size = 0;  // recomputed from the sub-extent by ImageView::bytes()
-  return resize(dst, sub, backend, range, used);
+  return resize(dst, sub, backend, yuv, used);
 }
 
 }  // namespace
@@ -308,7 +308,7 @@ std::vector<ClsResult> Classifier::classify(const ImageView& src) {
   const ImageView dst = engineInputView(engine_, 0, pre_.model_input);
   const CropBox box = centerCropBox(src.width, src.height, dst.width, dst.height,
                                     pre_.crop_ratio);
-  cropResizeInto(dst, src, box, pre_.backend, pre_.yuv_range, &last_backend_);
+  cropResizeInto(dst, src, box, pre_.backend, pre_.yuvColorSpace(), &last_backend_);
 
   engine_.infer();
   return postprocess();

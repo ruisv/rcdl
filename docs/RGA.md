@@ -216,11 +216,38 @@ full-range pixels. Getting this wrong costs about 14% of contrast, which is the
 kind of error that shows up as slightly-low confidence scores rather than as an
 obvious failure.
 
-`YuvRange::kStudioToFull` (the default) selects BT.601 limited-range on the RGA
-path (`IM_YUV_TO_RGB_BT601_LIMIT`) and the expanding matrix on the CPU path.
+`YuvRange::kStudioToFull` (the default) selects limited range on the RGA path
+(`IM_YUV_TO_RGB_BT601_LIMIT`) and the expanding matrix on the CPU path.
 `YuvRange::kAsIs` treats the source as already full-range — correct for a frame
 RCDL itself produced, and what makes an NV12 → RGB → NV12 round-trip
 self-consistent.
+
+### The colour matrix
+
+The range is half of it; the other half is the matrix. SD video and JPEG are
+**BT.601**; HD video (H.264 / H.265 at 720p and above) normally signals
+**BT.709**. Reading a BT.709 frame with the BT.601 matrix does not change
+contrast — it shifts hue and saturation, by up to ~30 LSB on saturated colour.
+
+Both halves travel together as `YuvColorSpace { YuvRange range; YuvMatrix
+matrix; }`, which every preproc entry point takes. A bare `YuvRange` converts to
+it and means BT.601, so existing code is unchanged. The task configs carry a
+`yuv_matrix` field next to `yuv_range`; in Python it is
+`matrix="bt601" | "bt709"` next to `studio_range=`.
+
+RGA does not cover every combination. Measured on RK3588 (librga 1.10.4), each
+supported mode within ±1 LSB of the float reference:
+
+| | BT.601 limited | BT.601 full | BT.709 limited | BT.709 full |
+|---|---|---|---|---|
+| YUV → RGB | RGA | RGA | RGA | CPU — librga has no mode |
+| RGB → YUV | RGA | RGA | CPU — driver routes it to RGA2 | CPU |
+
+`rgaCanHandle()` answers no for the CPU cells, so `PreprocBackend::Auto` takes
+the CPU path up front instead of paying a failed ioctl; `PreprocBackend::Rga`
+throws. The CPU path implements all four in both directions. For the
+detection hot path (decoded HD NV12 → RGB888 at studio swing) BT.709 stays on
+the hardware.
 
 ## 6. Strides are in pixels, and they are not the width
 

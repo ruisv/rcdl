@@ -12,7 +12,8 @@ namespace {
 /// so several pipeline threads can call the entry points below concurrently
 /// without sharing anything mutable. (rgaAvailable() does cache its probe, but
 /// it is idempotent and reports the same answer to every caller.)
-bool chooseRga(PreprocBackend backend, const ImageView& dst, const ImageView& src) noexcept {
+bool chooseRga(PreprocBackend backend, const ImageView& dst, const ImageView& src,
+               YuvColorSpace yuv) noexcept {
   switch (backend) {
     case PreprocBackend::Cpu:
       return false;
@@ -27,7 +28,7 @@ bool chooseRga(PreprocBackend backend, const ImageView& dst, const ImageView& sr
   // (scale out of range, unaligned YUV stride, no librga in this build), not an
   // error — library code must not print anything about it; the caller learns
   // what ran through `used`.
-  return rgaCanHandle(dst, src, nullptr);
+  return rgaCanHandle(dst, src, nullptr, yuv);
 }
 
 /// Run `hw` on RGA, falling back to `sw` if the hardware refuses at SUBMIT time.
@@ -73,41 +74,41 @@ const char* backendName(PreprocBackend b) noexcept {
 // attempted when that backend throws.
 
 LetterboxInfo letterbox(const ImageView& dst, const ImageView& src, std::uint8_t pad,
-                        PreprocBackend backend, YuvRange range, PreprocBackend* used) {
-  const bool rga = chooseRga(backend, dst, src);
+                        PreprocBackend backend, YuvColorSpace yuv, PreprocBackend* used) {
+  const bool rga = chooseRga(backend, dst, src, yuv);
   if (used != nullptr) *used = rga ? PreprocBackend::Rga : PreprocBackend::Cpu;
-  if (!rga) return letterboxCpu(dst, src, pad, range);
+  if (!rga) return letterboxCpu(dst, src, pad, yuv);
   return runWithFallback(
-      backend, used, [&] { return rgaLetterbox(dst, src, pad, range); },
-      [&] { return letterboxCpu(dst, src, pad, range); });
+      backend, used, [&] { return rgaLetterbox(dst, src, pad, yuv); },
+      [&] { return letterboxCpu(dst, src, pad, yuv); });
 }
 
 LetterboxInfo resize(const ImageView& dst, const ImageView& src, PreprocBackend backend,
-                     YuvRange range, PreprocBackend* used) {
-  const bool rga = chooseRga(backend, dst, src);
+                     YuvColorSpace yuv, PreprocBackend* used) {
+  const bool rga = chooseRga(backend, dst, src, yuv);
   if (used != nullptr) *used = rga ? PreprocBackend::Rga : PreprocBackend::Cpu;
-  if (!rga) return resizeCpu(dst, src, range);
+  if (!rga) return resizeCpu(dst, src, yuv);
   return runWithFallback(
-      backend, used, [&] { return rgaResize(dst, src, range); },
-      [&] { return resizeCpu(dst, src, range); });
+      backend, used, [&] { return rgaResize(dst, src, yuv); },
+      [&] { return resizeCpu(dst, src, yuv); });
 }
 
-void cvtColor(const ImageView& dst, const ImageView& src, PreprocBackend backend, YuvRange range,
-              PreprocBackend* used) {
-  const bool rga = chooseRga(backend, dst, src);
+void cvtColor(const ImageView& dst, const ImageView& src, PreprocBackend backend,
+              YuvColorSpace yuv, PreprocBackend* used) {
+  const bool rga = chooseRga(backend, dst, src, yuv);
   if (used != nullptr) *used = rga ? PreprocBackend::Rga : PreprocBackend::Cpu;
   if (!rga) {
-    cvtColorCpu(dst, src, range);
+    cvtColorCpu(dst, src, yuv);
     return;
   }
   runWithFallback(
       backend, used,
       [&] {
-        rgaCvtColor(dst, src, range);
+        rgaCvtColor(dst, src, yuv);
         return 0;
       },
       [&] {
-        cvtColorCpu(dst, src, range);
+        cvtColorCpu(dst, src, yuv);
         return 0;
       });
 }

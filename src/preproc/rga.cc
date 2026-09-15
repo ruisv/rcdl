@@ -86,24 +86,61 @@ rga_buffer_t wrap(const ImageView& v, const char* which) {
   return wrapbuffer_virtualaddr_t(v.data, v.width, v.height, v.effWStride(), v.effHStride(), fmt);
 }
 
-// RGA's colour-space matrix for the conversion (src -> dst) implies, or
+// cscMode()'s answer for a conversion RGA cannot perform.
+constexpr int kCscUnsupported = -1;
+
+// RGA's colour-space matrix for the conversion (src -> dst) implies,
 // IM_COLOR_SPACE_DEFAULT when both sides live in the same space and no matrix
-// is applied at all.
-int cscMode(const ImageView& src, const ImageView& dst, YuvRange range) noexcept {
+// is applied at all, or kCscUnsupported.
+//
+// What is supported is measured, not read off im2d_type.h (librga 1.10.4,
+// RK3588, against float references):
+//   YUV -> RGB  BT.601 limited / full, BT.709 limited   all within ±1 LSB
+//   YUV -> RGB  BT.709 full    librga refuses: "Not support full csc mode"
+//   RGB -> YUV  BT.601 limited / full                   within ±1 LSB
+//   RGB -> YUV  BT.709 (either range)  submitted to the RGA2 core, which fails
+//               with "job buffer map failed" above 4 GB — the same wall as the
+//               colour fill and GRAY8
+int cscMode(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) noexcept {
   const bool src_yuv = isYuvSide(src.format);
   const bool dst_yuv = isYuvSide(dst.format);
   if (src_yuv == dst_yuv) return IM_COLOR_SPACE_DEFAULT;
+  const bool studio = yuv.range == YuvRange::kStudioToFull;
   if (src_yuv) {
-    // A decoded frame carries BT.601 studio swing (Y in [16,235]); _LIMIT is the
+    // A decoded frame carries studio swing (Y in [16,235]); _LIMIT is the
     // matrix that expands it to full-range RGB, which is what the models are
     // calibrated on. _FULL treats the levels as already full-range.
-    return (range == YuvRange::kStudioToFull) ? IM_YUV_TO_RGB_BT601_LIMIT
-                                              : IM_YUV_TO_RGB_BT601_FULL;
+    if (yuv.matrix == YuvMatrix::kBt709) {
+      return studio ? IM_YUV_TO_RGB_BT709_LIMIT : kCscUnsupported;
+    }
+    return studio ? IM_YUV_TO_RGB_BT601_LIMIT : IM_YUV_TO_RGB_BT601_FULL;
   }
   // Going the other way, kStudioToFull means "produce what a video encoder
   // expects", i.e. compress full-range RGB into studio-swing YUV.
-  return (range == YuvRange::kStudioToFull) ? IM_RGB_TO_YUV_BT601_LIMIT
-                                            : IM_RGB_TO_YUV_BT601_FULL;
+  if (yuv.matrix == YuvMatrix::kBt709) return kCscUnsupported;
+  return studio ? IM_RGB_TO_YUV_BT601_LIMIT : IM_RGB_TO_YUV_BT601_FULL;
+}
+
+const char* matrixName(YuvMatrix m) noexcept {
+  return m == YuvMatrix::kBt709 ? "BT.709" : "BT.601";
+}
+
+std::string cscUnsupportedWhy(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) {
+  return std::string("RGA cannot convert ") + formatName(src.format) + " -> " +
+         formatName(dst.format) + " as " + matrixName(yuv.matrix) +
+         (yuv.range == YuvRange::kStudioToFull ? " limited" : " full") +
+         " range (supported: YUV -> RGB in BT.601 limited/full and BT.709 limited, "
+         "RGB -> YUV in BT.601)";
+}
+
+// The mode for an op that is about to run; throws for a combination RGA cannot
+// do, which PreprocBackend::Auto turns into the CPU path.
+int requireCsc(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) {
+  const int mode = cscMode(src, dst, yuv);
+  if (mode == kCscUnsupported) {
+    throw Error(-1, "RCDL: " + cscUnsupportedWhy(src, dst, yuv));
+  }
+  return mode;
 }
 
 // The mode is carried on the buffers rather than as a call argument for
@@ -542,7 +579,8 @@ int toRgaFormat(PixelFormat f) noexcept {
   return -1;
 }
 
-bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why) noexcept {
+bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why,
+                  YuvColorSpace yuv) noexcept {
   try {
     if (!rgaAvailable()) {
       if (why != nullptr) *why = kUnavailable;
@@ -557,6 +595,12 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why) 
         *why = std::string("no RK_FORMAT_* for ") + formatName(src.format) + " -> " +
                formatName(dst.format);
       }
+      return false;
+    }
+    // A colour space RGA has no mode for (or one the driver can only run on
+    // RGA2) — see cscMode(). imcheck does not look at the mode at all.
+    if (cscMode(src, dst, yuv) == kCscUnsupported) {
+      if (why != nullptr) *why = cscUnsupportedWhy(src, dst, yuv);
       return false;
     }
     // GRAY8 (RK_FORMAT_YCbCr_400) fails at SUBMIT in every direction on this
@@ -625,8 +669,11 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why) 
 }
 
 LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint8_t pad,
-                           YuvRange range) {
+                           YuvColorSpace yuv) {
   requireRga();
+  // Before anything touches the destination: a colour space RGA cannot convert
+  // has to fail with the canvas untouched, so the CPU fallback starts clean.
+  const int csc = requireCsc(src, dst, yuv);
   LetterboxInfo lb = computeLetterbox(src.width, src.height, dst.width, dst.height);
 
   // The hardware only writes integer rectangles. Round the scaled extent first,
@@ -700,7 +747,7 @@ LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint
 
   // 2. Crop, scale and colour-convert into the centred rectangle in one pass,
   //    on top of the grey the step above laid down.
-  applyCsc(&s, &d, cscMode(src, dst, range));
+  applyCsc(&s, &d, csc);
   process(s, d, srect, drect, src, dst, "letterbox blit");
 
   // 3. Border, the fallback: the CPU paints only the bands the blit did not
@@ -726,7 +773,7 @@ LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint
   return lb;
 }
 
-LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvRange range) {
+LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvColorSpace yuv) {
   requireRga();
   RCDL_REQUIRE(src.valid() && dst.valid(), "rgaResize: src or dst view is not usable");
 
@@ -735,7 +782,7 @@ LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvRange ran
   const im_rect srect{0, 0, src.width, src.height};
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "resize");
-  applyCsc(&s, &d, cscMode(src, dst, range));
+  applyCsc(&s, &d, requireCsc(src, dst, yuv));
   process(s, d, srect, drect, src, dst, "resize");
 
   LetterboxInfo lb;
@@ -752,7 +799,7 @@ LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvRange ran
   return lb;
 }
 
-void rgaCvtColor(const ImageView& dst, const ImageView& src, YuvRange range) {
+void rgaCvtColor(const ImageView& dst, const ImageView& src, YuvColorSpace yuv) {
   requireRga();
   RCDL_REQUIRE(src.width == dst.width && src.height == dst.height,
                "rgaCvtColor: src and dst must have the same width and height");
@@ -763,12 +810,12 @@ void rgaCvtColor(const ImageView& dst, const ImageView& src, YuvRange range) {
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "cvtColor");
   // imcvtcolor takes the matrix as an argument rather than off the buffers.
-  checkIm(imcvtcolor(s, d, s.format, d.format, cscMode(src, dst, range), /*sync=*/1), "cvtColor",
-          &dst, &src);
+  const int mode = requireCsc(src, dst, yuv);
+  checkIm(imcvtcolor(s, d, s.format, d.format, mode, /*sync=*/1), "cvtColor", &dst, &src);
 }
 
 void rgaCropResize(const ImageView& dst, const ImageView& src, int x, int y, int w, int h,
-                   YuvRange range) {
+                   YuvColorSpace yuv) {
   requireRga();
   RCDL_REQUIRE(w > 0 && h > 0, "rgaCropResize: crop rectangle is empty");
   RCDL_REQUIRE(x >= 0 && y >= 0 && x + w <= src.width && y + h <= src.height,
@@ -782,7 +829,7 @@ void rgaCropResize(const ImageView& dst, const ImageView& src, int x, int y, int
   const im_rect srect{x, y, w, h};
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "cropResize");
-  applyCsc(&s, &d, cscMode(src, dst, range));
+  applyCsc(&s, &d, requireCsc(src, dst, yuv));
   process(s, d, srect, drect, src, dst, "cropResize");
 }
 
@@ -842,18 +889,22 @@ std::string rgaVersion() { return ""; }
 
 int toRgaFormat(PixelFormat) noexcept { return -1; }
 
-bool rgaCanHandle(const ImageView&, const ImageView&, std::string* why) noexcept {
+bool rgaCanHandle(const ImageView&, const ImageView&, std::string* why, YuvColorSpace) noexcept {
   if (why != nullptr) *why = kUnavailable;
   return false;
 }
 
-LetterboxInfo rgaLetterbox(const ImageView&, const ImageView&, std::uint8_t, YuvRange) { noRga(); }
+LetterboxInfo rgaLetterbox(const ImageView&, const ImageView&, std::uint8_t, YuvColorSpace) {
+  noRga();
+}
 
-LetterboxInfo rgaResize(const ImageView&, const ImageView&, YuvRange) { noRga(); }
+LetterboxInfo rgaResize(const ImageView&, const ImageView&, YuvColorSpace) { noRga(); }
 
-void rgaCvtColor(const ImageView&, const ImageView&, YuvRange) { noRga(); }
+void rgaCvtColor(const ImageView&, const ImageView&, YuvColorSpace) { noRga(); }
 
-void rgaCropResize(const ImageView&, const ImageView&, int, int, int, int, YuvRange) { noRga(); }
+void rgaCropResize(const ImageView&, const ImageView&, int, int, int, int, YuvColorSpace) {
+  noRga();
+}
 
 void rgaCopy(const ImageView&, const ImageView&) { noRga(); }
 

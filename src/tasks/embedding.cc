@@ -43,11 +43,11 @@ std::string describeShape(const std::vector<int>& shape) {
 /// The sub-view trick needs a packed format and a CPU pointer; a planar-YUV
 /// host frame has a second plane at its own offset, so it goes to RGA too.
 void cropResizeInto(const ImageView& dst, const ImageView& src, int x, int y, int w, int h,
-                    PreprocBackend backend, YuvRange range, PreprocBackend* used) {
+                    PreprocBackend backend, YuvColorSpace yuv, PreprocBackend* used) {
   // Whole-frame box: no cropping to express, so this is a plain resize and
   // every backend/format combination the preproc layer supports works.
   if (x == 0 && y == 0 && w == src.width && h == src.height) {
-    resize(dst, src, backend, range, used);
+    resize(dst, src, backend, yuv, used);
     return;
   }
 
@@ -68,12 +68,12 @@ void cropResizeInto(const ImageView& dst, const ImageView& src, int x, int y, in
     if (!can_subview) {
       // No CPU-side fallback exists for this source, so let RGA's own error
       // (out-of-range scale, unaligned stride, ...) reach the caller.
-      rgaCropResize(dst, src, x, y, w, h, range);
+      rgaCropResize(dst, src, x, y, w, h, yuv);
       if (used) *used = PreprocBackend::Rga;
       return;
     }
     try {
-      rgaCropResize(dst, src, x, y, w, h, range);
+      rgaCropResize(dst, src, x, y, w, h, yuv);
       if (used) *used = PreprocBackend::Rga;
       return;
     } catch (const Error&) {
@@ -98,7 +98,7 @@ void cropResizeInto(const ImageView& dst, const ImageView& src, int x, int y, in
   sub.wstride = src.effWStride();  // rows still stride by the SOURCE's pitch
   sub.hstride = h;
   sub.size = 0;  // recomputed from the sub-extent by ImageView::bytes()
-  resize(dst, sub, backend, range, used);
+  resize(dst, sub, backend, yuv, used);
 }
 
 }  // namespace
@@ -332,7 +332,7 @@ std::vector<float> ImageEmbedder::embed(const ImageView& src, float x1, float y1
     // hardware path RGA writes the model's input directly with no intermediate
     // canvas.
     const ImageView dst = engineInputView(engine_, 0, pre_.model_input);
-    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuv_range,
+    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuvColorSpace(),
                    &last_backend_);
   } else {
     // Float build: crop into a host buffer at the model's size, then widen. The
@@ -344,7 +344,7 @@ std::vector<float> ImageEmbedder::embed(const ImageView& src, float x1, float y1
     const int bpp = bytesPerPixel(pre_.model_input);
     host_.resize(static_cast<std::size_t>(w) * h * bpp);
     ImageView dst = hostView(host_.data(), w, h, pre_.model_input, w, h);
-    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuv_range,
+    cropResizeInto(dst, src, ix1, iy1, ix2 - ix1, iy2 - iy1, pre_.backend, pre_.yuvColorSpace(),
                    &last_backend_);
     input_.resize(host_.size());
     for (std::size_t i = 0; i < host_.size(); ++i) {

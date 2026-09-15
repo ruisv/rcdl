@@ -348,22 +348,66 @@ def test_auto_falls_back_when_rga_cannot(rga):
 # --------------------------------------------------------------------------- #
 # NV12 (the video path)                                                        #
 # --------------------------------------------------------------------------- #
-def make_nv12(bgr):
-    """BT.601 full-range BGR -> NV12, the inverse of cvt_color(..., 'as-is')."""
+# (Kr, Kb) of each colour matrix; every coefficient below is derived from these,
+# so the oracle is the textbook definition rather than a copy of the C++ table.
+KR_KB = {"bt601": (0.299, 0.114), "bt709": (0.2126, 0.0722)}
+
+
+def make_nv12(bgr, matrix="bt601", studio_range=False):
+    """BGR -> NV12 with `matrix` and the given levels — the inverse of
+    cvt_color(..., studio_range=..., matrix=...). The default (BT.601, full
+    range) is what the older tests here were written against. Chroma averages
+    each 2x2 RGB block before converting, as the CPU path does."""
+    kr, kb = KR_KB[matrix]
+    kg = 1.0 - kr - kb
     h, w = bgr.shape[:2]
-    b, g, r = (bgr[:, :, i].astype(np.float32) for i in range(3))
-    y = 0.299 * r + 0.587 * g + 0.114 * b
-    r2 = r.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3))
-    g2 = g.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3))
-    b2 = b.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3))
-    u = -0.169 * r2 - 0.331 * g2 + 0.500 * b2 + 128
-    v = 0.500 * r2 - 0.419 * g2 - 0.081 * b2 + 128
+    b, g, r = (bgr[:, :, i].astype(np.float64) for i in range(3))
+    y = kr * r + kg * g + kb * b
+    r2, g2, b2 = (c.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3)) for c in (r, g, b))
+    y2 = kr * r2 + kg * g2 + kb * b2
+    u = (b2 - y2) / (2 * (1 - kb))
+    v = (r2 - y2) / (2 * (1 - kr))
+    if studio_range:
+        y = 16 + y * 219 / 255
+        u = u * 224 / 255
+        v = v * 224 / 255
     out = np.empty((h * 3 // 2, w), dtype=np.uint8)
     out[:h] = np.clip(np.rint(y), 0, 255).astype(np.uint8)
     uv = np.empty((h // 2, w), dtype=np.uint8)
-    uv[:, 0::2] = np.clip(np.rint(u), 0, 255).astype(np.uint8)
-    uv[:, 1::2] = np.clip(np.rint(v), 0, 255).astype(np.uint8)
+    uv[:, 0::2] = np.clip(np.rint(u + 128), 0, 255).astype(np.uint8)
+    uv[:, 1::2] = np.clip(np.rint(v + 128), 0, 255).astype(np.uint8)
     out[h:] = uv
+    return out
+
+
+def ref_nv12_to_bgr(nv12, matrix="bt601", studio_range=False):
+    """NV12 -> BGR from the textbook equations, nearest-neighbour chroma (what
+    cv::cvtColor and the CPU path do)."""
+    kr, kb = KR_KB[matrix]
+    kg = 1.0 - kr - kb
+    rows, w = nv12.shape
+    h = rows * 2 // 3
+    y = nv12[:h].astype(np.float64)
+    uv = nv12[h:].reshape(h // 2, w // 2, 2).astype(np.float64) - 128
+    u = uv[:, :, 0].repeat(2, axis=0).repeat(2, axis=1)
+    v = uv[:, :, 1].repeat(2, axis=0).repeat(2, axis=1)
+    if studio_range:
+        y = (y - 16) * 255 / 219
+        u = u * 255 / 224
+        v = v * 255 / 224
+    r = y + 2 * (1 - kr) * v
+    b = y + 2 * (1 - kb) * u
+    g = (y - kr * r - kb * b) / kg
+    return np.clip(np.rint(np.dstack([b, g, r])), 0, 255).astype(np.uint8)
+
+
+def random_nv12(w=320, h=240, seed=0):
+    """Uniform noise over the whole studio-swing cube, out-of-gamut corners
+    included, so the clipping is exercised too."""
+    rng = np.random.default_rng(seed)
+    out = np.empty((h * 3 // 2, w), dtype=np.uint8)
+    out[:h] = rng.integers(16, 236, (h, w))
+    out[h:] = rng.integers(16, 241, (h // 2, w))
     return out
 
 
@@ -390,3 +434,115 @@ def test_nv12_letterbox_to_rgb(rcdl_pre, scene):
     d = np.abs(out.astype(np.int16) - ref.astype(np.int16))
     print(f"NV12 vs BGR letterbox ({used}): mean={d.mean():.2f} p99={np.percentile(d, 99)}")
     assert d.mean() < 12.0  # chroma subsampling loss dominates, not a bug
+
+
+# --------------------------------------------------------------------------- #
+# colour matrix: BT.601 / BT.709, studio / full range                          #
+# --------------------------------------------------------------------------- #
+COLOR_SPACES = [("bt601", True), ("bt601", False), ("bt709", True), ("bt709", False)]
+
+
+@pytest.mark.parametrize("matrix,studio", COLOR_SPACES)
+def test_cpu_nv12_to_bgr_matches_textbook(rcdl_pre, matrix, studio):
+    """Every matrix/range pair against the equations derived from Kr/Kb. The C++
+    tables carry 3-4 significant digits, which stays inside one LSB."""
+    nv12 = random_nv12()
+    got, used = rcdl_pre.cvt_color(nv12, "nv12", "bgr888", backend="cpu",
+                                   studio_range=studio, matrix=matrix)
+    assert used == "cpu"
+    d = np.abs(got.astype(np.int16) - ref_nv12_to_bgr(nv12, matrix, studio))
+    print(f"\n{matrix} studio={studio}: CPU vs textbook max={d.max()} mean={d.mean():.4f}")
+    assert d.max() <= 1
+
+
+@pytest.mark.parametrize("matrix,studio", COLOR_SPACES)
+def test_cpu_bgr_to_nv12_matches_textbook(rcdl_pre, scene, matrix, studio):
+    got, _ = rcdl_pre.cvt_color(scene, "bgr888", "nv12", backend="cpu",
+                                studio_range=studio, matrix=matrix)
+    d = np.abs(got.astype(np.int16) - make_nv12(scene, matrix, studio))
+    h = scene.shape[0]
+    print(f"\n{matrix} studio={studio}: CPU vs textbook Y max={d[:h].max()} "
+          f"UV max={d[h:].max()}")
+    assert d.max() <= 1
+
+
+def test_matrix_defaults_to_bt601_and_bt709_differs(rcdl_pre):
+    """Leaving `matrix` out must keep the old BT.601 bytes exactly, and asking
+    for BT.709 must actually reach the conversion."""
+    nv12 = random_nv12()
+    default, _ = rcdl_pre.cvt_color(nv12, "nv12", "bgr888", backend="cpu")
+    bt601, _ = rcdl_pre.cvt_color(nv12, "nv12", "bgr888", backend="cpu", matrix="bt601")
+    bt709, _ = rcdl_pre.cvt_color(nv12, "nv12", "bgr888", backend="cpu", matrix="bt709")
+    np.testing.assert_array_equal(default, bt601)
+    d = np.abs(bt709.astype(np.int16) - bt601.astype(np.int16))
+    print(f"\nBT.709 vs BT.601 on the same NV12: max={d.max()} mean={d.mean():.2f}")
+    assert d.max() >= 20
+
+
+@pytest.mark.parametrize("matrix,studio", COLOR_SPACES)
+def test_nv12_roundtrip_per_colour_space(rcdl_pre, smooth_scene, matrix, studio):
+    """NV12 -> BGR -> NV12 on the CPU with one colour space throughout comes back
+    to the same NV12 up to rounding. Band-limited, in-gamut content, so nothing
+    clips on the way."""
+    nv12 = make_nv12(smooth_scene, matrix, studio)
+    kw = dict(backend="cpu", studio_range=studio, matrix=matrix)
+    bgr, _ = rcdl_pre.cvt_color(nv12, "nv12", "bgr888", **kw)
+    again, _ = rcdl_pre.cvt_color(bgr, "bgr888", "nv12", **kw)
+    d = np.abs(again.astype(np.int16) - nv12.astype(np.int16))
+    h = smooth_scene.shape[0]
+    print(f"\n{matrix} studio={studio}: round-trip Y max={d[:h].max()} "
+          f"UV max={d[h:].max()} mean={d.mean():.3f}")
+    assert d.max() <= 2
+
+
+def test_unknown_matrix_is_rejected(rcdl_pre):
+    with pytest.raises(ValueError):
+        rcdl_pre.cvt_color(random_nv12(), "nv12", "bgr888", backend="cpu", matrix="bt2020")
+
+
+@pytest.mark.parametrize("matrix,studio", [("bt601", True), ("bt601", False), ("bt709", True)])
+def test_rga_nv12_to_rgb_matches_cpu_per_colour_space(rga, smooth_scene, matrix, studio):
+    """The three YUV -> RGB modes RGA has. Same size, so nothing is resampled:
+    any difference is the matrix (or the chroma upsampling)."""
+    nv12 = make_nv12(smooth_scene, matrix, studio)
+    kw = dict(studio_range=studio, matrix=matrix)
+    hw, u1 = rga.cvt_color(nv12, "nv12", "rgb888", backend="rga", **kw)
+    sw, u2 = rga.cvt_color(nv12, "nv12", "rgb888", backend="cpu", **kw)
+    assert u1 == "rga" and u2 == "cpu"
+    d = np.abs(hw.astype(np.int16) - sw.astype(np.int16))
+    print(f"\n{matrix} studio={studio}: RGA vs CPU max={d.max()} mean={d.mean():.3f}")
+    assert d.max() <= 2
+
+
+def test_rga_nv12_bt709_letterbox_matches_cpu(rga, smooth_scene):
+    """The HD video hot path — studio-swing BT.709 NV12 letterboxed to RGB888 —
+    stays on the hardware and agrees with the CPU path as closely as BGR input
+    does in test_rga_matches_cpu_on_band_limited_content."""
+    nv12 = make_nv12(smooth_scene, "bt709", studio_range=True)
+    kw = dict(src_fmt="nv12", dst_fmt="rgb888", matrix="bt709")
+    hw, _, used = rga.letterbox(nv12, 640, 640, backend="auto", **kw)
+    sw, _, _ = rga.letterbox(nv12, 640, 640, backend="cpu", **kw)
+    assert used == "rga"
+    d = np.abs(hw.astype(np.int16) - sw.astype(np.int16))
+    print(f"\nBT.709 NV12 letterbox: RGA vs CPU max={d.max()} mean={d.mean():.3f}")
+    assert d.max() <= 8
+    assert d.mean() < 1.0
+
+
+@pytest.mark.parametrize("src_fmt,dst_fmt,studio", [
+    ("nv12", "rgb888", False),   # librga has no BT.709 full-range mode
+    ("rgb888", "nv12", True),    # the driver routes RGB -> YUV BT.709 to RGA2
+    ("rgb888", "nv12", False),
+])
+def test_auto_takes_cpu_where_rga_has_no_bt709_mode(rga, smooth_scene, src_fmt, dst_fmt, studio):
+    """rgaCanHandle() must say no up front (no failed ioctl), Auto must produce
+    the CPU path's exact bytes, and a forced RGA must raise rather than submit."""
+    img = (make_nv12(smooth_scene, "bt709", studio) if src_fmt == "nv12"
+           else np.ascontiguousarray(smooth_scene[:, :, ::-1]))
+    kw = dict(studio_range=studio, matrix="bt709")
+    auto, used = rga.cvt_color(img, src_fmt, dst_fmt, backend="auto", **kw)
+    cpu, _ = rga.cvt_color(img, src_fmt, dst_fmt, backend="cpu", **kw)
+    assert used == "cpu"
+    np.testing.assert_array_equal(auto, cpu)
+    with pytest.raises(RuntimeError, match="BT.709"):
+        rga.cvt_color(img, src_fmt, dst_fmt, backend="rga", **kw)

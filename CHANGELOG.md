@@ -7,6 +7,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **BT.709 colour matrix** for YUV conversions. `YuvMatrix { kBt601, kBt709 }`
+  and `YuvColorSpace { range, matrix }` (in `preproc/geometry.h`) replace the
+  bare `YuvRange` parameter of `letterbox` / `resize` / `cvtColor` and their
+  RGA and CPU variants. A `YuvRange` still converts implicitly and means
+  BT.601, so existing calls compile and behave as before. `DetectionPipelineConfig`,
+  the classifier and the embedder preproc configs gain `yuv_matrix`; Python
+  `letterbox` / `cvt_color` / `VideoFrame.letterbox` gain `matrix="bt601"|"bt709"`,
+  and `DetectionPipeline` / `Engine.detector()` gain `studio_range` and `matrix`.
+  RGA runs YUV → RGB in BT.709 limited range (±1 LSB of the reference);
+  `rgaCanHandle()` rejects BT.709 full range and BT.709 RGB → YUV, which librga
+  or this board's driver cannot do, so `Auto` sends them to the CPU path, which
+  implements all four matrix/range combinations.
 - Project skeleton: CMake build (`librcdl.so`, examples, nanobind module,
   `find_package(rcdl)` export), conda env spec, workstation → board workflow
   scripts, leak-scan pre-commit hook.

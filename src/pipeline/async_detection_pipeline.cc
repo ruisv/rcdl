@@ -381,7 +381,7 @@ LetterboxInfo AsyncDetectionPipeline::letterboxIntoSlot(int slot, const ImageVie
   // hardware.
   const auto t0 = std::chrono::steady_clock::now();
   const LetterboxInfo lb =
-      letterbox(dst, src, cfg_.pad_value, cfg_.backend, cfg_.yuv_range, nullptr);
+      letterbox(dst, src, cfg_.pad_value, cfg_.backend, cfg_.yuvColorSpace(), nullptr);
   impl_->addPreprocTime(msBetween(t0, std::chrono::steady_clock::now()));
   return lb;
 }

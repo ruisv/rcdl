@@ -57,7 +57,7 @@ aligned up, and `strideAlign()` aligns what RCDL allocates — assuming
 | `backend/engine_pool.h` | `EnginePool`, `EnginePool::Lease` |
 | `backend/output_reader.h` | `outputAsFloat`, `dequantizeToFloat`, `sigmoid`, `quantParams` |
 | `preproc/image.h` | `PixelFormat`, `ImageView`, `Image`, `engineInputView`, `strideAlign` |
-| `preproc/geometry.h` | `LetterboxInfo`, `computeLetterbox`, `YuvRange` |
+| `preproc/geometry.h` | `LetterboxInfo`, `computeLetterbox`, `YuvRange`, `YuvMatrix`, `YuvColorSpace` |
 | `preproc/letterbox.h` | `letterbox` / `resize` / `cvtColor` + `PreprocBackend` |
 | `preproc/rga.h`, `preproc/letterbox_cpu.h` | the two backends, if you want one specifically |
 | `media/video_codec.h`, `media/video_frame.h`, `media/jpeg_codec.h` | VPU codecs |

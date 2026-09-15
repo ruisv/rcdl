@@ -50,7 +50,14 @@ int toRgaFormat(PixelFormat f) noexcept;
 /// Would RGA accept this (src -> dst) pair? Runs the same imcheck the ops run,
 /// without throwing; `why` receives librga's explanation when it says no.
 /// Returns false (with a reason) when RGA is not available at all.
-bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why = nullptr) noexcept;
+///
+/// `yuv` is the colour space the op would be given. RGA converts YUV -> RGB in
+/// BT.601 limited / full and BT.709 limited, and RGB -> YUV in BT.601 only:
+/// librga has no BT.709 full-range mode, and on RK3588 an RGB -> YUV BT.709 op
+/// is routed to the RGA2 core, which cannot map pages above 4 GB. Anything else
+/// that crosses between RGB and YUV is a "no" here.
+bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why = nullptr,
+                  YuvColorSpace yuv = {}) noexcept;
 
 /// Aspect-preserving letterbox of `src` into the pre-allocated `dst`, in ONE
 /// `improcess` call that crops, scales, converts colour space and fills the
@@ -63,31 +70,30 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why =
 /// use INTEGER pixel bounds — computeLetterbox()'s float geometry is rounded to
 /// what the hardware actually did, so the inverse map matches the pixels.
 ///
-/// `range` selects RGA's YUV->RGB matrix when the conversion happens:
-/// kStudioToFull uses BT.601 limited-range (what a video decoder emits),
-/// kAsIs uses full-range. Ignored when neither side is YUV.
+/// `yuv` selects RGA's colour-space mode when a YUV <-> RGB conversion happens:
+/// its range picks limited (kStudioToFull, what a video decoder emits) or full
+/// (kAsIs), its matrix BT.601 or BT.709. Ignored when neither side is YUV.
 ///
-/// Throws rcdl::Error when RGA is unavailable or imcheck rejects the pair — use
+/// Throws rcdl::Error when RGA is unavailable, imcheck rejects the pair, or the
+/// colour space is one RGA cannot convert (see rgaCanHandle()) — use
 /// rcdl::letterbox() (preproc/letterbox.h) for the fallback-aware version.
 LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint8_t pad = 114,
-                           YuvRange range = YuvRange::kStudioToFull);
+                           YuvColorSpace yuv = {});
 
 /// Stretch `src` to fill `dst` (NO aspect preservation, no padding), converting
 /// the colour format if they differ. Returns the geometry with the X scale and
 /// zero padding; its uniform-scale inverse is only exact when the aspect ratios
 /// match. Prefer rgaLetterbox() for detection.
-LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src,
-                        YuvRange range = YuvRange::kStudioToFull);
+LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvColorSpace yuv = {});
 
 /// Colour-space conversion only; `dst` and `src` must have the same width and
 /// height (e.g. NV12 1920x1080 -> RGB888 1920x1080).
-void rgaCvtColor(const ImageView& dst, const ImageView& src,
-                 YuvRange range = YuvRange::kStudioToFull);
+void rgaCvtColor(const ImageView& dst, const ImageView& src, YuvColorSpace yuv = {});
 
 /// Copy the `(x, y, w, h)` rectangle of `src` into `dst`, scaling it to dst's
 /// full extent (crop + resize in one op). `dst` may differ in format.
 void rgaCropResize(const ImageView& dst, const ImageView& src, int x, int y, int w, int h,
-                   YuvRange range = YuvRange::kStudioToFull);
+                   YuvColorSpace yuv = {});
 
 /// Straight blit — same size, same format, honouring strides.
 void rgaCopy(const ImageView& dst, const ImageView& src);

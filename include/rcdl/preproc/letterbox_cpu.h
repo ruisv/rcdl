@@ -46,12 +46,11 @@ namespace rcdl {
 /// Requires a CPU pointer on both views (ImageView::data); throws rcdl::Error
 /// with the offending view's describe() otherwise.
 LetterboxInfo letterboxCpu(const ImageView& dst, const ImageView& src, std::uint8_t pad = 114,
-                           YuvRange range = YuvRange::kStudioToFull);
+                           YuvColorSpace yuv = {});
 
 /// Stretch-resize `src` into `dst` (no padding, aspect NOT preserved), with an
 /// implied colour conversion when the formats differ. Same conventions as above.
-LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src,
-                        YuvRange range = YuvRange::kStudioToFull);
+LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src, YuvColorSpace yuv = {});
 
 /// Colour-space conversion at identical width/height.
 ///
@@ -60,20 +59,23 @@ LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src,
 /// layout change, and any packed-RGB permutation (channel swap / alpha add or
 /// drop).
 ///
-/// COLOUR CONVENTION. `range` describes the levels of the YUV SIDE of the
-/// conversion — it is not a one-way instruction. Both directions therefore
-/// agree with each other, and with the RGA path, which selects its colour-space
-/// mode from the same enum; an asymmetric reading is how two backends end up
-/// writing ~14% different luma for one and the same call. GRAY8 counts as the
-/// YUV side: it is a luma plane (RK_FORMAT_YCbCr_400 to RGA).
+/// COLOUR CONVENTION. `yuv` describes the YUV SIDE of the conversion — its
+/// levels (`yuv.range`) and its colour matrix (`yuv.matrix`) — and is not a
+/// one-way instruction. Both directions therefore agree with each other, and
+/// with the RGA path, which selects its colour-space mode from the same value;
+/// an asymmetric reading is how two backends end up writing ~14% different luma
+/// for one and the same call. GRAY8 counts as the YUV side: it is a luma plane
+/// (RK_FORMAT_YCbCr_400 to RGA).
 ///
+/// Levels:
 ///  - `kStudioToFull` (default) — the YUV side is studio-swing, as a video
-///    decoder produces. YUV -> RGB EXPANDS Y in [16,235] to [0,255]:
+///    decoder produces. YUV -> RGB EXPANDS Y in [16,235] to [0,255]; with the
+///    BT.601 matrix that is
 ///        R = 1.164*(Y-16) + 1.596*(V-128)
 ///        G = 1.164*(Y-16) - 0.813*(V-128) - 0.391*(U-128)
 ///        B = 1.164*(Y-16) + 2.018*(U-128)
 ///    which is exactly `cv::cvtColor(COLOR_YUV2BGR_NV12)`. RGB -> YUV COMPRESSES
-///    back into that swing (BT.601 limited, RGA's IM_RGB_TO_YUV_BT601_LIMIT):
+///    back into that swing (RGA's IM_RGB_TO_YUV_BT601_LIMIT):
 ///        Y = 16  + (219/255) * (0.299R + 0.587G + 0.114B)
 ///        U = 128 + (224/255) * (-0.169R - 0.331G + 0.500B)
 ///        V = 128 + (224/255) * ( 0.500R - 0.419G - 0.081B)
@@ -81,18 +83,29 @@ LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src,
 ///    applied, in either direction: R = Y + 1.402*(V-128), ... coming out, and
 ///    Y = 0.299R + 0.587G + 0.114B (cv2's COLOR_BGR2YUV_I420) going in.
 ///
-/// Each direction is the exact inverse of the other for the same `range`, so an
-/// NV12 -> RGB -> NV12 round-trip is self-consistent under either value as long
-/// as the same one is used throughout.
+/// Matrices (the full-range form; kStudioToFull scales it exactly as above):
+///  - `kBt601` (default) — Kr = 0.299, Kb = 0.114, the coefficients above.
+///  - `kBt709` — Kr = 0.2126, Kb = 0.0722:
+///        R = Y + 1.5748*(V-128)
+///        G = Y - 0.1873*(U-128) - 0.4681*(V-128)
+///        B = Y + 1.8556*(U-128)
+///        Y = 0.2126R + 0.7152G + 0.0722B
+///        U = 128 - 0.1146R - 0.3854G + 0.5000B
+///        V = 128 + 0.5000R - 0.4542G - 0.0458B
+///    and studio swing gives 1.164 / 1.793 / 0.213 / 0.533 / 2.112, which is
+///    what RGA's IM_YUV_TO_RGB_BT709_LIMIT applies (measured, ±1 LSB).
 ///
-/// YUV -> YUV NEVER touches the levels, under either value: both sides are the
-/// same YUV side, so only the plane layout changes (NV12 <-> NV21 <-> YUV420P,
-/// and anything to or from GRAY8 while the other side is YUV too). RGA agrees —
-/// with no RGB side it uses IM_COLOR_SPACE_DEFAULT.
+/// Each direction is the inverse of the other for the same `yuv`, so an
+/// NV12 -> RGB -> NV12 round-trip is self-consistent under any value as long as
+/// the same one is used throughout.
+///
+/// YUV -> YUV NEVER touches levels or matrix: both sides are the same YUV side,
+/// so only the plane layout changes (NV12 <-> NV21 <-> YUV420P, and anything to
+/// or from GRAY8 while the other side is YUV too). RGA agrees — with no RGB
+/// side it uses IM_COLOR_SPACE_DEFAULT.
 ///
 /// Chroma is subsampled by averaging each 2x2 RGB block before computing U/V.
-void cvtColorCpu(const ImageView& dst, const ImageView& src,
-                 YuvRange range = YuvRange::kStudioToFull);
+void cvtColorCpu(const ImageView& dst, const ImageView& src, YuvColorSpace yuv = {});
 
 /// Fill `dst` with a solid grey `value` (and neutral 128 chroma for YUV).
 void fillCpu(const ImageView& dst, std::uint8_t value);

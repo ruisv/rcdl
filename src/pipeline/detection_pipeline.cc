@@ -171,7 +171,7 @@ std::vector<Detection> DetectionPipeline::process(const ImageView& src) {
   //    intermediate canvas, no CPU copy — `used` tells us afterwards whether the
   //    hardware took it or the CPU fallback ran (a slow frame is then traceable).
   const auto t0 = Clock::now();
-  last_lb_ = letterbox(input_view_, src, cfg_.pad_value, cfg_.backend, cfg_.yuv_range,
+  last_lb_ = letterbox(input_view_, src, cfg_.pad_value, cfg_.backend, cfg_.yuvColorSpace(),
                        &last_backend_);
 
   // 2. Infer. I/O was bound once at Engine construction, so this is submit+wait;

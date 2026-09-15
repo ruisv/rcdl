@@ -206,33 +206,57 @@ void resample(std::uint8_t* dstBase, std::size_t dstStride, int dstStep,
 // Colour conversion
 // ---------------------------------------------------------------------------
 
-/// BT.601 full-range luma — the same matrix row the RGB -> YUV direction uses,
-/// so RGB -> GRAY8 and RGB -> NV12's Y plane agree to the last bit.
-inline float luma601(float r, float g, float b) { return 0.299f * r + 0.587f * g + 0.114f * b; }
+/// The full-range RGB -> YUV rows of each matrix in letterbox_cpu.h: the RGB
+/// weights of Y, Cb and Cr. The levels are applied separately (rgbLevels()), so
+/// RGB -> GRAY8 and RGB -> NV12's Y plane share this row and agree to the last
+/// bit.
+struct RgbToYuv {
+  float yr, yg, yb;
+  float ur, ug, ub;
+  float vr, vg, vb;
+};
 
-/// The two YUV -> RGB matrices from letterbox_cpu.h, picked by `range`. Both
-/// fold the level handling of the YUV side into the matrix, so this is the only
-/// place the YUV -> RGB direction needs to know about swing.
-struct YuvMatrix {
+RgbToYuv rgbToYuv(YuvMatrix m) {
+  if (m == YuvMatrix::kBt709) {
+    return {0.2126f, 0.7152f, 0.0722f, -0.1146f, -0.3854f, 0.5f, 0.5f, -0.4542f, -0.0458f};
+  }
+  return {0.299f, 0.587f, 0.114f, -0.169f, -0.331f, 0.5f, 0.5f, -0.419f, -0.081f};
+}
+
+inline float luma(const RgbToYuv& k, float r, float g, float b) {
+  return k.yr * r + k.yg * g + k.yb * b;
+}
+
+/// The four YUV -> RGB matrices from letterbox_cpu.h, picked by `yuv`. Each
+/// folds the level handling of the YUV side into the matrix, so this is the
+/// only place the YUV -> RGB direction needs to know about swing.
+struct YuvToRgb {
   float ky, kr, kgu, kgv, kb, yoff;
 };
 
-YuvMatrix yuvMatrix(YuvRange range) {
-  // kStudioToFull is exactly cv::cvtColor(COLOR_YUV2BGR_NV12): the YUV side is
-  // studio-swing, so Y in [16,235] expands to [0,255]. kAsIs is the plain
-  // matrix. Each is the exact inverse of rgbLevels() for the same `range`.
-  if (range == YuvRange::kStudioToFull) return {1.164f, 1.596f, 0.391f, 0.813f, 2.018f, 16.0f};
+YuvToRgb yuvToRgb(YuvColorSpace yuv) {
+  // kStudioToFull is the full-range matrix scaled by 255/219 (luma) and 255/224
+  // (chroma), so Y in [16,235] expands to [0,255]; for BT.601 that is exactly
+  // cv::cvtColor(COLOR_YUV2BGR_NV12). Each entry is the inverse of rgbToYuv()
+  // plus rgbLevels() for the same `yuv`.
+  const bool studio = yuv.range == YuvRange::kStudioToFull;
+  if (yuv.matrix == YuvMatrix::kBt709) {
+    if (studio) return {1.164f, 1.793f, 0.213f, 0.533f, 2.112f, 16.0f};
+    return {1.0f, 1.5748f, 0.1873f, 0.4681f, 1.8556f, 0.0f};
+  }
+  if (studio) return {1.164f, 1.596f, 0.391f, 0.813f, 2.018f, 16.0f};
   return {1.0f, 1.402f, 0.344f, 0.714f, 1.772f, 0.0f};
 }
 
-/// The RGB -> YUV direction of the same contract. `range` describes the YUV
-/// SIDE, not a one-way instruction, so kStudioToFull here means "compress into
-/// studio swing" — the exact inverse of the expansion yuvMatrix() folds into
-/// the other direction, and what RGA selects for the same call
+/// The levels of the RGB -> YUV direction. `range` describes the YUV SIDE, not
+/// a one-way instruction, so kStudioToFull here means "compress into studio
+/// swing" — the inverse of the expansion yuvToRgb() folds into the other
+/// direction, and what RGA selects for the same call
 /// (IM_RGB_TO_YUV_BT601_LIMIT):
 ///     Y = 16 + (219/255) * Yfull,   C = 128 + (224/255) * (Cfull - 128)
 /// Getting this asymmetric is how the two backends end up writing ~14%
-/// different luma for one and the same cvtColor() call.
+/// different luma for one and the same cvtColor() call. The matrix does not
+/// enter here: the swing is the same for BT.601 and BT.709.
 struct RgbLevels {
   float ky, yoff, kc;
 };
@@ -243,7 +267,7 @@ RgbLevels rgbLevels(YuvRange range) {
 }
 
 // YUV -> YUV needs no table at all: both sides are the same YUV side, so under
-// either `range` the levels are already what they should be and only the plane
+// any `yuv` the levels are already what they should be and only the plane
 // layout changes.
 
 /// Packed -> packed: a channel permutation, an alpha added (opaque) or dropped,
@@ -257,11 +281,12 @@ RgbLevels rgbLevels(YuvRange range) {
 /// order in that case.
 void packedToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt,
                     const std::uint8_t* src, std::size_t srcStride, PixelFormat srcFmt, int w,
-                    int h, YuvRange range) {
+                    int h, YuvColorSpace yuv) {
   const Packed S = packedOf(srcFmt);
   const Packed D = packedOf(dstFmt);
-  const RgbLevels lv = rgbLevels(range);       // RGB -> luma: compress
-  const YuvMatrix m = yuvMatrix(range);        // luma -> RGB: expand
+  const RgbLevels lv = rgbLevels(yuv.range);   // RGB -> luma: compress
+  const RgbToYuv k = rgbToYuv(yuv.matrix);     // RGB -> luma: weights
+  const YuvToRgb m = yuvToRgb(yuv);            // luma -> RGB: expand
   const bool fromLuma = S.gray && !D.gray;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -278,7 +303,7 @@ void packedToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt
       if (D.gray) {
         // GRAY8 -> GRAY8 is YUV -> YUV: copy. RGB -> GRAY8 compresses into the
         // YUV side's levels, exactly as RGB -> NV12's Y plane does.
-        dp[0] = S.gray ? r : clampU8(lv.yoff + lv.ky * luma601(r, g, b));
+        dp[0] = S.gray ? r : clampU8(lv.yoff + lv.ky * luma(k, r, g, b));
       } else if (fromLuma) {
         // GRAY8 -> RGB expands the YUV side's levels; with U = V = 128 the
         // colour matrix contributes nothing, so all three channels come out
@@ -302,10 +327,10 @@ void packedToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt
 /// 4:2:0 -> packed RGB / luma at identical size. Chroma is nearest-neighbour
 /// (each 2x2 luma block shares one sample), matching cv::cvtColor.
 void yuvToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt,
-                 const ImageView& src, YuvRange range) {
+                 const ImageView& src, YuvColorSpace yuv) {
   const Packed D = packedOf(dstFmt);
   const Yuv s = yuvPlanes(src);
-  const YuvMatrix m = yuvMatrix(range);
+  const YuvToRgb m = yuvToRgb(yuv);
   const int w = src.width;
   const int h = src.height;
 #ifdef _OPENMP
@@ -319,7 +344,7 @@ void yuvToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt,
     for (int x = 0; x < w; ++x) {
       if (D.gray) {
         // YUV -> GRAY8 is a YUV -> YUV move: the destination IS the luma plane,
-        // so it keeps the source's levels whatever `range` says. Expanding here
+        // so it keeps the source's levels whatever `yuv` says. Expanding here
         // would make NV12 -> GRAY8 -> RGB disagree with NV12 -> RGB.
         drow[x] = yrow[x];
         continue;
@@ -341,19 +366,20 @@ void yuvToPacked(std::uint8_t* dst, std::size_t dstStride, PixelFormat dstFmt,
 /// region must be even-aligned in both offset and extent so the 2x2 chroma
 /// blocks line up with the destination's own grid.
 ///
-/// BT.601 throughout, with the levels of the YUV side selected by `range`:
-/// kAsIs writes full range (Y = 0.299R+0.587G+0.114B, no offset — cv2's
-/// COLOR_BGR2YUV_I420, the exact inverse of yuvMatrix(kAsIs)) and
-/// kStudioToFull compresses into [16,235] / [16,240], the exact inverse of the
-/// expansion yuvMatrix(kStudioToFull) applies coming back.
+/// The matrix rows come from rgbToYuv(yuv.matrix) and the levels from
+/// rgbLevels(yuv.range): kAsIs writes full range (for BT.601 Y = 0.299R+0.587G+
+/// 0.114B, no offset — cv2's COLOR_BGR2YUV_I420, the inverse of yuvToRgb() at
+/// kAsIs) and kStudioToFull compresses into [16,235] / [16,240], the inverse of
+/// the expansion yuvToRgb() applies coming back.
 ///
 /// A GRAY8 source is the YUV side already, so it is copied, not converted.
 void packedToYuvRegion(const ImageView& dst, int x0, int y0, int w, int h,
                        const std::uint8_t* src, std::size_t srcStride, PixelFormat srcFmt,
-                       YuvRange range) {
+                       YuvColorSpace yuv) {
   const Packed S = packedOf(srcFmt);
   const Yuv d = yuvPlanes(dst);
-  const RgbLevels lv = rgbLevels(range);
+  const RgbLevels lv = rgbLevels(yuv.range);
+  const RgbToYuv k = rgbToYuv(yuv.matrix);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -364,7 +390,7 @@ void packedToYuvRegion(const ImageView& dst, int x0, int y0, int w, int h,
     for (int x = 0; x < w; ++x) {
       const std::uint8_t* p = srow + static_cast<std::size_t>(x) * S.bpp;
       // GRAY8 -> YUV is YUV -> YUV: the luma plane moves across untouched.
-      yrow[x] = S.gray ? p[0] : clampU8(lv.yoff + lv.ky * luma601(p[S.r], p[S.g], p[S.b]));
+      yrow[x] = S.gray ? p[0] : clampU8(lv.yoff + lv.ky * luma(k, p[S.r], p[S.g], p[S.b]));
     }
   }
 
@@ -394,8 +420,8 @@ void packedToYuvRegion(const ImageView& dst, int x0, int y0, int w, int h,
       const float R = 0.25f * (a[S.r] + b[S.r] + c[S.r] + e[S.r]);
       const float G = 0.25f * (a[S.g] + b[S.g] + c[S.g] + e[S.g]);
       const float B = 0.25f * (a[S.b] + b[S.b] + c[S.b] + e[S.b]);
-      urow[co] = clampU8(128.0f + lv.kc * (-0.169f * R - 0.331f * G + 0.500f * B));  // Cb
-      vrow[co] = clampU8(128.0f + lv.kc * (0.500f * R - 0.419f * G - 0.081f * B));   // Cr
+      urow[co] = clampU8(128.0f + lv.kc * (k.ur * R + k.ug * G + k.ub * B));  // Cb
+      vrow[co] = clampU8(128.0f + lv.kc * (k.vr * R + k.vg * G + k.vb * B));  // Cr
     }
   }
 }
@@ -403,7 +429,7 @@ void packedToYuvRegion(const ImageView& dst, int x0, int y0, int w, int h,
 /// 4:2:0 -> 4:2:0 at identical size: a per-plane copy that re-orders the chroma
 /// (NV12 <-> NV21 <-> YUV420P is nothing but a layout change).
 ///
-/// No level conversion in either direction: `range` describes the YUV side, and
+/// No level or matrix change in either direction: `yuv` describes the YUV side, and
 /// here BOTH sides are that same YUV side, so there is nothing to convert. RGA
 /// makes the same call (IM_COLOR_SPACE_DEFAULT when neither side is RGB).
 void yuvToYuv(const ImageView& dst, const ImageView& src) {
@@ -463,7 +489,7 @@ void yuvWarpRegion(const ImageView& dst, int x0, int y0, int w, int h, const Ima
 /// The body shared by letterboxCpu() and resizeCpu(): they differ only in the
 /// geometry (uniform scale + centred padding vs. per-axis stretch) — the
 /// format dispatch below is identical.
-LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad, YuvRange range,
+LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad, YuvColorSpace yuv,
                    bool stretch) {
   const char* fn = stretch ? "resizeCpu" : "letterboxCpu";
   validate(dst, fn, "dst");
@@ -543,7 +569,7 @@ LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad,
     // saturating transform does NOT commute with interpolation (a source value
     // below 16 clips to 0 either before or after the blend, with different
     // results), so pin the order there: convert first, always.
-    const bool levelChange = (S.gray != D.gray) && range == YuvRange::kStudioToFull;
+    const bool levelChange = (S.gray != D.gray) && yuv.range == YuvRange::kStudioToFull;
     if (src.format == dst.format) {
       // Same format: straight into the destination, nothing allocated.
       resample(dRoi, dStride, D.bpp, sBase, sStride, S.bpp, D.bpp, ow, oh, sw, sh, invSx, invSy);
@@ -557,12 +583,12 @@ LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad,
       const std::size_t tStride = static_cast<std::size_t>(ow) * S.bpp;
       resample(tmp.data(), tStride, S.bpp, sBase, sStride, S.bpp, S.bpp, ow, oh, sw, sh, invSx,
                invSy);
-      packedToPacked(dRoi, dStride, dst.format, tmp.data(), tStride, src.format, ow, oh, range);
+      packedToPacked(dRoi, dStride, dst.format, tmp.data(), tStride, src.format, ow, oh, yuv);
     } else {
       // Upscale, or a level change: convert first, at the source size.
       std::vector<std::uint8_t> tmp(static_cast<std::size_t>(sw) * sh * D.bpp);
       const std::size_t tStride = static_cast<std::size_t>(sw) * D.bpp;
-      packedToPacked(tmp.data(), tStride, dst.format, sBase, sStride, src.format, sw, sh, range);
+      packedToPacked(tmp.data(), tStride, dst.format, sBase, sStride, src.format, sw, sh, yuv);
       resample(dRoi, dStride, D.bpp, tmp.data(), tStride, D.bpp, D.bpp, ow, oh, sw, sh, invSx,
                invSy);
     }
@@ -573,7 +599,7 @@ LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad,
     // cvtColor-then-resize reference. Temporary: srcW*srcH*dstBpp.
     std::vector<std::uint8_t> tmp(static_cast<std::size_t>(sw) * sh * D.bpp);
     const std::size_t tStride = static_cast<std::size_t>(sw) * D.bpp;
-    yuvToPacked(tmp.data(), tStride, dst.format, src, range);
+    yuvToPacked(tmp.data(), tStride, dst.format, src, yuv);
     std::uint8_t* dRoi = dst.bytePtr() + static_cast<std::size_t>(py) * dStride +
                          static_cast<std::size_t>(px) * D.bpp;
     resample(dRoi, dStride, D.bpp, tmp.data(), tStride, D.bpp, D.bpp, ow, oh, sw, sh, invSx, invSy);
@@ -586,7 +612,7 @@ LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad,
     const std::size_t tStride = static_cast<std::size_t>(ow) * S.bpp;
     resample(tmp.data(), tStride, S.bpp, sBase, sStride, S.bpp, S.bpp, ow, oh, sw, sh, invSx,
              invSy);
-    packedToYuvRegion(dst, px, py, ow, oh, tmp.data(), tStride, src.format, range);
+    packedToYuvRegion(dst, px, py, ow, oh, tmp.data(), tStride, src.format, yuv);
   } else {
     // YUV -> YUV: plane-wise, straight into the destination region. Nothing
     // allocated, and no colour matrix is involved at all.
@@ -598,15 +624,15 @@ LetterboxInfo warp(const ImageView& dst, const ImageView& src, std::uint8_t pad,
 }  // namespace
 
 LetterboxInfo letterboxCpu(const ImageView& dst, const ImageView& src, std::uint8_t pad,
-                           YuvRange range) {
-  return warp(dst, src, pad, range, /*stretch=*/false);
+                           YuvColorSpace yuv) {
+  return warp(dst, src, pad, yuv, /*stretch=*/false);
 }
 
-LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src, YuvRange range) {
-  return warp(dst, src, 0, range, /*stretch=*/true);
+LetterboxInfo resizeCpu(const ImageView& dst, const ImageView& src, YuvColorSpace yuv) {
+  return warp(dst, src, 0, yuv, /*stretch=*/true);
 }
 
-void cvtColorCpu(const ImageView& dst, const ImageView& src, YuvRange range) {
+void cvtColorCpu(const ImageView& dst, const ImageView& src, YuvColorSpace yuv) {
   validate(dst, "cvtColorCpu", "dst");
   validate(src, "cvtColorCpu", "src");
   requireView(dst.width == src.width && dst.height == src.height,
@@ -619,14 +645,14 @@ void cvtColorCpu(const ImageView& dst, const ImageView& src, YuvRange range) {
   if (srcYuv && dstYuv) {
     yuvToYuv(dst, src);
   } else if (srcYuv) {
-    yuvToPacked(dst.bytePtr(), dst.rowBytes(), dst.format, src, range);
+    yuvToPacked(dst.bytePtr(), dst.rowBytes(), dst.format, src, yuv);
   } else if (dstYuv) {
     packedToYuvRegion(dst, 0, 0, src.width, src.height, src.bytePtr(), src.rowBytes(), src.format,
-                      range);
+                      yuv);
   } else {
     // Identical packed formats land here too and come out as a plain copy.
     packedToPacked(dst.bytePtr(), dst.rowBytes(), dst.format, src.bytePtr(), src.rowBytes(),
-                   src.format, src.width, src.height, range);
+                   src.format, src.width, src.height, yuv);
   }
 }
 

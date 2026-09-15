@@ -66,7 +66,10 @@ rcdl.rga_available(), rcdl.rga_version()
 ```
 
 `backend` is `"auto"` (default), `"rga"` (raise if the hardware refuses) or
-`"cpu"`. `lb` is the 7-tuple `(scale, pad_x, pad_y, src_w, src_h, dst_w, dst_h)`
+`"cpu"`. For a YUV source or destination, `studio_range=True` (default) and
+`matrix="bt601"` (default) or `"bt709"` describe the YUV side — HD video is
+usually `matrix="bt709"`. `"auto"` runs BT.709 full range, and any BT.709
+RGB → YUV, on the CPU. `lb` is the 7-tuple `(scale, pad_x, pad_y, src_w, src_h, dst_w, dst_h)`
 that post-processing inverts. See `docs/RGA.md` for the constraints that decide
 the fallback and for how the two backends differ.
 

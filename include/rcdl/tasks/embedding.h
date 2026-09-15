@@ -190,6 +190,10 @@ struct EmbedPreproc {
   float box_expand = 1.0f;
   PreprocBackend backend = PreprocBackend::Auto;  ///< RGA, CPU, or pick
   YuvRange yuv_range = YuvRange::kStudioToFull;   ///< NV12 sources: level handling
+  YuvMatrix yuv_matrix = YuvMatrix::kBt601;       ///< NV12 sources: colour matrix
+
+  /// The two fields above as the preproc layer takes them.
+  YuvColorSpace yuvColorSpace() const noexcept { return {yuv_range, yuv_matrix}; }
 };
 
 /// Engine-bound image embedder: one crop in, one vector out.

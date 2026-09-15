@@ -476,7 +476,8 @@ class Engine:
         Keyword arguments mirror ``PipelineConfig``: ``model_input``
         ("rgb888"/"bgr888" — the channel order the model was built with),
         ``conf_thresh``, ``iou_thresh``, ``max_dets``, ``num_classes``,
-        ``apply_sigmoid``, ``pad``, ``backend``.
+        ``apply_sigmoid``, ``pad``, ``backend``, and for YUV sources
+        ``studio_range`` / ``matrix`` ("bt601" or "bt709", see :func:`letterbox`).
         """
         return DetectionPipeline(self._e, **kwargs)
 
@@ -809,22 +810,31 @@ def _unpack(buf: np.ndarray, w: int, h: int, wstride: int, fmt: str) -> np.ndarr
 
 
 def letterbox(img, dst_w, dst_h, src_fmt="bgr888", dst_fmt="rgb888", pad=114,
-              backend="auto", studio_range=True):
+              backend="auto", studio_range=True, matrix="bt601"):
     """Aspect-preserving letterbox. Returns (image, letterbox_geometry, backend).
 
     ``backend`` is "auto" (RGA when the hardware accepts the request, CPU
     otherwise), "rga" (raise if it cannot) or "cpu".
+
+    ``studio_range`` and ``matrix`` ("bt601" or "bt709") describe the YUV side
+    of any colour conversion the formats imply. RGA does YUV -> RGB in BT.601
+    and BT.709 limited range, and RGB -> YUV in BT.601; "auto" sends the other
+    combinations to the CPU.
     """
     flat, w, h = _as_buffer(img, src_fmt)
     buf, lb, used, wstride = rcdl_py.letterbox(flat, w, h, src_fmt, dst_w, dst_h, dst_fmt,
-                                               pad, backend, studio_range)
+                                               pad, backend, studio_range, matrix)
     return _unpack(buf, dst_w, dst_h, wstride, dst_fmt), lb, used
 
 
-def cvt_color(img, src_fmt, dst_fmt, backend="auto", studio_range=True):
-    """Colour-space conversion at the same size. Returns (image, backend)."""
+def cvt_color(img, src_fmt, dst_fmt, backend="auto", studio_range=True, matrix="bt601"):
+    """Colour-space conversion at the same size. Returns (image, backend).
+
+    ``studio_range`` / ``matrix`` as in :func:`letterbox`.
+    """
     flat, w, h = _as_buffer(img, src_fmt)
-    buf, used, wstride = rcdl_py.cvt_color(flat, w, h, src_fmt, dst_fmt, backend, studio_range)
+    buf, used, wstride = rcdl_py.cvt_color(flat, w, h, src_fmt, dst_fmt, backend, studio_range,
+                                           matrix)
     return _unpack(buf, w, h, wstride, dst_fmt), used
 
 

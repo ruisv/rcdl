@@ -150,6 +150,15 @@ rcdl::PreprocBackend backendFromName(const std::string& n) {
   throw std::invalid_argument("unknown preproc backend: " + n);
 }
 
+// The Python layer spells the YUV side as two keyword arguments,
+// `studio_range=True` (the levels) and `matrix="bt601"`.
+rcdl::YuvColorSpace yuvFromArgs(bool studio_range, const std::string& matrix) {
+  const rcdl::YuvRange r = studio_range ? rcdl::YuvRange::kStudioToFull : rcdl::YuvRange::kAsIs;
+  if (matrix == "bt601") return {r, rcdl::YuvMatrix::kBt601};
+  if (matrix == "bt709") return {r, rcdl::YuvMatrix::kBt709};
+  throw std::invalid_argument("unknown YUV matrix: " + matrix + " (expected bt601 or bt709)");
+}
+
 // `Contig` is dtype-AGNOSTIC (nanobind only constrains contiguity and device),
 // so every raw reinterpret below has to check the dtype itself. Without this a
 // float64 array — numpy's default for a Python list of numbers — is silently
@@ -855,7 +864,8 @@ NB_MODULE(rcdl_py, m) {
       "letterbox",
       [](const Contig& src, int src_w, int src_h, const std::string& src_fmt, int dst_w,
          int dst_h, const std::string& dst_fmt, std::uint8_t pad, const std::string& backend,
-         bool studio_range, int src_wstride, int src_hstride) {
+         bool studio_range, const std::string& matrix, int src_wstride, int src_hstride) {
+        const rcdl::YuvColorSpace color = yuvFromArgs(studio_range, matrix);
         const rcdl::ImageView sv = viewFromArray(src, src_w, src_h, src_fmt, src_wstride, src_hstride);
         const rcdl::PixelFormat df = formatFromName(dst_fmt);
         const int dws = rcdl::alignUp(dst_w, rcdl::strideAlign(df));
@@ -868,9 +878,7 @@ NB_MODULE(rcdl_py, m) {
         rcdl::LetterboxInfo lb;
         {
           nb::gil_scoped_release nogil;
-          lb = rcdl::letterbox(dv, sv, pad, backendFromName(backend),
-                               studio_range ? rcdl::YuvRange::kStudioToFull : rcdl::YuvRange::kAsIs,
-                               &used);
+          lb = rcdl::letterbox(dv, sv, pad, backendFromName(backend), color, &used);
         }
         std::size_t shape[1] = {nbytes};
         auto arr = nb::ndarray<nb::numpy, std::uint8_t>(buf, 1, shape, owner);
@@ -878,13 +886,15 @@ NB_MODULE(rcdl_py, m) {
       },
       "src"_a, "src_w"_a, "src_h"_a, "src_fmt"_a, "dst_w"_a, "dst_h"_a, "dst_fmt"_a = "rgb888",
       "pad"_a = std::uint8_t(114), "backend"_a = "auto", "studio_range"_a = true,
-      "src_wstride"_a = 0, "src_hstride"_a = 0,
+      "matrix"_a = "bt601", "src_wstride"_a = 0, "src_hstride"_a = 0,
       "Letterbox a uint8 image buffer; returns (flat_dst_bytes, letterbox, backend, dst_wstride)");
 
   m.def(
       "cvt_color",
       [](const Contig& src, int w, int h, const std::string& src_fmt, const std::string& dst_fmt,
-         const std::string& backend, bool studio_range, int src_wstride, int src_hstride) {
+         const std::string& backend, bool studio_range, const std::string& matrix,
+         int src_wstride, int src_hstride) {
+        const rcdl::YuvColorSpace color = yuvFromArgs(studio_range, matrix);
         const rcdl::ImageView sv = viewFromArray(src, w, h, src_fmt, src_wstride, src_hstride);
         const rcdl::PixelFormat df = formatFromName(dst_fmt);
         const int dws = rcdl::alignUp(w, rcdl::strideAlign(df));
@@ -896,16 +906,14 @@ NB_MODULE(rcdl_py, m) {
         rcdl::PreprocBackend used = rcdl::PreprocBackend::Auto;
         {
           nb::gil_scoped_release nogil;
-          rcdl::cvtColor(dv, sv, backendFromName(backend),
-                         studio_range ? rcdl::YuvRange::kStudioToFull : rcdl::YuvRange::kAsIs,
-                         &used);
+          rcdl::cvtColor(dv, sv, backendFromName(backend), color, &used);
         }
         std::size_t shape[1] = {nbytes};
         auto arr = nb::ndarray<nb::numpy, std::uint8_t>(buf, 1, shape, owner);
         return nb::make_tuple(arr, std::string(rcdl::backendName(used)), dws);
       },
       "src"_a, "w"_a, "h"_a, "src_fmt"_a, "dst_fmt"_a, "backend"_a = "auto",
-      "studio_range"_a = true, "src_wstride"_a = 0, "src_hstride"_a = 0,
+      "studio_range"_a = true, "matrix"_a = "bt601", "src_wstride"_a = 0, "src_hstride"_a = 0,
       "Colour-convert a uint8 image; returns (flat_dst_bytes, backend, dst_wstride)");
 
   // --- detection post-processing ----------------------------------------------
@@ -1073,12 +1081,16 @@ NB_MODULE(rcdl_py, m) {
           "__init__",
           [](rcdl::DetectionPipeline* self, nb::handle engine_arg, const std::string& model_input,
              float conf_thresh, float iou_thresh, int max_dets, int num_classes,
-             bool apply_sigmoid, std::uint8_t pad, const std::string& backend) {
+             bool apply_sigmoid, std::uint8_t pad, const std::string& backend, bool studio_range,
+             const std::string& matrix) {
             rcdl::Engine& engine = engineFrom(engine_arg);
             rcdl::PipelineConfig cfg;
             cfg.model_input = formatFromName(model_input);
             cfg.pad_value = pad;
             cfg.backend = backendFromName(backend);
+            const rcdl::YuvColorSpace color = yuvFromArgs(studio_range, matrix);
+            cfg.yuv_range = color.range;
+            cfg.yuv_matrix = color.matrix;
             cfg.detect.conf_thresh = cfg.ltrb.conf_thresh = conf_thresh;
             cfg.detect.iou_thresh = cfg.ltrb.iou_thresh = iou_thresh;
             cfg.detect.max_dets = cfg.ltrb.max_dets = max_dets;
@@ -1088,7 +1100,8 @@ NB_MODULE(rcdl_py, m) {
           },
           "engine"_a, "model_input"_a = "rgb888", "conf_thresh"_a = 0.25f, "iou_thresh"_a = 0.45f,
           "max_dets"_a = 300, "num_classes"_a = 80, "apply_sigmoid"_a = false,
-          "pad"_a = std::uint8_t(114), "backend"_a = "auto", nb::keep_alive<1, 2>())
+          "pad"_a = std::uint8_t(114), "backend"_a = "auto", "studio_range"_a = true,
+          "matrix"_a = "bt601", nb::keep_alive<1, 2>())
       .def(
           "process",
           [](rcdl::DetectionPipeline& p, const Contig& img, int w, int h,
@@ -1217,7 +1230,9 @@ NB_MODULE(rcdl_py, m) {
       .def(
           "letterbox",
           [](const rcdl::VideoFrame& f, int dst_w, int dst_h, const std::string& dst_fmt,
-             std::uint8_t pad, const std::string& backend, bool studio_range) {
+             std::uint8_t pad, const std::string& backend, bool studio_range,
+             const std::string& matrix) {
+            const rcdl::YuvColorSpace color = yuvFromArgs(studio_range, matrix);
             // Reads the VPU's buffer by fd — the frame is never copied to the
             // host on the way in, which is the whole point of the media layer.
             const rcdl::PixelFormat df = formatFromName(dst_fmt);
@@ -1231,10 +1246,7 @@ NB_MODULE(rcdl_py, m) {
             rcdl::LetterboxInfo lb;
             {
               nb::gil_scoped_release nogil;
-              lb = rcdl::letterbox(dv, f.view(), pad, backendFromName(backend),
-                                   studio_range ? rcdl::YuvRange::kStudioToFull
-                                                : rcdl::YuvRange::kAsIs,
-                                   &used);
+              lb = rcdl::letterbox(dv, f.view(), pad, backendFromName(backend), color, &used);
             }
             // Shape it here rather than handing back flat bytes plus a stride:
             // this is the convenience entry point, and `rcdl.letterbox()` in the
@@ -1266,7 +1278,7 @@ NB_MODULE(rcdl_py, m) {
                                   lbToTuple(lb), std::string(rcdl::backendName(used)));
           },
           "dst_w"_a, "dst_h"_a, "dst_fmt"_a = "rgb888", "pad"_a = std::uint8_t(114),
-          "backend"_a = "auto", "studio_range"_a = true,
+          "backend"_a = "auto", "studio_range"_a = true, "matrix"_a = "bt601",
           "Letterbox this frame out of the VPU's buffer without copying it first; "
           "returns (image, letterbox, backend)");
 

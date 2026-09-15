@@ -23,9 +23,42 @@ namespace rcdl {
 /// GRAY8 counts as the YUV side: it is a luma plane (RK_FORMAT_YCbCr_400).
 /// Handing the NPU an unexpanded studio-swing frame costs the model ~14% of its
 /// contrast against calibration, which is why kStudioToFull is the default.
+///
+/// The levels are only half of what a YUV buffer needs to say; the colour
+/// matrix is the other half — see YuvMatrix and YuvColorSpace below.
 enum class YuvRange {
-  kAsIs,          ///< the YUV side is full-range: plain BT.601 matrix, no level shift
+  kAsIs,          ///< the YUV side is full-range: colour matrix only, no level shift
   kStudioToFull,  ///< the YUV side is studio-swing: expand coming out, compress going in
+};
+
+/// The colour matrix of the YUV side: which weights of R, G and B its Y, Cb and
+/// Cr carry. Independent of the levels — a stream can be BT.709 at either swing.
+///
+/// Decoding with the wrong one does not change contrast the way a wrong range
+/// does; it shifts hue and saturation — by up to ~30 LSB per channel on
+/// saturated colour — which is just as invisible to a model.
+enum class YuvMatrix {
+  kBt601,  ///< SD video, JPEG/JFIF, and what cv::cvtColor's YUV codes assume
+  kBt709,  ///< HD video: H.264 / H.265 at 720p and above normally signal this
+};
+
+/// Everything a conversion needs to know about its YUV side: levels and matrix.
+///
+/// Implicitly constructible from a bare YuvRange, which means BT.601 — so a call
+/// written as `letterbox(dst, src, pad, backend, YuvRange::kAsIs)` keeps both
+/// compiling and its meaning.
+///
+/// Not every combination runs on RGA: the hardware converts YUV -> RGB in
+/// BT.601 limited / full and BT.709 limited, and RGB -> YUV in BT.601 only.
+/// rgaCanHandle() says no to the rest, so PreprocBackend::Auto routes them to
+/// the CPU path, which implements all four in both directions.
+struct YuvColorSpace {
+  YuvRange range = YuvRange::kStudioToFull;
+  YuvMatrix matrix = YuvMatrix::kBt601;
+
+  constexpr YuvColorSpace() noexcept = default;
+  constexpr YuvColorSpace(YuvRange r, YuvMatrix m = YuvMatrix::kBt601) noexcept  // NOLINT: implicit
+      : range(r), matrix(m) {}
 };
 
 /// Result of an aspect-preserving "letterbox" fit of a source image of size
