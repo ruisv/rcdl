@@ -1,193 +1,240 @@
-# RCDL — Rockchip RKNPU vision framework
+<h1 align="center">RCDL</h1>
+<p align="center"><b>A vision application on Rockchip RK3588 in minutes, with every hardware block doing its job.</b><br>
+One C++ / Python API over VPU codecs → RGA preprocessing → NPU inference → post-processing, zero-copy end to end.</p>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C.svg)](CMakeLists.txt)
-[![Python](https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg)](pyproject.toml)
-[![Platform](https://img.shields.io/badge/platform-RK3588%20%2F%20RK3576%20%2F%20RK356x%20(aarch64)-0A7BBB.svg)](#requirements)
-[![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](docs/ROADMAP.md)
+<p align="center">
+<a href="https://github.com/ruisv/rcdl/releases"><img src="https://img.shields.io/github/v/release/ruisv/rcdl?color=2ea44f" alt="release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
+<img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg" alt="C++17">
+<img src="https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg" alt="python">
+<img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20linux--aarch64-0A7BBB.svg" alt="platform">
+</p>
 
-**English** | [简体中文](README.md)
-
-> ### Build an RKNPU vision app in minutes.
-> One C++ / Python API from capture → VPU hardware codec → RGA hardware preproc → NPU inference → post-processing.
-> **Built on Rockchip's official runtimes (RKNPU2 / RGA / MPP), not replacing them.**
-
-RCDL is the Rockchip counterpart of [BCDL](https://github.com/ruisv/bcdl) (RDK
-BPU): the same `Engine` + task-class mental model and zero-copy pipeline idea,
-re-based on the RK3588-family NPU / RGA / VPU. **Early development** — see
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
-
-Measured on RK3588S (librknnrt 2.3.2 / driver 0.9.8):
-
-| | |
-|---|---|
-| ResNet-18 int8, one core / three pinned contexts | 4.0 ms · **707 fps** |
-| Detection pipeline, sync / async (3 workers, one per core) | 99 fps · **481 fps** (4.86x, results field-identical to sync and in order) |
-| 1080p H.264 decode / 4K H.265 decode | **324 fps** · **244 fps**, every frame carrying a dma-buf fd |
-| 1080p H.264 encode straight from decoded frames | **197 fps**, round-trip luma PSNR 47.2 dB |
-| YOLOv8n / YOLO11n on `bus.jpg` | each independently finds 1 bus + 4 people |
-
-## Check figures
-
-Every one is drawn on the board by `benchmarks/bench.py --figures`, **in the same
-run that produced the table above**, so a figure cannot drift away from its own
-row. They answer the question the timing table cannot: *did the model find the
-right thing?* A row reading `22 ms` and `18 vehicles` is perfectly consistent
-with eighteen boxes in the sky.
+<p align="center"><b>English</b> | <a href="README.md">简体中文</a></p>
 
 | | | |
 |:--:|:--:|:--:|
-| <img src="benchmarks/figures/det.jpg" width="250"> | <img src="benchmarks/figures/instance_seg.jpg" width="250"> | <img src="benchmarks/figures/semantic_seg.jpg" width="250"> |
-| detection | instance segmentation | semantic segmentation |
-| <img src="benchmarks/figures/pose.jpg" width="250"> | <img src="benchmarks/figures/wholebody.jpg" width="250"> | <img src="benchmarks/figures/obb.jpg" width="250"> |
-| pose (17 kpt) | whole-body pose (133 kpt) | oriented boxes |
-| <img src="benchmarks/figures/depth.jpg" width="250"> | <img src="benchmarks/figures/flow.jpg" width="250"> | <img src="benchmarks/figures/superres.jpg" width="250"> |
-| monocular depth | dense optical flow | x4 super-resolution |
-| <img src="benchmarks/figures/face.jpg" width="250"> | <img src="benchmarks/figures/face_recognition.jpg" width="250"> | <img src="benchmarks/figures/reid.jpg" width="250"> |
-| face + 5 landmarks | face recognition (aligned crops) | person ReID |
-| <img src="benchmarks/figures/ocr.jpg" width="250"> | <img src="benchmarks/figures/features.jpg" width="250"> | <img src="benchmarks/figures/promptable_seg.jpg" width="250"> |
-| OCR (detect + read) | sparse features + matching | promptable segmentation |
-| <img src="benchmarks/figures/open_vocab_prompts.jpg" width="250"> | <img src="benchmarks/figures/panoptic_drive.jpg" width="250"> | <img src="benchmarks/figures/cls.jpg" width="250"> |
-| open-vocabulary detection (`sneakers`) | panoptic driving (one inference, three heads) | classification |
+| <img src="benchmarks/figures/det.jpg" width="260"> | <img src="benchmarks/figures/instance_seg.jpg" width="260"> | <img src="benchmarks/figures/pose.jpg" width="260"> |
+| Detection | Instance segmentation | Pose |
+| <img src="benchmarks/figures/depth.jpg" width="260"> | <img src="benchmarks/figures/ocr.jpg" width="260"> | <img src="benchmarks/figures/open_vocab_prompts.jpg" width="260"> |
+| Monocular depth | OCR | Open-vocabulary detection |
 
-Several are about a CONTRAST rather than the picture. The open-vocabulary
-vocabulary is chosen at conversion time and `sneakers` is not a COCO class at
-all. The face-recognition figure shows the ALIGNED crops, because the canonical
-pose is the model's contract — a box crop of the same face scores 0.493 against
-it. And the flow and feature figures use a KNOWN warp, so every match has an
-exact right answer to be scored against.
+All 18 tasks are in the [gallery below](#gallery); every picture was produced on the board.
+
+## Why RCDL
+
+Rockchip ships three unrelated C libraries: `librknnrt` (NPU), `librga` (2-D
+acceleration) and `MPP` (video codecs). Wiring them into one pipeline that never
+copies a frame, and then getting each model's post-processing right, is usually
+weeks of work. RCDL is that work, done:
+
+- **Ten lines to a result.** An `Engine` plus a task class. Detection, segmentation, pose, OCR, faces, depth, tracking — 18 tasks work out of the box.
+- **Each block does its own job.** The model runs on the NPU, scaling and colour conversion on RGA, codecs on the VPU. The CPU does post-processing, and the fallback when the hardware cannot.
+- **Actually zero-copy.** The decoded frame, RGA, the NPU input tensor and the encoder share one dma-buf. There is no `memcpy` between them.
+- **All three NPU cores.** The async pipeline takes detection from 99 fps to 481 fps, with results identical to the synchronous one and in order.
+- **Reproducible.** Every decoder has a numpy reference test, and 584 board tests cover the full hardware path. The things RK3588's documentation does not tell you — RGA's 4 GB line, two RGA generations that resample differently — are already handled, and written up in [`docs/RGA.md`](docs/RGA.md).
+
+RCDL is built on Rockchip's official runtimes. It does not replace them.
+
+## Install
+
+On the board (linux-aarch64), one command:
+
+```bash
+conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
+conda activate rcdl
+python -c "import rcdl; print(rcdl.__version__, rcdl.rga_version())"
+```
+
+That brings the Python bindings, the C++ library and the Rockchip userspace
+libraries (`librknnrt` 2.3.2, `librga`, `rockchip-mpp`). The board image only
+has to provide the kernel drivers. For C++ only, install `librcdl`.
+
+**Requirements:** an RK3588 / RK3588S board, Linux aarch64, RKNPU driver ≥ 0.9.x,
+and your user in the `video` and `render` groups. RK3576 / RK356x are not yet verified.
+Building from source, permissions and troubleshooting are in
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
+## Quick start
+
+You need a `.rknn` compiled for your SoC — see [Models](#models).
+
+**Find objects in an image (Python)**
 
 ```python
-import rcdl, numpy as np
+import cv2, rcdl
 
-engine = rcdl.Engine("models/resnet18_rk3588.rknn")   # zero-copy I/O, uint8 NHWC in
-out = engine.infer(np.zeros(engine.input_shape(0), dtype=np.uint8))[0]   # float32, dequantized
-print(out.shape, engine.last_run_micros(), "us on the NPU")
+det = rcdl.Engine("yolov8n_rk3588.rknn").detector(model_input="rgb888")
+for d in rcdl.detect(det, cv2.imread("bus.jpg")):
+    print(rcdl.coco_class_name(d.class_id), f"{d.score:.2f}", d.x1, d.y1, d.x2, d.y2)
 ```
+
+Boxes come back in original-image pixels. Grids, class count, DFL and channel
+layout are read from the model, and a model that does not match raises at
+construction instead of quietly decoding garbage.
+
+**Video in, annotated video out, and the frame never leaves the hardware**
+
+```python
+enc = None
+with open("annotated.h264", "wb") as out:
+    for frame in rcdl.decode_video("clip.h264"):             # VPU decode; the frame is a dma-buf
+        dets = det.process_frame(frame)                      # RGA writes straight into the NPU input tensor
+        frame.draw_rects([(d.x1, d.y1, d.x2, d.y2) for d in dets])
+        enc = enc or rcdl.VideoEncoder(width=frame.width, height=frame.height)
+        while not enc.feed_frame(frame):                     # VPU encode, reading the same dma-buf
+            out.write(enc.receive(5) or b"")
+        while (pkt := enc.receive(0)) is not None:
+            out.write(pkt)
+    while (pkt := enc.flush()) is not None:
+        out.write(pkt)
+```
+
+For throughput use `engine.video_detector()`: decode, preprocessing and
+three-core inference all run in C++ threads, 72–97 fps on 1080p H.264 → YOLOv8n.
+
+**C++**
 
 ```cpp
 #include "rcdl/rcdl.h"
-rcdl::Engine e("models/resnet18_rk3588.rknn", {rcdl::NpuCore::Core0});
-auto e1 = e.dup(rcdl::NpuCore::Core1);   // same weights, second NPU core
-e.setInput(0, img, e.inputPackedBytes(0));
-e.infer();
-std::vector<float> logits = e.outputAsFloat(0);
+
+rcdl::Engine engine("yolov8n_rk3588.rknn");
+rcdl::PipelineConfig cfg;
+cfg.model_input = rcdl::PixelFormat::RGB888;
+rcdl::DetectionPipeline pipe(engine, cfg);
+
+for (const rcdl::Detection& d : pipe.process(frame.view()))   // frame: a decoded frame or any ImageView
+  std::printf("%s %.2f\n", rcdl::cocoClassName(d.class_id), d.score);
 ```
 
-## Principles
+```cmake
+find_package(rcdl REQUIRED)
+target_link_libraries(app PRIVATE rcdl::rcdl)
+```
 
-- **The NPU runs the model, RGA does the preprocessing, the VPU does the codecs.**
-  The CPU only runs post-processing (NMS / DFL / CTC …) and guarded fallbacks.
-- **dma-buf is the one shared buffer.** NPU (`rknn_create_mem_from_fd`), RGA
-  (`importbuffer_fd`) and VPU (MPP external buffers) import the same memory by
-  fd — decode → letterbox → infer → encode without a `memcpy`.
-- **Multi-core is first class.** RK3588's three NPU cores via `Engine::dup()` +
-  core masks: one context per core for small models, combined masks for big ones.
-- **Portable, verifiable post-processing.** Decoders are Engine-free pure
-  functions pinned by deterministic numpy tests; board tests cover the hardware path.
-- **Publishable as written.** No machine names, paths, private notes or local
-  tool configuration; `scripts/check_publishable.sh` scans before each commit.
+More in [`examples/`](examples): twenty-odd standalone programs covering
+detection, segmentation, depth, SAM, optical flow, super-resolution and the
+video pipelines.
 
-## Architecture
+## Tasks
+
+| Task | Python entry point | Verified models |
+|---|---|---|
+| Object detection | `engine.detector()` | YOLOv8 · YOLO11 · YOLO26 |
+| Open-vocabulary detection / segmentation | `engine.detector()` · `engine.instance_segmenter()` | YOLOE-11s |
+| Classification | `engine.classifier()` | ResNet-18 · YOLO26-cls |
+| Instance segmentation | `engine.instance_segmenter()` | YOLOv8-seg · YOLO26-seg |
+| Semantic segmentation | `engine.segmenter()` | PP-LiteSeg · YOLO26-sem |
+| Promptable segmentation (SAM) | `engine.prompt_segmenter()` | EdgeSAM |
+| Human pose, 17 keypoints | `engine.pose_estimator()` | YOLOv8-pose · YOLO26-pose |
+| Whole-body pose, 133 keypoints | `engine.wholebody_estimator()` | RTMW-s |
+| Oriented boxes | `engine.obb_detector()` | YOLOv8-obb · YOLO26-obb |
+| Monocular depth | `engine.depth_estimator()` | Depth-Anything-V2-Small |
+| OCR (detection · direction · recognition) | `engine.text_detector()` and friends | PP-OCRv4 · v5 · v6 |
+| Face detection + recognition | `engine.face_detector()` · `engine.face_recognizer()` | RetinaFace · ArcFace R50 |
+| Image / person embeddings | `engine.embedder()` | SigLIP · OSNet |
+| Sparse features and matching | `engine.feature_extractor()` | XFeat |
+| Dense optical flow | `engine.flow_estimator()` | NeuFlow v2 |
+| ×4 super-resolution | `engine.upscaler()` | Real-ESRGAN Compact |
+| Panoptic driving (detection + drivable area + lanes) | `engine.anchor_detector()` · `engine.segmenter()` | YOLOP |
+| Multi-object tracking | `engine.tracker()` | ByteTrack + BoT-SORT appearance association |
+
+Every task is an engine-free pure decoder, a numpy test and a board test. The
+C++ classes mirror these one to one; see [`docs/CPP_API.md`](docs/CPP_API.md).
+
+## Performance
+
+Measured on RK3588S (librknnrt 2.3.2, driver 0.9.8). The full table and how to
+rerun it are in [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+
+| | |
+|---|---|
+| ResNet-18 int8, one core / three cores | 4.0 ms · **707 fps** |
+| Detection pipeline, synchronous / async on three cores | 99 fps · **481 fps** |
+| 1080p H.264 decode / 4K H.265 decode | **324 fps** · **244 fps**, every frame a dma-buf |
+| 1080p H.264 encode, reading decoded frames directly | **197 fps** |
+| Compressed video → detections (1080p, YOLOv8n) | **72–97 fps** |
+
+## Models
+
+RCDL consumes compiled `.rknn` files. This repository does not distribute model weights.
+
+- **Ready-made:** Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) has download scripts and conversion examples for the YOLO family, RetinaFace, PP-OCR, PP-LiteSeg, ResNet and more, and its YOLO export layout is the one RCDL's decoders read.
+- **Your own:** convert from ONNX with [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) on an x86 host. A `.rknn` is tied to one SoC, and the toolkit version must not be newer than the runtime on the board.
+- [`docs/MODELS.md`](docs/MODELS.md) lists, for every verified model, the input format, channel order, whether the activation is inside the graph, and the conversion traps actually hit. Channel order and activation placement cannot be read from a `.rknn`, and getting them wrong only costs accuracy silently.
+
+## How it works
 
 ```
-                    your app (C++ / Python)
+                    your application (C++ / Python)
                               ↓
    ┌──────────────────────────────────────────────────────┐
    │  RCDL                                                 │
    │  tasks · tracks · pipeline · media · preproc · backend │
    └──────────────────────────────────────────────────────┘
                               ↓
-        Rockchip runtimes (where the capability comes from)
-        librknnrt (RKNPU2) · librga (im2d) · librockchip_mpp (rk_mpi)
+   librknnrt (RKNPU2)  ·  librga (im2d)  ·  librockchip_mpp (rk_mpi)
                               ↓
-              NPU ×3 · RGA3 ×2 + RGA2 · VPU (rkvdec / rkvenc / JPEG)
+        NPU ×3   ·   RGA3 ×2 + RGA2   ·   VPU (decode / encode / JPEG)
 ```
 
-| Dir | Contents | Status |
-|---|---|---|
-| `core/` | `DmaBuf` (dma-heap RAII + cache sync) · `Status` | ✅ M0 |
-| `backend/` | `Engine` (zero-copy I/O · dequant · core masks · dup) · output readers | ✅ M0 |
-| `preproc/` | RGA letterbox / resize / cvtColor + CPU fallback | ✅ M1 |
-| `media/` | MPP H.264 / H.265 / VP9 / AV1 / JPEG codecs, external buffer group | ✅ M2 |
-| `tasks/` | det · cls · pose · instance seg · semantic seg · obb · depth · embedding · ocr · face · sparse features · super-resolution · optical flow · promptable seg · whole-body pose · open-vocab det · panoptic driving | ✅ M1 / M4 / M7–M10 |
-| `tracks/` | ByteTrack + BoT-SORT appearance association · ReID | ✅ M3 |
-| `pipeline/` | sync / async detection (multi-core `EnginePool`) | ✅ M3 |
-| `python/` | nanobind bindings (GIL released in infer) | ✅ |
+One dma-buf goes the whole way. The VPU decodes into it, RGA imports it by fd
+and crops, scales and converts NV12 → RGB in a single operation whose
+destination is the input tensor the NPU already has bound; the same memory,
+with boxes drawn on it, then goes to the VPU encoder. Caches are synchronised
+only when the CPU touches a buffer, and never on the pure hardware path.
 
-Benchmarks (measured on the board, regenerable): [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+## Documentation
 
-## Install (conda)
-
-On the board (linux-aarch64), one command brings the Python bindings, the C++
-library and the Rockchip userspace libraries (`librknnrt` / `librga` /
-`rockchip-mpp`); the kernel drivers still come from the board image:
-
-```bash
-conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
-conda install -c https://mirrors.ruis.ai/conda -c conda-forge librcdl   # C++ only: librcdl.so + headers + find_package(rcdl)
-```
-
-Python 3.9–3.14. `python -c "import rcdl; print(rcdl.rga_version())"` printing
-the RGA version means it works.
-
-## Quick start (from source)
-
-On the board (aarch64 with `librknnrt` / `librga` / `librockchip_mpp`):
-
-```bash
-scripts/fetch_sdk.sh                 # RKNPU2 headers (not in the board image) → third_party/rknpu2
-scripts/build.sh                     # cmake + ninja → build/
-./build/model_info models/resnet18_rk3588.rknn        # I/O signature, runtime/driver versions, latency
-./build/npu_bench  models/resnet18_rk3588.rknn 5 0,1,2   # three-core throughput
-./build/dma_buf_probe                                   # is dma-heap usable by this user?
-./build/rga_probe                                       # which RGA core reaches which heap (run on a new board/kernel)
-PYTHONPATH=build:python python -m pytest tests/ --model models/resnet18_rk3588.rknn
-```
-
-From a workstation (edit → sync → build on the board):
-
-```bash
-cp scripts/local.env.example scripts/local.env   # your ssh alias (gitignored)
-scripts/bootstrap_board.sh    # once: create the rcdl conda env on the board
-scripts/sync.sh && scripts/board_build.sh --run   # MODEL=/path/on/board.rknn
-```
-
-## Requirements
-
-- An **RK3588 / RK3588S** board (RK3576 / RK356x planned), Linux aarch64, with
-  the RKNPU driver (`/dev/rknpu`, ≥ 0.9.x), `/usr/lib/librknnrt.so` (2.3.x), and
-  the `librga` + `librockchip_mpp` dev packages (`/usr/include/rga`, `/usr/include/rockchip`).
-- dma-heap readable/writable by your user (membership of the `video` group usually does it).
-- CMake ≥ 3.18, GCC ≥ 11, Ninja; **nanobind** + NumPy for the Python module.
-- OpenCV optional (`RCDL_HAVE_OPENCV`-guarded, hand-written fallbacks).
-
-## Models
-
-RCDL consumes compiled `.rknn` files only. ONNX → `.rknn` (rknn-toolkit2 PTQ,
-accuracy analysis, hybrid quantization) happens on an x86 host in a separate
-model-zoo project; `scripts/fetch_models.sh` stages models into `models/`.
-See [`models/README.md`](models/README.md).
-
-## Docs
-
-| Doc | Covers |
+| | |
 |---|---|
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | BCDL → RCDL stack mapping, milestones, RK3588 hardware notes |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | installation, board requirements, building from source, troubleshooting |
 | [`docs/API.md`](docs/API.md) | Python API |
 | [`docs/CPP_API.md`](docs/CPP_API.md) | C++ API |
-| [`docs/RGA.md`](docs/RGA.md) | What the 2-D engine will and will not do — including three limits that are not in the vendor documentation |
-| [`docs/MODELS.md`](docs/MODELS.md) | Model registry, each model's input order and activation placement, measured performance |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setup, building (on the board), testing, submitting changes |
-| [`CHANGELOG.md`](CHANGELOG.md) | Release notes (Keep a Changelog / SemVer) |
+| [`docs/MODELS.md`](docs/MODELS.md) | verified models, each model's input contract, conversion notes |
+| [`docs/RGA.md`](docs/RGA.md) | what RGA on RK3588 will and will not do, all of it measured |
+| [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) | per-task latency and results, rerunnable on your board |
+| [`CHANGELOG.md`](CHANGELOG.md) | release notes |
+
+## Gallery
+
+<details>
+<summary>All 18 pictures</summary>
+
+| | | |
+|:--:|:--:|:--:|
+| <img src="benchmarks/figures/det.jpg" width="250"> | <img src="benchmarks/figures/instance_seg.jpg" width="250"> | <img src="benchmarks/figures/semantic_seg.jpg" width="250"> |
+| Detection | Instance segmentation | Semantic segmentation |
+| <img src="benchmarks/figures/pose.jpg" width="250"> | <img src="benchmarks/figures/wholebody.jpg" width="250"> | <img src="benchmarks/figures/obb.jpg" width="250"> |
+| Pose (17 keypoints) | Whole-body pose (133 keypoints) | Oriented boxes |
+| <img src="benchmarks/figures/depth.jpg" width="250"> | <img src="benchmarks/figures/flow.jpg" width="250"> | <img src="benchmarks/figures/superres.jpg" width="250"> |
+| Monocular depth | Dense optical flow | ×4 super-resolution |
+| <img src="benchmarks/figures/face.jpg" width="250"> | <img src="benchmarks/figures/face_recognition.jpg" width="250"> | <img src="benchmarks/figures/reid.jpg" width="250"> |
+| Faces + 5 landmarks | Face recognition | Person ReID |
+| <img src="benchmarks/figures/ocr.jpg" width="250"> | <img src="benchmarks/figures/features.jpg" width="250"> | <img src="benchmarks/figures/promptable_seg.jpg" width="250"> |
+| OCR | Sparse features + matching | Promptable segmentation |
+| <img src="benchmarks/figures/open_vocab_prompts.jpg" width="250"> | <img src="benchmarks/figures/panoptic_drive.jpg" width="250"> | <img src="benchmarks/figures/cls.jpg" width="250"> |
+| Open-vocabulary detection (`sneakers`) | Panoptic driving | Classification |
+
+Generated on the board by `benchmarks/bench.py --figures`, in the same run as
+the performance table, so the pictures and the numbers describe the same build.
+
+</details>
+
+## Contributing
+
+Issues and pull requests are welcome: bugs, new task decoders, and results from
+other Rockchip SoCs are all valuable. Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
+first. For a bug report, include the SoC, the output of `model_info`, and a
+minimal reproduction.
 
 ## Acknowledgements
 
-- **Rockchip** — the RK3588 platform, RKNPU2 runtime and rknn-toolkit2, RGA, MPP.
-- **BCDL / ccdl** — the upper-layer API design and post-processing algorithms this project ports.
+- **Rockchip** — the RK3588 platform, the RKNPU2 runtime and rknn-toolkit2, RGA, MPP.
+- **[BCDL](https://github.com/ruisv/bcdl)** — the sister project for D-Robotics RDK boards, where RCDL's API design and post-processing come from.
+- The upstream model projects: Ultralytics YOLO, PaddleOCR, Depth-Anything, EdgeSAM, RTMW, XFeat, NeuFlow, Real-ESRGAN, YOLOP, SigLIP, OSNet, RetinaFace, ArcFace.
 
 ## License
 
-[Apache License 2.0](LICENSE). Rockchip's runtime libraries and headers are
-under their own licenses and are not redistributed here (`scripts/fetch_sdk.sh`
-fetches them from the public repository).
+[Apache License 2.0](LICENSE). Rockchip's runtime libraries carry their own
+licenses, and model weights carry those of their upstreams.

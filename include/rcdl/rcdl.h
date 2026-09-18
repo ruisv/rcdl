@@ -2,7 +2,7 @@
 
 // Umbrella header for RCDL.
 //
-// Layers (see docs/ROADMAP.md for the full map):
+// Layers (see docs/CPP_API.md for the full map):
 //   core/     Status · DmaBuf                    (Linux dma-heap / dma-buf)
 //   backend/  Engine · output readers            (librknnrt -> rknn_*)
 //   preproc/  Image · RGA letterbox / resize / cvtColor + CPU fallback (librga im2d)

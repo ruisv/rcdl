@@ -1,18 +1,26 @@
 # Models
 
-RCDL consumes finished `.rknn` files. Conversion from ONNX (rknn-toolkit2, PTQ,
-`accuracy_analysis`, hybrid quantization) runs on an **x86 host** and is owned by
-a separate model-zoo project — the toolkit is x86-only, and the board carries
-only the runtime.
+RCDL consumes finished `.rknn` files and does not distribute model weights.
+Conversion from ONNX (rknn-toolkit2: PTQ, `accuracy_analysis`, hybrid
+quantization) runs on an **x86 host** — the toolkit is x86-only, and the board
+carries only the runtime.
 
-`scripts/fetch_models.sh` stages the registry below into `models/` (gitignored).
-Paths come from `scripts/local.env`; anything unset is reported as MISSING rather
-than silently skipped.
+Where to get a model:
 
-```bash
-scripts/fetch_models.sh --list     # show the registry
-scripts/fetch_models.sh            # stage everything it can find
-```
+- Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo)
+  ships download scripts and conversion examples for the YOLO family,
+  RetinaFace, PP-OCR, PP-LiteSeg, ResNet and others. Its YOLO export — three
+  scales of separate `box` / `cls` / `sum` tensors — is the layout the
+  detection decoders here read.
+- Anything else, convert yourself with
+  [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2). A `.rknn` is
+  compiled for one SoC, and the toolkit must not be newer than the runtime on
+  the board.
+
+This page is what you need to know to make a model work once you have it: the
+table says how each verified model wants to be fed and decoded, and the notes
+under it are the conversion and usage traps that were actually hit, each with
+the measurement that exposed it.
 
 ## What the decoders need to be told
 
@@ -926,16 +934,18 @@ RK3588S, single-frame latency unless stated:
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
 
-## Adding a model
+## Bringing your own model
 
-1. Convert it on the x86 host and copy the `.rknn` to wherever
-   `RCDL_CONVERT_MODELS` points.
-2. Add a `name|convert|path` line to `REGISTRY` in `scripts/fetch_models.sh`.
-3. Add a row to the table above, **including the input order and where the
-   activation lives** — that is the information the file itself does not carry.
-4. Add a board test that skips cleanly when the model is absent
-   (`tests/board_models.py::require_model`), so the suite stays green on a
-   machine that has only some of the registry staged.
+1. Convert it on an x86 host for your SoC, and put the `.rknn` on the board.
+2. Run `model_info model.rknn` and compare the output signature with the row of
+   the closest model above. The task classes read grids, class counts and
+   strides from the model and throw, printing the full signature, when it does
+   not fit the head they were asked for.
+3. Decide the two things the file does not carry — the **input channel order**
+   and **where the activation lives** — and pass them to the task's config.
+4. Contributing it back: add the row to the table above, and a board test that
+   skips cleanly when the model is absent (`tests/board_models.py::require_model`),
+   so the suite stays green on a machine that has only some of the models.
 
 ## A note on class-name tables
 

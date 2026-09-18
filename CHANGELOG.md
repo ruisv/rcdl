@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **README rewritten for users**: install first, runnable quick starts (image
+  detection, video in / annotated video out, C++ with `find_package`), a task
+  table with entry points and verified models, where to get models, and a
+  collapsed gallery. New [`docs/INSTALL.md`](docs/INSTALL.md): board
+  requirements, permissions, conda and source installs, troubleshooting.
+  `docs/MODELS.md` and `models/README.md` now say where models come from and how
+  to bring your own, instead of describing the maintainers' staging workflow.
+- The development roadmap is no longer published in `docs/`; the repository's
+  documentation is user documentation.
+
 ## [0.1.0] - 2026-09-18
 
 First release.
@@ -298,7 +309,7 @@ First release.
   *Verified on the four faces in the sample images: the fit's own residual is
   1.3–7.3 px mean, the detector re-finds every aligned crop at 0.99–1.00, and
   the eyes and mouth corners land on the template's rows.* The identity model
-  itself is not in the registry — see ROADMAP M8 for the data it needs first.
+  itself is not in the registry — it needs same-person face pairs to set a threshold first.
 - `yolo26n_rk3588.rknn` — a current-generation detector, added with **no
   decoder changes**, which is what the head-resolution design was for: YOLO26's
   box branch has 4 channels instead of 64 (no DFL), and `resolveYoloHead()`

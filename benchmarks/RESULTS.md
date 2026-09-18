@@ -23,7 +23,7 @@ stream costs rather than a best case.
 **The `result` column is the point.** A model that got faster and stopped finding
 the bus should not look like an improvement, so every row states what it actually
 produced. A model that is not staged is reported as skipped rather than dropped
-(see `scripts/fetch_models.sh`).
+(put it in `models/`; see `docs/MODELS.md`).
 
 <!-- BENCH:BEGIN -->
 | task | infer ms | e2e ms | model MB | result |
