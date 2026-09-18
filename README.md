@@ -123,6 +123,7 @@ scripts/build.sh                     # cmake + ninja → build/
 ./build/model_info models/resnet18_rk3588.rknn        # I/O 签名、运行时/驱动版本、延迟
 ./build/npu_bench  models/resnet18_rk3588.rknn 5 0,1,2   # 三核并发吞吐
 ./build/dma_buf_probe                                   # dma-heap 是否对当前用户可用
+./build/rga_probe                                       # RGA 各核能碰哪块内存、钉核是否生效（换板/换内核先跑）
 ./build/det_demo   models/yolov8n_rk3588.rknn data/images/bus.jpg out.jpg   # 检测 + 画框
 ./build/video_decode  clip.h264 --frames 300            # VPU 解码吞吐 + 零拷贝确认
 ./build/video_det_demo models/yolov8n_rk3588.rknn clip.h264 --out out.h264  # VPU→RGA→NPU→VPU

@@ -2,17 +2,23 @@
 // every stage on the hardware that is meant to run it.
 //
 //   ./video_det_demo <model.rknn> <stream.h264> [--frames N] [--out out.h264] [--conf C]
+//                    [--overlay cpu|rga]
 //
 //   VPU decode ──> NV12 dma-buf ──> RGA letterbox ──> NPU input tensor ──> NPU
 //        ↑                              (no copy)         (no copy)          │
-//        └── VPU encode <── RGA box overlay <── boxes in source pixels <──────┘
+//        └── VPU encode <── box overlay <── boxes in source pixels <─────────┘
 //
-// The frame the VPU decoded is the frame RGA letterboxes, the frame RGA draws
-// on, and the frame the VPU encodes: one dma-buf, one allocation per pool slot,
-// zero memcpy on the frame path. The CPU only decodes the detection head and
-// runs NMS. `DetectionPipeline::process(frame.view())` is where the hand-off
-// happens — it hands the frame's fd to RGA and RGA's destination is the NPU
-// input tensor Engine already bound with rknn_set_io_mem.
+// The frame the VPU decoded is the frame RGA letterboxes, the frame the boxes
+// are drawn on, and the frame the VPU encodes: one dma-buf, one allocation per
+// pool slot, zero memcpy on the frame path. The CPU decodes the detection head,
+// runs NMS and — by default — paints the box outlines, mapped once and
+// cache-synced once per frame. `--overlay rga` puts the outlines on the RGA2
+// core instead, which needs the frame pool below 4 GB (the system-dma32 heap;
+// RGA2 has a 32-bit MMU) and is measurably slower per box: it is here to show
+// both, and to keep the CPU free if that matters more than latency.
+// `DetectionPipeline::process(frame.view())` is where the hand-off happens —
+// it hands the frame's fd to RGA and RGA's destination is the NPU input tensor
+// Engine already bound with rknn_set_io_mem.
 //
 // The per-stage breakdown at the end is the number this program exists to
 // produce: which unit bounds the pipeline, and what an end-to-end frame costs.
@@ -106,21 +112,28 @@ constexpr std::uint32_t kColors[8] = {
     0xFFFFFFFF,  // white
 };
 
-/// Draw one detection box onto an NV12 frame with RGA.
-///
-/// Coordinates are snapped to EVEN pixels: on 4:2:0 the chroma plane has half
-/// the resolution, so an odd rectangle edge has no chroma sample of its own and
-/// RGA rejects (or mis-renders) the fill. Clipping to the frame is left to
-/// rgaDrawRect, which is documented to clip.
-void drawBox(const rcdl::ImageView& dst, const rcdl::Detection& d, int thickness) {
-  auto even = [](int v) { return v & ~1; };
-  const int x1 = even(static_cast<int>(d.x1) < 0 ? 0 : static_cast<int>(d.x1));
-  const int y1 = even(static_cast<int>(d.y1) < 0 ? 0 : static_cast<int>(d.y1));
-  const int x2 = even(static_cast<int>(d.x2) > dst.width ? dst.width : static_cast<int>(d.x2));
-  const int y2 = even(static_cast<int>(d.y2) > dst.height ? dst.height : static_cast<int>(d.y2));
-  if (x2 - x1 < 4 || y2 - y1 < 4) return;  // too small to outline
-  rcdl::rgaDrawRect(dst, x1, y1, x2 - x1, y2 - y1,
-                    kColors[static_cast<unsigned>(d.class_id) % 8], thickness);
+/// The frame's detections as outlines, in ONE call: rgaDrawRects clips each
+/// box to the frame and snaps it to even pixels for 4:2:0 (a chroma sample
+/// cannot be split), and draws them all inside a single map + cache-sync
+/// window (CPU) or a single submit per colour (RGA2).
+rcdl::PreprocBackend drawBoxes(const rcdl::ImageView& dst, const std::vector<rcdl::Detection>& dets,
+                               int thickness, rcdl::PreprocBackend backend) {
+  std::vector<rcdl::RectSpec> rects;
+  rects.reserve(dets.size());
+  for (const rcdl::Detection& d : dets) {
+    rcdl::RectSpec r;
+    r.x = static_cast<int>(d.x1);
+    r.y = static_cast<int>(d.y1);
+    r.w = static_cast<int>(d.x2) - r.x;
+    r.h = static_cast<int>(d.y2) - r.y;
+    if (r.w < 4 || r.h < 4) continue;  // too small to outline
+    r.abgr = kColors[static_cast<unsigned>(d.class_id) % 8];
+    r.thickness = thickness;
+    rects.push_back(r);
+  }
+  rcdl::PreprocBackend used = rcdl::PreprocBackend::Cpu;
+  rcdl::rgaDrawRects(dst, rects.data(), rects.size(), backend, &used);
+  return used;
 }
 
 double msSince(std::chrono::steady_clock::time_point t) {
@@ -132,7 +145,8 @@ double msSince(std::chrono::steady_clock::time_point t) {
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
-                 "usage: %s <model.rknn> <stream.h264> [--frames N] [--out out.h264] [--conf C]\n",
+                 "usage: %s <model.rknn> <stream.h264> [--frames N] [--out out.h264] [--conf C] "
+                 "[--overlay cpu|rga]\n",
                  argv[0]);
     return 1;
   }
@@ -142,6 +156,7 @@ int main(int argc, char** argv) {
     std::string out_path;
     int max_frames = 0;  // 0 => the whole stream
     float conf = 0.25f;
+    rcdl::PreprocBackend overlay = rcdl::PreprocBackend::Auto;
     for (int i = 3; i < argc; ++i) {
       const std::string opt = argv[i];
       const bool has_value = i + 1 < argc;
@@ -155,6 +170,11 @@ int main(int argc, char** argv) {
         RCDL_REQUIRE(has_value, "--conf needs a threshold");
         conf = static_cast<float>(std::atof(argv[++i]));
         RCDL_REQUIRE(conf > 0.0f && conf < 1.0f, "--conf must be in (0,1)");
+      } else if (opt == "--overlay") {
+        RCDL_REQUIRE(has_value, "--overlay needs cpu or rga");
+        const std::string v = argv[++i];
+        RCDL_REQUIRE(v == "cpu" || v == "rga", "--overlay must be cpu or rga");
+        overlay = v == "rga" ? rcdl::PreprocBackend::Rga : rcdl::PreprocBackend::Cpu;
       } else {
         RCDL_REQUIRE(false, "unknown option (see usage)");
       }
@@ -175,6 +195,10 @@ int main(int argc, char** argv) {
     rcdl::VideoDecConfig dcfg;
     RCDL_REQUIRE(rcdl::codecFromExtension(stream_path, &dcfg.codec),
                  "cannot guess the codec from the stream's extension");
+    // The hardware overlay runs on RGA2, whose MMU stops at 4 GB: the frames
+    // it draws on have to come from the dma32 heap. The default (CPU) overlay
+    // and the whole hardware path are fine with the ordinary heap.
+    if (overlay == rcdl::PreprocBackend::Rga) dcfg.pool_heap = rcdl::DmaBuf::Heap::SystemDma32;
     rcdl::VideoDecoder dec(dcfg);
     StreamPump pump(dec, stream_path);
 
@@ -190,6 +214,7 @@ int main(int argc, char** argv) {
       std::printf("note: RGA is unavailable, so the overlay stage is skipped "
                   "(boxes are still printed)\n");
     }
+    rcdl::PreprocBackend drew = rcdl::PreprocBackend::Cpu;
 
     // --- the loop ------------------------------------------------------------
     std::unique_ptr<rcdl::VideoEncoder> enc;
@@ -217,9 +242,12 @@ int main(int argc, char** argv) {
       if (frame.fd() >= 0) ++fd_frames;
 
       if (frames == 0) {
-        std::printf("decoded %dx%d %s (VPU stride %dx%d, buffer group: %s)\n\n", frame.width(),
-                    frame.height(), rcdl::formatName(frame.format()), dec.widthStride(),
-                    dec.heightStride(), dec.usingExternalBuffers() ? "external" : "MPP-internal");
+        std::printf("decoded %dx%d %s (VPU stride %dx%d, buffer group: %s%s%s)\n\n",
+                    frame.width(), frame.height(), rcdl::formatName(frame.format()),
+                    dec.widthStride(), dec.heightStride(),
+                    dec.usingExternalBuffers() ? "external, " : "MPP-internal",
+                    dec.usingExternalBuffers() ? rcdl::DmaBuf::heapName(dec.poolHeap()) : "",
+                    frame.view().below4g ? " heap, below 4 GB" : "");
         if (!out_path.empty()) {
           rcdl::VideoEncConfig ecfg;
           if (!rcdl::codecFromExtension(out_path, &ecfg.codec)) ecfg.codec = rcdl::VideoCodec::H264;
@@ -239,9 +267,9 @@ int main(int argc, char** argv) {
       const std::vector<rcdl::Detection> dets = pipe.process(frame.view());
       total_dets += static_cast<long>(dets.size());
 
-      if (can_draw) {
+      if (can_draw && !dets.empty()) {
         t = std::chrono::steady_clock::now();
-        for (const rcdl::Detection& d : dets) drawBox(frame.view(), d, 2);
+        drew = drawBoxes(frame.view(), dets, 2, overlay);
         draw_ms += msSince(t);
       }
 
@@ -308,7 +336,11 @@ int main(int argc, char** argv) {
     row("preproc", "RGA  letterbox -> tensor", sp.preproc_ms);
     row("infer", "NPU  rknn_run", sp.infer_ms);
     row("postproc", "CPU  head decode + NMS", sp.postproc_ms);
-    row("draw", can_draw ? "RGA  box overlay" : "(skipped, no RGA)", draw_ms);
+    row("draw",
+        !can_draw                            ? "(skipped, no RGA)"
+        : drew == rcdl::PreprocBackend::Rga ? "RGA2 box overlay"
+                                             : "CPU  box overlay (1 map+sync)",
+        draw_ms);
     row("encode", enc ? "VPU  NV12 -> H.26x" : "(skipped, no --out)", encode_ms);
     std::printf("  %-9s %-26s %7.2f ms/f  100.0%%\n", "= total", "end to end", per_frame);
     std::printf("\nend-to-end: %.1f fps  |  detect-only (no decode/encode): %.1f fps"

@@ -112,6 +112,69 @@ rcdl::PixelFormat formatFromName(const std::string& n) {
   throw std::invalid_argument("unknown pixel format: " + n);
 }
 
+// dma-heap names as /dev/dma_heap/ spells them.
+rcdl::DmaBuf::Heap heapFromName(const std::string& n) {
+  if (n == "system") return rcdl::DmaBuf::Heap::System;
+  if (n == "system-uncached") return rcdl::DmaBuf::Heap::SystemUncached;
+  if (n == "cma") return rcdl::DmaBuf::Heap::Cma;
+  if (n == "cma-uncached") return rcdl::DmaBuf::Heap::CmaUncached;
+  if (n == "system-dma32") return rcdl::DmaBuf::Heap::SystemDma32;
+  if (n == "system-uncached-dma32") return rcdl::DmaBuf::Heap::SystemUncachedDma32;
+  throw std::invalid_argument("unknown dma-heap: " + n +
+                              " (system, system-uncached, cma, cma-uncached, system-dma32, "
+                              "system-uncached-dma32)");
+}
+
+// An (r, g, b) or (r, g, b, a) colour as im2d's 0xAABBGGRR.
+std::uint32_t abgrFrom(nb::handle colour) {
+  nb::sequence seq = nb::cast<nb::sequence>(colour);
+  const std::size_t n = nb::len(seq);
+  if (n != 3 && n != 4) throw std::invalid_argument("colour must be (r, g, b) or (r, g, b, a)");
+  auto ch = [&](std::size_t i) {
+    const int v = nb::cast<int>(seq[i]);
+    if (v < 0 || v > 255) throw std::invalid_argument("colour channels are 0..255");
+    return static_cast<std::uint32_t>(v);
+  };
+  const std::uint32_t a = n == 4 ? ch(3) : 255u;
+  return (a << 24) | (ch(2) << 16) | (ch(1) << 8) | ch(0);
+}
+
+// Boxes as a sequence of (x1, y1, x2, y2), colours as one (r, g, b) for all or
+// one per box, into the RectSpecs rgaDrawRects() takes.
+std::vector<rcdl::RectSpec> rectsFrom(nb::handle boxes, nb::handle colour, int thickness) {
+  std::vector<rcdl::RectSpec> out;
+  nb::sequence bseq = nb::cast<nb::sequence>(boxes);
+  const std::size_t n = nb::len(bseq);
+  out.reserve(n);
+  std::vector<std::uint32_t> colours;
+  bool per_box = false;
+  if (n > 0 && nb::isinstance<nb::sequence>(colour) && nb::len(nb::cast<nb::sequence>(colour)) > 0 &&
+      nb::isinstance<nb::sequence>(nb::cast<nb::sequence>(colour)[0])) {
+    per_box = true;
+    nb::sequence cseq = nb::cast<nb::sequence>(colour);
+    if (nb::len(cseq) != n) throw std::invalid_argument("one colour per box, or one for all");
+    for (std::size_t i = 0; i < n; ++i) colours.push_back(abgrFrom(cseq[i]));
+  }
+  const std::uint32_t one = per_box ? 0u : abgrFrom(colour);
+  for (std::size_t i = 0; i < n; ++i) {
+    nb::sequence b = nb::cast<nb::sequence>(bseq[i]);
+    if (nb::len(b) < 4) throw std::invalid_argument("each box is (x1, y1, x2, y2)");
+    const int x1 = static_cast<int>(std::floor(nb::cast<double>(b[0])));
+    const int y1 = static_cast<int>(std::floor(nb::cast<double>(b[1])));
+    const int x2 = static_cast<int>(std::ceil(nb::cast<double>(b[2])));
+    const int y2 = static_cast<int>(std::ceil(nb::cast<double>(b[3])));
+    rcdl::RectSpec r;
+    r.x = x1;
+    r.y = y1;
+    r.w = x2 - x1;
+    r.h = y2 - y1;
+    r.abgr = per_box ? colours[i] : one;
+    r.thickness = thickness;
+    out.push_back(r);
+  }
+  return out;
+}
+
 // The Python API names formats and codecs with the lower-case tokens
 // formatFromName()/codecFromName() accept, so a value read off an object can be
 // passed straight back in (`rcdl.letterbox(x, ..., src_fmt=frame.format)`).
@@ -773,7 +836,10 @@ NB_MODULE(rcdl_py, m) {
       .value("SYSTEM", rcdl::DmaBuf::Heap::System)
       .value("SYSTEM_UNCACHED", rcdl::DmaBuf::Heap::SystemUncached)
       .value("CMA", rcdl::DmaBuf::Heap::Cma)
-      .value("CMA_UNCACHED", rcdl::DmaBuf::Heap::CmaUncached);
+      .value("CMA_UNCACHED", rcdl::DmaBuf::Heap::CmaUncached)
+      .value("SYSTEM_DMA32", rcdl::DmaBuf::Heap::SystemDma32,
+             "pages below 4 GB physical — what the RGA2 core (colour fill, GRAY8) can reach")
+      .value("SYSTEM_UNCACHED_DMA32", rcdl::DmaBuf::Heap::SystemUncachedDma32);
 
   nb::class_<rcdl::DmaBuf>(m, "DmaBuf")
       .def_static(
@@ -784,6 +850,9 @@ NB_MODULE(rcdl_py, m) {
           "size"_a, "heap"_a = rcdl::DmaBuf::Heap::System)
       .def_prop_ro("fd", &rcdl::DmaBuf::fd)
       .def_prop_ro("size", &rcdl::DmaBuf::size)
+      .def_prop_ro("heap", [](const rcdl::DmaBuf& b) { return std::string(rcdl::DmaBuf::heapName(b.heap())); })
+      .def_prop_ro("below_4g", &rcdl::DmaBuf::below4G,
+                   "Every page is known to be below 4 GB physical (a dma32 heap)")
       .def("sync_start", &rcdl::DmaBuf::syncStart, "read"_a = true, "write"_a = true)
       .def("sync_end", &rcdl::DmaBuf::syncEnd, "read"_a = true, "write"_a = true)
       .def(
@@ -1164,6 +1233,27 @@ NB_MODULE(rcdl_py, m) {
                    [](const rcdl::VideoFrame& f) { return std::string(pyFormatName(f.format())); })
       .def_prop_ro("width_stride", [](const rcdl::VideoFrame& f) { return f.view().effWStride(); })
       .def_prop_ro("height_stride", [](const rcdl::VideoFrame& f) { return f.view().effHStride(); })
+      .def_prop_ro("below_4g", [](const rcdl::VideoFrame& f) { return f.view().below4g; },
+                   "The frame's pages are known to be below 4 GB (a system-dma32 pool), so the "
+                   "RGA2 core can draw on it")
+      .def(
+          "draw_rects",
+          [](rcdl::VideoFrame& f, nb::handle boxes, nb::handle color, int thickness,
+             const std::string& backend) {
+            const std::vector<rcdl::RectSpec> rects = rectsFrom(boxes, color, thickness);
+            const rcdl::PreprocBackend want = backendFromName(backend);
+            rcdl::PreprocBackend used = rcdl::PreprocBackend::Cpu;
+            {
+              nb::gil_scoped_release nogil;
+              rcdl::rgaDrawRects(f.view(), rects.data(), rects.size(), want, &used);
+            }
+            return std::string(rcdl::backendName(used));
+          },
+          "boxes"_a, "color"_a = nb::make_tuple(0, 255, 0), "thickness"_a = 2,
+          "backend"_a = "auto",
+          "Draw box outlines IN PLACE on the frame's dma-buf: boxes are (x1, y1, x2, y2) in "
+          "frame pixels, color one (r, g, b) or one per box. Returns the backend that drew "
+          "(\"cpu\" — the measured fast path — or \"rga\", which needs a system-dma32 pool)")
       .def("release", &rcdl::VideoFrame::reset,
            "Return the buffer to the decoder pool now; holding frames stalls decoding")
       .def("__repr__", [](const rcdl::VideoFrame& f) { return f.describe(); })
@@ -1286,7 +1376,8 @@ NB_MODULE(rcdl_py, m) {
       .def(
           "__init__",
           [](rcdl::VideoDecoder* self, const std::string& codec, const std::string& fmt,
-             bool split_parse, bool external_buffers, int buffer_count, int extra_buffers) {
+             bool split_parse, bool external_buffers, int buffer_count, int extra_buffers,
+             const std::string& pool_heap) {
             rcdl::VideoDecConfig c;
             c.codec = codecFromName(codec);
             c.format = formatFromName(fmt);
@@ -1294,10 +1385,14 @@ NB_MODULE(rcdl_py, m) {
             c.external_buffers = external_buffers;
             c.buffer_count = buffer_count;
             c.extra_buffers = extra_buffers;
+            c.pool_heap = heapFromName(pool_heap);
             new (self) rcdl::VideoDecoder(c);
           },
           "codec"_a = "h264", "format"_a = "nv12", "split_parse"_a = true,
-          "external_buffers"_a = true, "buffer_count"_a = 0, "extra_buffers"_a = 4)
+          "external_buffers"_a = true, "buffer_count"_a = 0, "extra_buffers"_a = 4,
+          "pool_heap"_a = "system",
+          "pool_heap: dma-heap for the frame pool; \"system-dma32\" keeps frames below 4 GB so "
+          "the RGA2 core can draw on them (VideoFrame.draw_rects(backend=\"rga\"))")
       .def(
           "feed",
           [](rcdl::VideoDecoder& d, nb::bytes data, std::uint64_t pts_us, int timeout_ms) {
@@ -1333,6 +1428,9 @@ NB_MODULE(rcdl_py, m) {
       .def_prop_ro("height", &rcdl::VideoDecoder::height)
       .def_prop_ro("width_stride", &rcdl::VideoDecoder::widthStride)
       .def_prop_ro("height_stride", &rcdl::VideoDecoder::heightStride)
+      .def_prop_ro("pool_heap",
+                   [](const rcdl::VideoDecoder& d) { return std::string(rcdl::DmaBuf::heapName(d.poolHeap())); },
+                   "The heap the external frame pool came from (after any fallback)")
       .def_prop_ro("frames_decoded", &rcdl::VideoDecoder::framesDecoded)
       .def_prop_ro("end_of_stream", &rcdl::VideoDecoder::endOfStream)
       .def_prop_ro("using_external_buffers", &rcdl::VideoDecoder::usingExternalBuffers)
@@ -1479,7 +1577,8 @@ NB_MODULE(rcdl_py, m) {
              const std::string& codec, const std::string& model_input, float conf_thresh,
              float iou_thresh, int max_dets, int num_classes, bool apply_sigmoid,
              std::uint8_t pad, const std::string& backend, int workers, bool pin_cores,
-             int reorder_depth, int queue_depth, bool external_buffers, int extra_buffers) {
+             int reorder_depth, int queue_depth, bool external_buffers, int extra_buffers,
+             const std::string& pool_heap) {
             rcdl::Engine& engine = engineFrom(engine_arg);
             rcdl::PipelineConfig cfg;
             cfg.model_input = formatFromName(model_input);
@@ -1494,6 +1593,7 @@ NB_MODULE(rcdl_py, m) {
             dec.codec = codecFromName(codec);
             dec.external_buffers = external_buffers;
             dec.extra_buffers = extra_buffers;
+            dec.pool_heap = heapFromName(pool_heap);
             rcdl::VideoAsyncConfig vcfg;
             vcfg.async.workers = workers;
             vcfg.async.pin_cores = pin_cores;
@@ -1505,7 +1605,8 @@ NB_MODULE(rcdl_py, m) {
           "iou_thresh"_a = 0.45f, "max_dets"_a = 300, "num_classes"_a = 80,
           "apply_sigmoid"_a = false, "pad"_a = std::uint8_t(114), "backend"_a = "auto",
           "workers"_a = 3, "pin_cores"_a = true, "reorder_depth"_a = 0, "queue_depth"_a = 2,
-          "external_buffers"_a = true, "extra_buffers"_a = 4, nb::keep_alive<1, 2>())
+          "external_buffers"_a = true, "extra_buffers"_a = 4, "pool_heap"_a = "system",
+          nb::keep_alive<1, 2>())
       .def(
           "submit",
           [](rcdl::AsyncVideoDetectionPipeline& p, nb::bytes data, int timeout_ms) {

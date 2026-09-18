@@ -63,6 +63,13 @@ struct ImageView {
   int hstride = 0;  ///< plane height in ROWS  (0 => height)
   PixelFormat format = PixelFormat::Unknown;
   std::size_t size = 0;  ///< allocated bytes (0 => imageBytes(format, wstride, hstride))
+  /// The buffer is known to sit below 4 GB physical (a dma32 dma-heap). What
+  /// the RGA2 core needs on RK3588 — colour fill, GRAY8, YUV planar, scale
+  /// ratios beyond 8x — since its MMU is 32-bit. False means "not known", and
+  /// the RGA layer then keeps those ops off the hardware. Set by Image::alloc()
+  /// and the video decoder from the heap they allocated from; a foreign fd
+  /// stays false unless its owner says otherwise (DmaBuf::below4G()).
+  bool below4g = false;
 
   int effWStride() const noexcept { return wstride > 0 ? wstride : width; }
   int effHStride() const noexcept { return hstride > 0 ? hstride : height; }

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "rcdl/core/dma_buf.h"
 #include "rcdl/media/video_frame.h"
 #include "rcdl/preproc/image.h"
 
@@ -67,6 +68,13 @@ struct VideoDecConfig {
   /// Extra frames beyond the stream's own requirement, i.e. how many decoded
   /// frames a consumer may hold at once. Too few stalls the decoder.
   int extra_buffers = 4;
+  /// dma-heap the external pool is allocated from. `System` is right for the
+  /// hardware path (VPU, RGA3 and NPU all sit behind IOMMUs). `SystemDma32`
+  /// keeps every frame below 4 GB physical, which is what the RGA2 core needs
+  /// to write it — the hardware colour fill / rectangle overlay
+  /// (rgaDrawRects with PreprocBackend::Rga). Frames from that pool carry
+  /// ImageView::below4g. Falls back to `System` when the heap is missing.
+  DmaBuf::Heap pool_heap = DmaBuf::Heap::System;
   /// Deinterlacing / frame-rate doubling is off; RCDL targets progressive.
   bool immediate_out = true;  ///< emit frames as soon as they are ready
 };
@@ -140,6 +148,10 @@ class VideoDecoder {
   /// True when frames come from an RCDL-allocated buffer group (see
   /// VideoDecConfig::external_buffers) — false if it fell back to MPP's pool.
   bool usingExternalBuffers() const noexcept;
+  /// The heap the current external pool was allocated from (what
+  /// VideoDecConfig::pool_heap asked for, or `System` after a fallback).
+  /// Meaningless while usingExternalBuffers() is false.
+  DmaBuf::Heap poolHeap() const noexcept;
 
  private:
   struct Impl;

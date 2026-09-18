@@ -44,7 +44,7 @@ constraints that trigger that:
 
 | Constraint | Value | What happens outside it |
 |---|---|---|
-| Scale factor | 1/16 .. 16 | rejected → CPU |
+| Scale factor | 1/8 .. 8 (RGA3; 1/16 .. 16 on RGA2 with low buffers, §3.1) | rejected → CPU |
 | Minimum source for a scaled op | 68 × 2 (documented) | **not** rejected — see below |
 | Maximum dimension | 8192 | rejected → CPU |
 | YUV row stride | 16-byte aligned | rejected → CPU |
@@ -86,51 +86,89 @@ rcdl::PreprocBackend used;
 rcdl::letterbox(dst, src, 114, rcdl::PreprocBackend::Auto, range, &used);
 ```
 
-## 3. Colour fill does not work on this board
+## 3. Two generations of core, and the 4 GB line
 
-**Symptom.** Every `imfill` fails, regardless of pixel format (RGB888, BGR888,
-RGBA8888, BGRA8888, RGB565) and regardless of whether the buffer came from
-`malloc` or a dma-heap:
+RK3588 has **two RGA3 cores and one RGA2 core**, and they are not
+interchangeable. Rockchip's own numbers, confirmed by the driver's
+`/sys/kernel/debug/rkrga/hardware` on this board:
+
+| | RGA3 (×2) | RGA2 (×1) |
+|---|---|---|
+| MMU | 40-bit IOMMU — all memory | **32-bit — nothing above 4 GB physical** |
+| Input / output | 68×2 .. 8176×8176 / 8128×8128 | 2×2 .. 8192×8192 / **4096×4096** |
+| Scale | 1/8 .. 8 | 1/16 .. 16 |
+| Row stride | 16-byte aligned | 4-byte aligned |
+| Only here | AFBC | **colour fill**, ROP, palette, GRAY8 (YCbCr400), YUV planar, mosaic |
+
+Two consequences shape everything below.
+
+### 3.1 What the 4 GB line does
+
+**Symptom.** Every `imfill` fails, on any pixel format, from malloc or from
+the `system` dma-heap:
 
 ```
 IM_STATUS 0: Failed to call RockChipRga interface
-```
-
-**Cause**, from `dmesg`:
-
-```
 rga: RGA_MMU unsupported memory larger than 4G!
 rga: scheduler core[4] unsupported mm_flag[0x0]!
-rga: dst channel map job buffer failed!
 ```
 
-The driver routes colour fill to the **RGA2 core**, and RGA2 has no IOMMU — its
-`RGA_MMU` cannot map physical pages above 4 GB. On a 16 GB board essentially
-every `system` dma-heap allocation lands above that line, so the fill can never
-be mapped. The scale/convert path is unaffected because it runs on an **RGA3**
-core, which does have an IOMMU; that path works with both dma-buf fds and plain
-virtual addresses.
+Colour fill is RGA2's feature, RGA2 cannot map a page above 4 GB, and on a
+16 GB board that is where a `system` allocation lands. The same wall stops
+GRAY8 and any scale ratio beyond 8×. There is no bounce buffer, kernel option
+or device-tree property that changes this; Rockchip's FAQ (Q4.5) says exactly
+that colour fill and YUV planar "must allocate memory within 4G", from the
+`system-dma32` dma-heap.
 
-**What RCDL does about it.** `rgaFill()` tries the hardware once; the first
-failure switches the process to a CPU `memset` permanently (retrying per frame
-would cost one failed ioctl and a page of kernel log every frame for nothing).
+**What RCDL does.** The buffer carries the fact:
 
-A board where the hardware fill does work keeps using it; nothing is disabled at
-compile time — but the decision is made **once, on a private scratch buffer**,
-never by attempting a fill on a real destination. A rejected fill does not leave
-its target untouched: measured here, a band that took a failed attempt came back
-with 64–192 bytes of pre-fill content still in it, at cache-line granularity, on
-most runs.
+- `DmaBuf::Heap::SystemDma32` allocates from `/dev/dma_heap/system-dma32`,
+  and a `DmaBuf`, `Image` or `ImageView` from it says so (`below4G()` /
+  `ImageView::below4g`). `VideoDecConfig::pool_heap = SystemDma32` puts the
+  whole decoder pool there, and every frame it hands out is flagged (Python:
+  `VideoDecoder(pool_heap="system-dma32")`, `VideoFrame.below_4g`).
+- An op that needs RGA2 runs on the hardware **only when both buffers are
+  flagged** (or the board has no memory above 4 GB at all — the one case where
+  the ordinary heap is probed, once, on a private scratch buffer). Otherwise
+  `rgaCanHandle()` answers no up front and the `Auto` backend takes the CPU
+  path, without a failed ioctl and a page of kernel log per frame. The
+  hardware fill goes the same way: `rgaHwFillUsable(dst)` is per buffer, and
+  `rgaFill()` writes with the CPU when it is false.
+- The NPU's input tensors are allocated by the RKNN runtime and are never
+  low, so nothing that targets them can use the fill — which is why the
+  letterbox border is a **blit** (§3.3), not a fill.
 
-The proper fix would be a dma-heap backed by memory below 4 GB (a CMA heap).
-The image this was measured on has an empty `cma` heap, and RK3588's NPU, RGA3
-and VPU all sit behind IOMMUs, so `system` is the right default anyway.
+The dma32 heap is the low quarter of a 16 GB board and shared with the kernel
+and CMA: it is the heap for the few buffers that need it, not a default.
 
-### 3.1 The letterbox border is a blit, because a CPU fill is not reproducible
+### 3.2 The driver load-balances, so RCDL pins the core
 
-With colour fill unavailable, the obvious substitute is to paint the letterbox
-border with the CPU. **Do not**, and this is the sharpest measurement in this
-document, because the failure is invisible.
+Left to itself the driver gives a job both cores can do to whichever is free —
+and the two **do not resample the same way** (Rockchip FAQ Q2.22: the sampling
+phase differs, the picture shifts). Measured here, a 1080p NV12 frame scaled
+to 640×360 on RGA3 and again on RGA2 differed in **78% of its bytes, by up to
+147 LSB**, while two RGA3 runs were identical. A pipeline whose frames landed
+on either core would therefore not be reproducible — the same non-determinism
+§3.3 fought, from the other side.
+
+So every op in `preproc/rga.cc` pins the core it wants right before it
+submits: RGA3 for resize / convert / letterbox / copy, RGA2 for fill, GRAY8 and
+the wide ratios. `imconfig(IM_CONFIG_SCHEDULER_CORE, …)` is **thread-local**
+(measured: a fill from a fresh thread ran while the main thread was pinned to
+RGA3), so the async pipeline's workers do not interfere. A board without one
+family (RK356x has only RGA2) gets the one it has.
+
+This is also what makes RCDL work on a stock kernel: without the pin, the
+driver can hand a copy or a 1/4 downscale to RGA2 because RGA2 was idle,
+discover at map time that the buffer is above 4 GB, and fail — a kernel patch
+that re-routes such jobs is one answer, the pin is the one that ships with the
+library.
+
+### 3.3 The letterbox border is a blit, because a CPU fill is not reproducible
+
+With the hardware fill out of reach for NPU tensors, the obvious substitute is
+to paint the letterbox border with the CPU. **Do not**, and this is the
+sharpest measurement in this document, because the failure is invisible.
 
 Setup: a 16-frame 816x1088 H.264 clip, decoded on the VPU, letterboxed by RGA
 into a 640x640 NPU input tensor (so padX = 80, padY = 0), YOLOv8n. The same
@@ -147,8 +185,8 @@ clip, the same bytes, the same process, run three times:
 The decoded frames are bit-identical across runs (checked), RGA's letterbox is
 bit-identical when repeated on one frame, and `rknn_run` is bit-identical on one
 input. Only the CPU border is not, and it does not merely corrupt the border: a
-band edge lands mid-cache-line, so filling it is a **read-modify-write of a line
-the hardware just wrote**, and whichever of the two writebacks lands second
+band edge lands mid-cache-line, so filling it is a **read-modify-write of a
+line the hardware just wrote**, and whichever of the two writebacks lands second
 wins. Filling before the blit loses the band instead — librga's cache
 maintenance on import discards the CPU's writes — which is the same effect from
 the other side. There is no order that is safe.
@@ -167,6 +205,72 @@ Worth stating plainly, because it is the reusable lesson: **the bug was not that
 results were wrong, it was that they were not the same twice.** Nothing failed,
 no ioctl returned an error, and every box looked reasonable. It surfaced only
 when a new test compared two runs of the same clip frame by frame.
+
+### 3.4 The box overlay is CPU work, and that is the measurement talking
+
+Drawing detection outlines on the decoded frame *can* go to the hardware now
+(`rgaDrawRects(..., PreprocBackend::Rga)`, on a dma32 pool), and it is the
+slower choice:
+
+| 1080p NV12, outlines 2 px | 5 boxes | 20 boxes |
+|---|---|---|
+| CPU — one `mmap`, one cache sync, all boxes | 0.25–0.45 ms | **0.3 ms** |
+| RGA2 — `imrectangleArray`, one submit per colour run | 0.8–1.8 ms | 3.2–13.7 ms |
+
+Each outline is four fill jobs on the one RGA2 core, at roughly 0.13 ms of
+fixed cost per job. The CPU cost is almost all the cache sync of the frame,
+which is paid once — the earlier implementation mapped the frame and synced
+the whole buffer *per band*, forty times for ten boxes, and that is what made
+the CPU look slow.
+
+Writing the overlay with the CPU is not the §3.3 hazard: nothing else writes
+the frame after the decoder, the sync window invalidates the lines before the
+CPU touches them and flushes them before the encoder reads. Measured, the same
+clip encoded twice with CPU overlays gives the same bitstream.
+
+Both backends produce the **same bytes**: the rectangle is clipped to the frame
+first, snapped outward to even pixels on 4:2:0 with the thickness rounded up
+to even, drawn solid when too small for an outline, painted in the order
+given, and the colour is converted with the BT.601 studio-range integer
+matrix the hardware uses (pure red is Y=82 Cb=90 Cr=240).
+`tests/test_rga_overlay_py.py` pins this against a numpy reference on both
+backends.
+
+### 3.5 A note on the clock
+
+A synchronous pipeline spends most of a frame waiting on the NPU, and under
+the `schedutil` governor the CPU cores clock down while it waits — so the CPU
+stages that follow start slow. On this board, `video_det_demo` at 816×1088:
+
+| governor | postproc | overlay (CPU) | end to end |
+|---|---|---|---|
+| schedutil | 12.4 ms | 2.7 ms | 53 ms |
+| performance | 1.4 ms | 0.26 ms | 21.5 ms |
+
+The overlay did not get faster; the clock did. Before optimising a CPU stage
+that runs right after a hardware wait, check the governor.
+
+### 3.6 Alternatives measured, and why they are not the default
+
+Rockchip's guide and FAQ suggest three more levers. Each was measured here
+before deciding against it; the numbers are the reason, and they are the ones
+to re-check on a different kernel or librga.
+
+| lever | what the docs say | measured on this board | verdict |
+|---|---|---|---|
+| **Import once, wrap by handle** (`importbuffer_fd` + `wrapbuffer_handle`, FAQ Q1.10–11) | per-call import is "time-consuming"; keep a buffer pool | 1080p NV12 → 640×640 blit: 2.07 ms by fd, 2.12 ms by handle; 8 outlines: 5.8 vs 5.4 ms | no gain — driver 1.3.x already caches the mapping; per-call fd stays, and no handle lifetime to get wrong |
+| Skipping `imcheck` before the op | — | 2.11 vs 2.12 ms | free; keep the check, its error names the offending view |
+| Partial cache sync (`DMA_BUF_IOCTL_SYNC_PARTIAL`, a Rockchip kernel extension) | sync only the rows an overlay touched | `ENOTTY` on this kernel | not available; a whole-frame sync is ~0.2 ms anyway |
+| **Encoder OSD** (`MPP_ENC_SET_OSD_DATA_CFG`) | the VPU blends up to 8 regions at encode time, frame untouched | 8 regions, 16-pixel granularity, palette-indexed bitmaps the CPU has to write per box (a 400×300 box is 120 KB against ~6 KB of outline bands) | wrong tool for per-frame boxes; right for a static logo or timestamp |
+| Splitting a blit across both RGA3 cores | — | one blit is hardware-bound at ~2 ms per 1080p frame | halves latency, not throughput: the async pipeline already keeps both cores busy with different frames |
+
+### 3.7 `rga_probe`
+
+`./build/rga_probe` runs the measurements this section rests on — which heap
+the fill reaches, whether the core mask is honoured and per thread, the fill
+colour on NV12, `imrectangleArray` cost by count, RGA3 vs RGA2 resampling,
+GRAY8 and 12× scaling on dma32 buffers — and prints them. Run it on a new
+board or kernel before trusting any of the above there.
 
 ## 4. RGA and the CPU fallback do not resample identically
 
@@ -241,7 +345,7 @@ supported mode within ±1 LSB of the float reference:
 | | BT.601 limited | BT.601 full | BT.709 limited | BT.709 full |
 |---|---|---|---|---|
 | YUV → RGB | RGA | RGA | RGA | CPU — librga has no mode |
-| RGB → YUV | RGA | RGA | CPU — driver routes it to RGA2 | CPU |
+| RGB → YUV | RGA | RGA | CPU — no core accepts the job | CPU |
 
 `rgaCanHandle()` answers no for the CPU cells, so `PreprocBackend::Auto` takes
 the CPU path up front instead of paying a failed ioctl; `PreprocBackend::Rga`
@@ -286,7 +390,7 @@ follows. The RKNN runtime flushes its own I/O tensors around `rknn_run`.
 | `RGB888` | `RK_FORMAT_RGB_888` | what an `--input-order rgb` model wants |
 | `BGR888` | `RK_FORMAT_BGR_888` | what `cv::imread` gives you |
 | `RGBA8888` / `BGRA8888` | `RK_FORMAT_RGBA_8888` / `RK_FORMAT_BGRA_8888` | |
-| `GRAY8` | `RK_FORMAT_YCbCr_400` | 8-bit luma; **not** `RK_FORMAT_Y4`, which is 4 bits |
+| `GRAY8` | `RK_FORMAT_YCbCr_400` | 8-bit luma; **not** `RK_FORMAT_Y4`, which is 4 bits. RGA2 only — needs both buffers below 4 GB (§3.1) |
 | `NV12` | `RK_FORMAT_YCbCr_420_SP` | the VPU's native output |
 | `NV21` | `RK_FORMAT_YCrCb_420_SP` | |
 | `YUV420P` | `RK_FORMAT_YCbCr_420_P` | |

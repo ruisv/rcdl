@@ -37,8 +37,19 @@ class DmaBuf {
     SystemUncached,  ///< /dev/dma_heap/system-uncached
     Cma,             ///< /dev/dma_heap/cma             — physically contiguous (units without an IOMMU)
     CmaUncached,     ///< /dev/dma_heap/cma-uncached
+    /// /dev/dma_heap/system-dma32 — pages guaranteed BELOW 4 GB physical. This
+    /// is what a unit with a 32-bit MMU needs: on RK3588 the RGA2 core (colour
+    /// fill, rectangle overlay, YUV planar, GRAY8, scale ratios beyond 8x) can
+    /// address nothing above that line, so a buffer it must write comes from
+    /// here. Finite — it is the low quarter of a 16 GB board — so it is the
+    /// heap for the few buffers that need it, not the default.
+    SystemDma32,
+    SystemUncachedDma32,  ///< /dev/dma_heap/system-uncached-dma32
   };
   static const char* heapName(Heap heap) noexcept;
+  /// Does every page of a buffer from `heap` sit below 4 GB physical? True for
+  /// the dma32 heaps only: the cma heap is contiguous but not guaranteed low.
+  static bool heapBelow4G(Heap heap) noexcept;
 
   DmaBuf() = default;
   /// Allocate `size` bytes from `heap`. Throws rcdl::Error on failure (typically
@@ -46,7 +57,10 @@ class DmaBuf {
   static DmaBuf alloc(std::size_t size, Heap heap = Heap::System);
   /// Wrap an existing dma-buf fd (e.g. one exported by MPP or the RKNN runtime).
   /// The fd is dup()'d, so the caller keeps ownership of its own descriptor.
-  static DmaBuf fromFd(int fd, std::size_t size);
+  /// `below_4g` says the caller knows the pages are below 4 GB physical (it
+  /// allocated them from a dma32 heap itself); it cannot be discovered from
+  /// the fd, so it defaults to "unknown", i.e. false.
+  static DmaBuf fromFd(int fd, std::size_t size, bool below_4g = false);
   ~DmaBuf();
 
   DmaBuf(const DmaBuf&) = delete;
@@ -57,6 +71,11 @@ class DmaBuf {
   bool valid() const noexcept { return fd_ >= 0; }
   int fd() const noexcept { return fd_; }
   std::size_t size() const noexcept { return size_; }
+  /// The heap this buffer was allocated from; Heap::System for a wrapped fd.
+  Heap heap() const noexcept { return heap_; }
+  /// Every page is known to be below 4 GB physical — allocated from a dma32
+  /// heap, or wrapped with that assurance. False means unknown, not "above".
+  bool below4G() const noexcept { return below_4g_; }
   /// CPU view (mmap'd lazily on first call, MAP_SHARED read/write).
   void* data();
   const void* data() const { return const_cast<DmaBuf*>(this)->data(); }
@@ -75,6 +94,8 @@ class DmaBuf {
   int fd_ = -1;
   std::size_t size_ = 0;
   void* map_ = nullptr;
+  Heap heap_ = Heap::System;
+  bool below_4g_ = false;
 };
 
 }  // namespace rcdl

@@ -13,8 +13,9 @@
 int main(int argc, char** argv) {
   const std::size_t bytes = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : (4u << 20);
   const rcdl::DmaBuf::Heap heaps[] = {
-      rcdl::DmaBuf::Heap::System, rcdl::DmaBuf::Heap::SystemUncached,
-      rcdl::DmaBuf::Heap::Cma, rcdl::DmaBuf::Heap::CmaUncached};
+      rcdl::DmaBuf::Heap::System,      rcdl::DmaBuf::Heap::SystemUncached,
+      rcdl::DmaBuf::Heap::Cma,         rcdl::DmaBuf::Heap::CmaUncached,
+      rcdl::DmaBuf::Heap::SystemDma32, rcdl::DmaBuf::Heap::SystemUncachedDma32};
   int failures = 0;
   for (auto h : heaps) {
     try {
@@ -23,12 +24,13 @@ int main(int argc, char** argv) {
       std::memset(b.data(), 0xA5, b.size());
       b.syncEnd();
       const auto* p = static_cast<const unsigned char*>(b.data());
-      std::printf("heap %-16s fd=%d size=%zu first=0x%02x last=0x%02x  OK\n",
-                  rcdl::DmaBuf::heapName(h), b.fd(), b.size(), p[0], p[b.size() - 1]);
+      std::printf("heap %-22s fd=%d size=%zu first=0x%02x last=0x%02x  below 4G: %s  OK\n",
+                  rcdl::DmaBuf::heapName(h), b.fd(), b.size(), p[0], p[b.size() - 1],
+                  b.below4G() ? "yes" : "unknown");
     } catch (const std::exception& e) {
-      std::printf("heap %-16s FAILED: %s\n", rcdl::DmaBuf::heapName(h), e.what());
+      std::printf("heap %-22s FAILED: %s\n", rcdl::DmaBuf::heapName(h), e.what());
       ++failures;
     }
   }
-  return failures == 4 ? 1 : 0;
+  return failures == 6 ? 1 : 0;
 }

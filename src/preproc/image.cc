@@ -203,6 +203,7 @@ Image Image::alloc(int width, int height, PixelFormat format, int wstride, int h
   img.view_.hstride = hs;
   img.view_.format = format;
   img.view_.size = bytes;
+  img.view_.below4g = img.buf_.below4G();
   return img;
 }
 

@@ -60,8 +60,14 @@ const char* DmaBuf::heapName(Heap heap) noexcept {
     case Heap::SystemUncached: return "system-uncached";
     case Heap::Cma: return "cma";
     case Heap::CmaUncached: return "cma-uncached";
+    case Heap::SystemDma32: return "system-dma32";
+    case Heap::SystemUncachedDma32: return "system-uncached-dma32";
   }
   return "system";
+}
+
+bool DmaBuf::heapBelow4G(Heap heap) noexcept {
+  return heap == Heap::SystemDma32 || heap == Heap::SystemUncachedDma32;
 }
 
 DmaBuf DmaBuf::alloc(std::size_t size, Heap heap) {
@@ -81,26 +87,31 @@ DmaBuf DmaBuf::alloc(std::size_t size, Heap heap) {
   DmaBuf b;
   b.fd_ = static_cast<int>(req.fd);
   b.size_ = size;
+  b.heap_ = heap;
+  b.below_4g_ = heapBelow4G(heap);
   return b;
 }
 
-DmaBuf DmaBuf::fromFd(int fd, std::size_t size) {
+DmaBuf DmaBuf::fromFd(int fd, std::size_t size, bool below_4g) {
   RCDL_REQUIRE(fd >= 0, "DmaBuf::fromFd: invalid fd");
   int d = ::dup(fd);
   if (d < 0) throwErrno("dup dma-buf fd", "");
   DmaBuf b;
   b.fd_ = d;
   b.size_ = size;
+  b.below_4g_ = below_4g;
   return b;
 }
 
 DmaBuf::~DmaBuf() { release(); }
 
 DmaBuf::DmaBuf(DmaBuf&& other) noexcept
-    : fd_(other.fd_), size_(other.size_), map_(other.map_) {
+    : fd_(other.fd_), size_(other.size_), map_(other.map_), heap_(other.heap_),
+      below_4g_(other.below_4g_) {
   other.fd_ = -1;
   other.size_ = 0;
   other.map_ = nullptr;
+  other.below_4g_ = false;
 }
 
 DmaBuf& DmaBuf::operator=(DmaBuf&& other) noexcept {
@@ -109,9 +120,12 @@ DmaBuf& DmaBuf::operator=(DmaBuf&& other) noexcept {
     fd_ = other.fd_;
     size_ = other.size_;
     map_ = other.map_;
+    heap_ = other.heap_;
+    below_4g_ = other.below_4g_;
     other.fd_ = -1;
     other.size_ = 0;
     other.map_ = nullptr;
+    other.below_4g_ = false;
   }
   return *this;
 }
@@ -158,6 +172,7 @@ void DmaBuf::release() noexcept {
     fd_ = -1;
   }
   size_ = 0;
+  below_4g_ = false;
 }
 
 }  // namespace rcdl

@@ -11,6 +11,9 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#include <sys/sysinfo.h>
 
 #include "rcdl/core/dma_buf.h"
 #include "rcdl/core/status.h"
@@ -86,6 +89,54 @@ rga_buffer_t wrap(const ImageView& v, const char* which) {
   return wrapbuffer_virtualaddr_t(v.data, v.width, v.height, v.effWStride(), v.effHStride(), fmt);
 }
 
+// --- which core ------------------------------------------------------------------
+//
+// RK3588 carries two RGA3 cores and one RGA2 core, and they are not
+// interchangeable: RGA3 has a 40-bit IOMMU and does resize / convert / blend;
+// RGA2 has a 32-bit MMU (nothing above 4 GB physical), and is the only one with
+// colour fill, GRAY8 (YCbCr400), YUV planar and scale ratios beyond 8x. Left to
+// itself the driver load-balances any job both cores can do — and the two
+// resample differently enough that a 1080p -> 640x360 blit comes out with 78%
+// of its bytes different (max 147 LSB) depending on which core drew it, so a
+// pipeline whose frames land on either would not be reproducible. Every op
+// here therefore pins the core it wants, per thread (imconfig's scheduler
+// setting is thread-local, measured), right before it submits.
+//
+// A board without one of the families (RK356x has RGA2 only) gets whichever it
+// has: the mask is derived from the driver's version string once.
+constexpr int kMaskRga3 = IM_SCHEDULER_RGA3_CORE0 | IM_SCHEDULER_RGA3_CORE1;
+constexpr int kMaskRga2 = IM_SCHEDULER_RGA2_CORE0;
+
+struct CoreMasks {
+  int rga3 = 0;  ///< 0 when the board has no RGA3
+  int rga2 = 0;  ///< 0 when the board has no RGA2
+};
+
+const CoreMasks& coreMasks() noexcept {
+  static const CoreMasks m = []() noexcept {
+    CoreMasks c;
+    try {
+      const std::string v = rgaVersion();  // "... RGA version : RGA_2_Enhance RGA_3"
+      if (v.find("RGA_3") != std::string::npos) c.rga3 = kMaskRga3;
+      if (v.find("RGA_2") != std::string::npos) c.rga2 = kMaskRga2;
+    } catch (...) {
+    }
+    return c;
+  }();
+  return m;
+}
+
+// Pin this thread's next submits to `mask`. A family the board lacks falls
+// back to the other one, and a board that reports neither is left to the
+// driver (imconfig rejects an empty mask, so it is simply not called).
+void pinCore(int mask) noexcept {
+  const CoreMasks& m = coreMasks();
+  int use = mask;
+  if (mask == kMaskRga3 && m.rga3 == 0) use = m.rga2;
+  if (mask == kMaskRga2 && m.rga2 == 0) use = m.rga3;
+  if (use != 0) imconfig(IM_CONFIG_SCHEDULER_CORE, static_cast<std::uint64_t>(use));
+}
+
 // cscMode()'s answer for a conversion RGA cannot perform.
 constexpr int kCscUnsupported = -1;
 
@@ -98,9 +149,9 @@ constexpr int kCscUnsupported = -1;
 //   YUV -> RGB  BT.601 limited / full, BT.709 limited   all within ±1 LSB
 //   YUV -> RGB  BT.709 full    librga refuses: "Not support full csc mode"
 //   RGB -> YUV  BT.601 limited / full                   within ±1 LSB
-//   RGB -> YUV  BT.709 (either range)  submitted to the RGA2 core, which fails
-//               with "job buffer map failed" above 4 GB — the same wall as the
-//               colour fill and GRAY8
+//   RGB -> YUV  BT.709 (either range)  "no core match" from the driver whether
+//               the job is pinned to RGA3 or left to the scheduler; RGA2 with
+//               low buffers is untested
 int cscMode(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) noexcept {
   const bool src_yuv = isYuvSide(src.format);
   const bool dst_yuv = isYuvSide(dst.format);
@@ -163,12 +214,14 @@ void checkPair(const rga_buffer_t& s, const rga_buffer_t& d, const im_rect& srec
   checkIm(imcheck_t(s, d, pat, srect, drect, prect, 0), what, &dst, &src);
 }
 
-// One synchronous crop + scale + colour convert. `drect` may be a sub-rectangle
-// of the destination (that is how the letterbox writes inside its border).
+// One synchronous crop + scale + colour convert on the given core. `drect` may
+// be a sub-rectangle of the destination (that is how the letterbox writes
+// inside its border).
 void process(rga_buffer_t s, rga_buffer_t d, const im_rect& srect, const im_rect& drect,
-             const ImageView& src, const ImageView& dst, const char* what) {
+             const ImageView& src, const ImageView& dst, const char* what, int core) {
   rga_buffer_t pat{};
   im_rect prect{};
+  pinCore(core);
   checkIm(improcess(s, d, pat, srect, drect, prect, /*acquire_fence_fd=*/-1,
                     /*release_fence_fd=*/nullptr, /*opt_ptr=*/nullptr, IM_SYNC),
           what, &dst, &src);
@@ -189,62 +242,107 @@ bool clipRect(const ImageView& dst, int x, int y, int w, int h, im_rect* out) no
   return true;
 }
 
-// RGA3's own scaling limit. im2d's documented range is [1/16, 16], but that
-// upper half belongs to RGA2; RGA3 does [1/8, 8]. On this board only RGA3 is
-// usable (see the fill comment below), so this is the real limit.
+// RGA3's own scaling limit. im2d's documented range is [1/16, 16], but the
+// outer half belongs to RGA2; RGA3 does [1/8, 8].
 constexpr double kRga3MaxScale = 8.0;
 
-// --- colour fill ---------------------------------------------------------------
+// --- what RGA2 can reach ------------------------------------------------------
 //
-// imcheck_t validates a src -> dst pair; a fill has no source channel, so the
-// check that matters is the one improcess() runs internally on the dst (it is
-// on unless imconfig(IM_CONFIG_CHECK, ...) turned it off).
-//
-// RK3588 routes im2d's colour fill to the RGA2 core, which has no IOMMU: its
-// RGA_MMU cannot map pages above 4 GB, so on a board with more memory than that
-// every fill fails with "job buffer map failed" no matter the pixel format or
-// whether the buffer came from malloc or a dma-heap. (The scale/convert path is
-// unaffected — that runs on an RGA3 core, which does have an IOMMU.)
-//
-// So the first failure switches this process to the CPU fill permanently: the
-// alternative is one failed ioctl plus a page of driver log per frame, and the
-// rectangles involved are letterbox borders and overlay outlines, which the CPU
-// covers in tens of microseconds. A board where the hardware fill does work
-// keeps using it.
-// Whether the hardware fill works, decided ONCE on a private scratch buffer.
-//
-// The obvious design — try imfill on the real destination and fall back on
-// failure — is wrong, and measurably so. A failed fill does not leave the
-// destination untouched: letterboxing a 1280x720 frame into a 640x640 NPU input
-// tensor, the band that took the failed attempt came back with 64, 128 or 192
-// bytes of PRE-FILL content still in it, at cache-line granularity, on 8 runs
-// out of 10 — while the second band, filled after the attempt had been given
-// up on, was always correct. Whatever the driver does while tearing down the
-// rejected job disturbs the cache state of the buffer it was pointed at.
-//
-// Since the destination here is normally the NPU's input tensor, reused every
-// frame, that is a stale band fed to the model — a silent accuracy bug that
-// only shows up as slightly-wrong results. So the probe runs against a scratch
-// dma-buf at first use and the real destination is only ever handed a fill that
-// is already known to work.
-//
-// (On RK3588 with more than 4 GB of RAM the probe always fails: the driver
-// routes colour fill to the RGA2 core, which has no IOMMU and cannot map pages
-// above 4 GB. See docs/RGA.md.)
-bool hwFillUsable() noexcept {
-  static const bool ok = []() noexcept {
-    try {
-      constexpr int kW = 64, kH = 64;
-      DmaBuf scratch = DmaBuf::alloc(static_cast<std::size_t>(kW) * kH * 4);
-      rga_buffer_t d = wrapbuffer_fd_t(scratch.fd(), kW, kH, kW, kH, RK_FORMAT_RGBA_8888);
-      const im_rect r{0, 0, kW, kH};
-      return imOk(imfill_t(d, r, 0, /*sync=*/1));
-    } catch (...) {
-      return false;
-    }
-  }();
+// RGA2's MMU is 32-bit: it maps nothing above 4 GB physical. Whether that
+// matters depends on the board and on the buffer. On a board with at most 4 GB
+// every buffer is fine; on a 16 GB board a `system` dma-heap allocation is
+// almost always above the line and only a `system-dma32` one (ImageView::
+// below4g) is usable. The board-level fact is measured ONCE, per heap, with a
+// colour fill on a private 64x64 scratch buffer — never by trying an op on a
+// real destination, because a rejected job does not leave its target alone:
+// measured here, a letterbox band that took a failed fill came back with
+// 64-192 bytes of pre-fill content at cache-line granularity on 8 runs of 10,
+// and since that target is normally the NPU's input tensor, that is a stale
+// band fed to the model. Colour fill is also RGA2's own feature, so the probe
+// answers "can RGA2 fill this heap" and "can RGA2 reach this heap" at once.
+bool fillProbe(DmaBuf::Heap heap) noexcept {
+  static std::mutex mu;
+  static std::map<int, bool> cache;
+  std::lock_guard<std::mutex> lock(mu);
+  const auto it = cache.find(static_cast<int>(heap));
+  if (it != cache.end()) return it->second;
+  bool ok = false;
+  try {
+    constexpr int kW = 64, kH = 64;
+    DmaBuf scratch = DmaBuf::alloc(static_cast<std::size_t>(kW) * kH * 4, heap);
+    rga_buffer_t d = wrapbuffer_fd_t(scratch.fd(), kW, kH, kW, kH, RK_FORMAT_RGBA_8888);
+    const im_rect r{0, 0, kW, kH};
+    pinCore(kMaskRga2);
+    ok = imOk(imfill_t(d, r, 0, /*sync=*/1));
+  } catch (...) {
+    ok = false;  // no such heap, or no access to it
+  }
+  cache.emplace(static_cast<int>(heap), ok);
   return ok;
 }
+
+// Can RGA2 address this buffer? Known-low pages, or a board where the ordinary
+// heap is reachable — one with no memory above 4 GB at all. A board with more
+// is not probed for the ordinary heap: a `system` allocation there may land
+// anywhere, so "unreachable" is the only answer that is never wrong, and it
+// spares the process the failed job and the page of kernel log the probe
+// would cost.
+bool rga2Reaches(const ImageView& v) noexcept {
+  if (v.below4g) return fillProbe(DmaBuf::Heap::SystemDma32);
+  static const bool small_board = []() noexcept {
+    struct sysinfo si {};
+    if (::sysinfo(&si) != 0) return false;
+    const unsigned long long total = static_cast<unsigned long long>(si.totalram) * si.mem_unit;
+    return total <= (4ull << 30);
+  }();
+  return small_board && fillProbe(DmaBuf::Heap::System);
+}
+
+// Does this (src -> dst) op need the RGA2 core? `why` names the feature.
+bool needsRga2(const ImageView& src, const ImageView& dst, std::string* why) noexcept {
+  if (src.format == PixelFormat::GRAY8 || dst.format == PixelFormat::GRAY8) {
+    if (why != nullptr) *why = "GRAY8 (YCbCr400) is an RGA2-only format";
+    return true;
+  }
+  const double sx = static_cast<double>(dst.width) / src.width;
+  const double sy = static_cast<double>(dst.height) / src.height;
+  const double lo = std::min(sx, sy), hi = std::max(sx, sy);
+  if (lo < 1.0 / kRga3MaxScale || hi > kRga3MaxScale) {
+    if (why != nullptr) {
+      *why = "scale " + std::to_string(lo) + ".." + std::to_string(hi) +
+             " is outside the RGA3 range [1/8, 8]";
+    }
+    return true;
+  }
+  return false;
+}
+
+// The core an op runs on, or a reason it cannot run at all (false).
+bool coreFor(const ImageView& src, const ImageView& dst, int* core, std::string* why) noexcept {
+  std::string feature;
+  if (!needsRga2(src, dst, &feature)) {
+    *core = kMaskRga3;
+    return true;
+  }
+  *core = kMaskRga2;
+  if (rga2Reaches(src) && rga2Reaches(dst)) return true;
+  if (why != nullptr) {
+    *why = feature + ", and RGA2 cannot address " +
+           (rga2Reaches(src) ? "the destination" : rga2Reaches(dst) ? "the source" : "either buffer") +
+           " (its MMU is 32-bit; allocate from the system-dma32 heap, see docs/RGA.md)";
+  }
+  return false;
+}
+
+int requireCore(const ImageView& src, const ImageView& dst) {
+  int core = 0;
+  std::string why;
+  if (!coreFor(src, dst, &core, &why)) throw Error(-1, "RCDL: RGA: " + why);
+  return core;
+}
+
+// Whether the hardware colour fill can be handed `dst`.
+bool hwFillUsable(const ImageView& dst) noexcept { return rga2Reaches(dst); }
 
 // --- the border, painted by the hardware --------------------------------------
 //
@@ -322,12 +420,15 @@ bool tryGreyBlit(const ImageView& dst, const im_rect& rect, std::uint8_t pad) no
   try {
     const ImageView* grey = greySource(dst.format, pad, greySide(dst));
     if (grey == nullptr) return false;
+    int core = 0;
+    if (!coreFor(*grey, dst, &core, nullptr)) return false;
     rga_buffer_t s = wrap(*grey, "grey");
     rga_buffer_t d = wrap(dst, "dst");
     const im_rect srect{0, 0, grey->width, grey->height};
     rga_buffer_t pat{};
     im_rect prect{};
     if (!imOk(imcheck_t(s, d, pat, srect, rect, prect, 0))) return false;
+    pinCore(core);
     return imOk(improcess(s, d, pat, srect, rect, prect, /*acquire_fence_fd=*/-1,
                           /*release_fence_fd=*/nullptr, /*opt_ptr=*/nullptr, IM_SYNC));
   } catch (...) {
@@ -335,10 +436,12 @@ bool tryGreyBlit(const ImageView& dst, const im_rect& rect, std::uint8_t pad) no
   }
 }
 
-// Try the hardware fill. False means it is unusable on this board, decided by
-// the scratch probe above rather than by damaging a real destination.
-bool tryHwFill(rga_buffer_t d, const im_rect& rect, std::uint32_t abgr) noexcept {
-  if (!hwFillUsable()) return false;
+// Try the hardware fill. False means RGA2 cannot reach this destination,
+// decided by the scratch probe above rather than by damaging a real one.
+bool tryHwFill(rga_buffer_t d, const im_rect& rect, std::uint32_t abgr,
+               const ImageView& dst) noexcept {
+  if (!hwFillUsable(dst)) return false;
+  pinCore(kMaskRga2);
   return imOk(imfill_t(d, rect, static_cast<int>(abgr), /*sync=*/1));
 }
 
@@ -365,10 +468,10 @@ std::uint8_t clampU8(float v) noexcept {
   return static_cast<std::uint8_t>(i < 0 ? 0 : (i > 255 ? 255 : i));
 }
 
-// Colour-correct CPU fill of `rect` in `dst`. This is the fallback for the
-// public rgaFill() / rgaDrawRect(), which take an arbitrary colour and are the
+// Colour-correct CPU fill of `rect` in `dst`. This is the CPU side of the
+// public rgaFill() / rgaDrawRects(), which take an arbitrary colour and are the
 // overlay path — collapsing that colour to a single grey level is not an option
-// there, and on this board the hardware fill never runs at all.
+// there.
 //
 // It duplicates a little of letterbox_cpu.cc's plane arithmetic on purpose:
 // that file's fillRectCpu() is the single-level (grey Y + neutral chroma) fill
@@ -436,15 +539,16 @@ void fillRectCpuColor(const ImageView& dst, const im_rect& rect, std::uint32_t a
     return;
   }
 
-  // 4:2:0. Full-range BT.601 — the same matrix letterbox_cpu.cc uses in the
-  // RGB -> YUV direction, so an overlay drawn by either backend is the same
-  // colour, and a grey (R == G == B) still lands on neutral 128 chroma.
-  const float r = static_cast<float>(c.r);
-  const float g = static_cast<float>(c.g);
-  const float b = static_cast<float>(c.b);
-  const std::uint8_t yv = clampU8(0.299f * r + 0.587f * g + 0.114f * b);
-  const std::uint8_t cb = clampU8(-0.169f * r - 0.331f * g + 0.500f * b + 128.0f);
-  const std::uint8_t cr = clampU8(0.500f * r - 0.419f * g - 0.081f * b + 128.0f);
+  // 4:2:0. BT.601 STUDIO range, with the classic 8-bit fixed-point
+  // coefficients: that is byte-for-byte what the hardware fill writes for the
+  // same colour (measured on RK3588: red -> Y=82 Cb=90 Cr=240, green -> Y=144),
+  // so a box drawn by either backend is the same bytes — and it is the right
+  // range for the frame, which is studio-swing video on its way to an encoder.
+  // A grey (R == G == B) still lands on neutral 128 chroma.
+  const int r = c.r, g = c.g, b = c.b;
+  const std::uint8_t yv = clampU8(static_cast<float>(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16));
+  const std::uint8_t cb = clampU8(static_cast<float>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128));
+  const std::uint8_t cr = clampU8(static_cast<float>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128));
 
   const std::size_t run = static_cast<std::size_t>(x1 - x0);
   for (int y = y0; y < y1; ++y) {
@@ -489,17 +593,17 @@ void fillRectCpuColor(const ImageView& dst, const im_rect& rect, std::uint32_t a
 // see the comment on tryHwFill), so the border has to be painted by the CPU,
 // and the CPU needs an address.
 //
-// So map it here, for the duration of the fill, and unmap after. That is a few
-// tens of microseconds on the border bands, and it only happens on the fallback
-// path — an Engine input tensor already carries the runtime's virtual address,
+// So map it here, ONCE per call (a whole frame's worth of boxes shares the
+// mapping), and unmap after. The map costs tens of microseconds; what used to
+// cost milliseconds was doing it — and a whole-buffer cache sync — once per
+// band. An Engine input tensor already carries the runtime's virtual address,
 // so the detection hot path never takes it.
 class CpuFillView {
  public:
   explicit CpuFillView(const ImageView& dst) : view_(dst) {
     if (view_.data != nullptr) return;
     RCDL_REQUIRE(dst.fd >= 0,
-                 "RGA colour fill is unavailable on this board (RGA2 has no IOMMU) and the "
-                 "destination has neither a CPU mapping nor a dma-buf fd to map");
+                 "CPU fill: the destination has neither a CPU mapping nor a dma-buf fd to map");
     bytes_ = dst.bytes();
     map_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_SHARED, dst.fd, 0);
     RCDL_REQUIRE(map_ != MAP_FAILED, "RGA fill fallback: could not mmap the destination dma-buf");
@@ -520,7 +624,7 @@ class CpuFillView {
 
 // Fill an already-clipped rectangle with an arbitrary ABGR colour.
 void fillRect(rga_buffer_t d, const im_rect& rect, std::uint32_t abgr, const ImageView& dst) {
-  if (tryHwFill(d, rect, abgr)) return;
+  if (tryHwFill(d, rect, abgr, dst)) return;
   CpuFillView cpu(dst);
   // The CPU writes; flush those lines to DRAM before RGA reads or writes the
   // same buffer, or the blit that follows could be overwritten at the seam.
@@ -533,7 +637,7 @@ void fillRect(rga_buffer_t d, const im_rect& rect, std::uint32_t abgr, const Ima
 // fallback goes through letterbox_cpu.cc's fillRectCpu() so the border is
 // byte-identical to the one letterboxCpu() paints.
 void fillRectGrey(rga_buffer_t d, const im_rect& rect, std::uint8_t value, const ImageView& dst) {
-  if (tryHwFill(d, rect, greyAbgr(value))) return;
+  if (tryHwFill(d, rect, greyAbgr(value), dst)) return;
   CpuFillView cpu(dst);
   dmaBufSyncStart(dst.fd, false, true);
   fillRectCpu(cpu.get(), rect.x, rect.y, rect.width, rect.height, value);
@@ -603,17 +707,12 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why,
       if (why != nullptr) *why = cscUnsupportedWhy(src, dst, yuv);
       return false;
     }
-    // GRAY8 (RK_FORMAT_YCbCr_400) fails at SUBMIT in every direction on this
-    // board — as a source, as a destination, and gray-to-gray — with the same
-    // "job buffer map failed" the colour fill gives, i.e. the driver routes it
-    // to the IOMMU-less RGA2 core. imcheck does not know that, so reject it
-    // here rather than pay a failed ioctl and a page of kernel log per frame.
-    if (src.format == PixelFormat::GRAY8 || dst.format == PixelFormat::GRAY8) {
-      if (why != nullptr) {
-        *why = "RGA cannot handle GRAY8 on this board (routed to RGA2, which "
-               "cannot address memory above 4 GB)";
-      }
-      return false;
+    // An RGA2-only op (GRAY8, a ratio beyond 8x) runs only where RGA2 can reach
+    // both buffers; imcheck accepts it regardless, and the op would fail at
+    // submit with a page of kernel log per frame. See coreFor().
+    {
+      int core = 0;
+      if (!coreFor(src, dst, &core, why)) return false;
     }
     // Row strides: measured requirements, tighter than the documented YUV-only
     // rule. See strideAlign() in preproc/image.cc for the table.
@@ -626,24 +725,6 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why,
         }
         return false;
       }
-    }
-    // imcheck accepts the [1/16, 16] range because RGA2 covers it — but on a
-    // board with more than 4 GB of RAM RGA2 is unusable (no IOMMU; its RGA_MMU
-    // cannot map pages above 4 GB, which is where the system dma-heap allocates)
-    // and the driver silently routes any ratio outside RGA3's own [1/8, 8] to
-    // it. The op then fails at submit with "job buffer map failed". Rejecting
-    // the ratio here keeps that off the steady-state path — one check instead of
-    // a failed ioctl and a page of kernel log every frame. See docs/RGA.md.
-    const double sx = static_cast<double>(dst.width) / src.width;
-    const double sy = static_cast<double>(dst.height) / src.height;
-    const double lo = std::min(sx, sy), hi = std::max(sx, sy);
-    if (lo < 1.0 / kRga3MaxScale || hi > kRga3MaxScale) {
-      if (why != nullptr) {
-        *why = "scale " + std::to_string(lo) + ".." + std::to_string(hi) +
-               " is outside the RGA3 range [1/8, 8]; wider ratios need RGA2, "
-               "which cannot address memory above 4 GB on this board";
-      }
-      return false;
     }
     const rga_buffer_t s = wrap(src, "src");
     const rga_buffer_t d = wrap(dst, "dst");
@@ -671,9 +752,11 @@ bool rgaCanHandle(const ImageView& dst, const ImageView& src, std::string* why,
 LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint8_t pad,
                            YuvColorSpace yuv) {
   requireRga();
-  // Before anything touches the destination: a colour space RGA cannot convert
-  // has to fail with the canvas untouched, so the CPU fallback starts clean.
+  // Before anything touches the destination: a colour space RGA cannot convert,
+  // or a core that cannot reach the buffers, has to fail with the canvas
+  // untouched, so the CPU fallback starts clean.
   const int csc = requireCsc(src, dst, yuv);
+  const int core = requireCore(src, dst);
   LetterboxInfo lb = computeLetterbox(src.width, src.height, dst.width, dst.height);
 
   // The hardware only writes integer rectangles. Round the scaled extent first,
@@ -748,7 +831,7 @@ LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint
   // 2. Crop, scale and colour-convert into the centred rectangle in one pass,
   //    on top of the grey the step above laid down.
   applyCsc(&s, &d, csc);
-  process(s, d, srect, drect, src, dst, "letterbox blit");
+  process(s, d, srect, drect, src, dst, "letterbox blit", core);
 
   // 3. Border, the fallback: the CPU paints only the bands the blit did not
   //    cover, and only AFTER it. That order is the lesser evil — filling first
@@ -783,7 +866,7 @@ LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvColorSpac
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "resize");
   applyCsc(&s, &d, requireCsc(src, dst, yuv));
-  process(s, d, srect, drect, src, dst, "resize");
+  process(s, d, srect, drect, src, dst, "resize", requireCore(src, dst));
 
   LetterboxInfo lb;
   lb.srcW = src.width;
@@ -811,6 +894,7 @@ void rgaCvtColor(const ImageView& dst, const ImageView& src, YuvColorSpace yuv) 
   checkPair(s, d, srect, drect, src, dst, "cvtColor");
   // imcvtcolor takes the matrix as an argument rather than off the buffers.
   const int mode = requireCsc(src, dst, yuv);
+  pinCore(requireCore(src, dst));
   checkIm(imcvtcolor(s, d, s.format, d.format, mode, /*sync=*/1), "cvtColor", &dst, &src);
 }
 
@@ -830,7 +914,11 @@ void rgaCropResize(const ImageView& dst, const ImageView& src, int x, int y, int
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "cropResize");
   applyCsc(&s, &d, requireCsc(src, dst, yuv));
-  process(s, d, srect, drect, src, dst, "cropResize");
+  // The ratio is that of the crop, not of the whole source.
+  ImageView crop = src;
+  crop.width = w;
+  crop.height = h;
+  process(s, d, srect, drect, src, dst, "cropResize", requireCore(crop, dst));
 }
 
 void rgaCopy(const ImageView& dst, const ImageView& src) {
@@ -845,7 +933,13 @@ void rgaCopy(const ImageView& dst, const ImageView& src) {
   const im_rect srect{0, 0, src.width, src.height};
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "copy");
+  pinCore(requireCore(src, dst));
   checkIm(imcopy(s, d, /*sync=*/1), "copy", &dst, &src);
+}
+
+bool rgaHwFillUsable(const ImageView& dst) noexcept {
+  if (!rgaAvailable() || !dst.valid()) return false;
+  return hwFillUsable(dst);
 }
 
 void rgaFill(const ImageView& dst, int x, int y, int w, int h, std::uint32_t abgr) {
@@ -856,22 +950,137 @@ void rgaFill(const ImageView& dst, int x, int y, int w, int h, std::uint32_t abg
   fillRect(d, rect, abgr, dst);
 }
 
-void rgaDrawRect(const ImageView& dst, int x, int y, int w, int h, std::uint32_t abgr,
-                 int thickness) {
-  requireRga();
-  if (thickness <= 0 || w <= 0 || h <= 0) return;
+namespace {
 
-  // A border thicker than half the box would draw its two opposite edges over
-  // each other; clamp so the four fills stay disjoint.
-  const int t = std::min(thickness, std::min(w, h) / 2 > 0 ? std::min(w, h) / 2 : 1);
-  const int inner_h = h - 2 * t;  // may be <= 0 for a very thin box; clipped away below
+// One outline, normalised the same way for both backends: clipped to the
+// canvas FIRST (so a box that runs off the frame is closed at the frame edge,
+// which is what a detector overlay wants), snapped OUTWARD to even pixels on
+// 4:2:0 with the thickness rounded up to even (a chroma sample cannot be
+// split, and RGA2 wants every edge 2-aligned), and a rectangle too small to
+// have an inside is drawn solid. Returns false when nothing is left to draw.
+struct Outline {
+  im_rect rect{};
+  int thickness = 0;  ///< <= 0 means solid
+};
 
-  rgaFill(dst, x, y, w, t, abgr);                    // top
-  rgaFill(dst, x, y + h - t, w, t, abgr);            // bottom
-  if (inner_h > 0) {
-    rgaFill(dst, x, y + t, t, inner_h, abgr);        // left
-    rgaFill(dst, x + w - t, y + t, t, inner_h, abgr);  // right
+bool outlineOf(const ImageView& dst, const RectSpec& r, Outline* out) noexcept {
+  if (r.thickness <= 0 || r.w <= 0 || r.h <= 0) return false;
+  const bool yuv = isPlanarYuv(dst.format);
+  int x0 = std::max(r.x, 0), y0 = std::max(r.y, 0);
+  int x1 = std::min(r.x + r.w, dst.width), y1 = std::min(r.y + r.h, dst.height);
+  int t = r.thickness;
+  if (yuv) {
+    x0 &= ~1;
+    y0 &= ~1;
+    x1 = std::min(dst.width, (x1 + 1) & ~1);
+    y1 = std::min(dst.height, (y1 + 1) & ~1);
+    t = (t + 1) & ~1;
   }
+  if (x1 <= x0 || y1 <= y0) return false;
+  out->rect = im_rect{x0, y0, x1 - x0, y1 - y0};
+  const int w = x1 - x0, h = y1 - y0;
+  out->thickness = (w > 2 * t && h > 2 * t) ? t : 0;
+  return true;
+}
+
+// The bands an outline is made of (four, or one solid block).
+int outlineBands(const Outline& o, im_rect out[4]) noexcept {
+  const im_rect& r = o.rect;
+  const int t = o.thickness;
+  if (t <= 0) {
+    out[0] = r;
+    return 1;
+  }
+  out[0] = im_rect{r.x, r.y, r.width, t};                          // top
+  out[1] = im_rect{r.x, r.y + r.height - t, r.width, t};           // bottom
+  out[2] = im_rect{r.x, r.y + t, t, r.height - 2 * t};             // left
+  out[3] = im_rect{r.x + r.width - t, r.y + t, t, r.height - 2 * t};  // right
+  return 4;
+}
+
+// Hardware outlines on RGA2, with imrectangleArray: one submit per RUN of
+// consecutive rectangles sharing a colour and thickness. Runs rather than
+// groups so that boxes are painted in the order given, exactly like the CPU
+// path — where two boxes of different colours overlap, the later one is on
+// top on both backends, byte for byte. The solid ones (too small for an
+// outline) go with thickness -1, im2d's filled rectangle.
+void drawRectsHw(const ImageView& dst, const RectSpec* rects, std::size_t count) {
+  RCDL_REQUIRE(hwFillUsable(dst),
+               "RGA: the hardware colour fill cannot reach this destination (RGA2 has a "
+               "32-bit MMU; allocate it from the system-dma32 heap, see docs/RGA.md)");
+  const rga_buffer_t d = wrap(dst, "dst");
+  struct Item {
+    Outline o;
+    std::uint32_t abgr;
+  };
+  std::vector<Item> items;
+  items.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    Item it{};
+    it.abgr = rects[i].abgr;
+    if (outlineOf(dst, rects[i], &it.o)) items.push_back(it);
+  }
+  for (std::size_t i = 0; i < items.size();) {
+    const std::uint32_t colour = items[i].abgr;
+    const int thick = items[i].o.thickness;
+    std::vector<im_rect> batch;
+    for (; i < items.size() && items[i].abgr == colour && items[i].o.thickness == thick; ++i) {
+      batch.push_back(items[i].o.rect);
+    }
+    pinCore(kMaskRga2);
+    checkIm(imrectangleArray(d, batch.data(), static_cast<int>(batch.size()), colour,
+                             thick > 0 ? thick : -1, /*sync=*/1, /*release_fence_fd=*/nullptr),
+            "rectangle overlay", &dst);
+  }
+}
+
+// CPU outlines: map once, one coherency window for every box.
+void drawRectsCpu(const ImageView& dst, const RectSpec* rects, std::size_t count) {
+  CpuFillView cpu(dst);
+  // READ as well as write: a band edge shares its cache line with pixels the
+  // decoder wrote, so the line has to come in fresh before the CPU modifies it.
+  dmaBufSyncStart(dst.fd, /*read=*/true, /*write=*/true);
+  for (std::size_t i = 0; i < count; ++i) {
+    Outline o;
+    if (!outlineOf(dst, rects[i], &o)) continue;
+    im_rect bands[4];
+    const int n = outlineBands(o, bands);
+    for (int k = 0; k < n; ++k) fillRectCpuColor(cpu.get(), bands[k], rects[i].abgr);
+  }
+  dmaBufSyncEnd(dst.fd, /*read=*/true, /*write=*/true);
+}
+
+}  // namespace
+
+void rgaDrawRects(const ImageView& dst, const RectSpec* rects, std::size_t count,
+                  PreprocBackend backend, PreprocBackend* used) {
+  requireRga();
+  RCDL_REQUIRE(dst.valid(), "rgaDrawRects: destination view is not usable");
+  if (count == 0) return;
+  RCDL_REQUIRE(rects != nullptr, "rgaDrawRects: null rectangle array");
+  if (backend == PreprocBackend::Rga) {
+    drawRectsHw(dst, rects, count);
+    if (used != nullptr) *used = PreprocBackend::Rga;
+    return;
+  }
+  // Auto and Cpu both draw with the CPU (measured faster by an order of
+  // magnitude, see rga.h); Auto keeps the hardware as the way out for a
+  // destination the CPU cannot map at all.
+  try {
+    drawRectsCpu(dst, rects, count);
+    if (used != nullptr) *used = PreprocBackend::Cpu;
+    return;
+  } catch (const Error&) {
+    if (backend != PreprocBackend::Auto || !hwFillUsable(dst)) throw;
+  }
+  drawRectsHw(dst, rects, count);
+  if (used != nullptr) *used = PreprocBackend::Rga;
+}
+
+void rgaDrawRect(const ImageView& dst, int x, int y, int w, int h, std::uint32_t abgr,
+                 int thickness, PreprocBackend backend) {
+  const RectSpec r{x, y, w, h, abgr, thickness};
+  rgaDrawRects(dst, &r, 1, backend, nullptr);
 }
 
 #else  // ---------------------------------------------------------------------
@@ -908,9 +1117,18 @@ void rgaCropResize(const ImageView&, const ImageView&, int, int, int, int, YuvCo
 
 void rgaCopy(const ImageView&, const ImageView&) { noRga(); }
 
+bool rgaHwFillUsable(const ImageView&) noexcept { return false; }
+
 void rgaFill(const ImageView&, int, int, int, int, std::uint32_t) { noRga(); }
 
-void rgaDrawRect(const ImageView&, int, int, int, int, std::uint32_t, int) { noRga(); }
+void rgaDrawRects(const ImageView&, const RectSpec*, std::size_t, PreprocBackend,
+                  PreprocBackend*) {
+  noRga();
+}
+
+void rgaDrawRect(const ImageView&, int, int, int, int, std::uint32_t, int, PreprocBackend) {
+  noRga();
+}
 
 #endif  // RCDL_HAVE_RGA
 

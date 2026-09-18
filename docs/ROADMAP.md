@@ -471,9 +471,14 @@ with a board-verified result and a pinned test.
 - **dma-heap**: `/dev/dma_heap/system*` works unprivileged when the user is in
   the `video` group (or via a udev rule); the `cma` heap can be empty on an
   image — RK3588's NPU/RGA3/VPU all sit behind IOMMUs, so the system heap is
-  the default. RK356x (RGA2 without IOMMU) needs CMA.
-- **RGA**: RGA3 (RK3588) handles NV12 ↔ RGB888, scaling 1/16–16×, min 68×2 for
-  scaled ops, 16-byte stride alignment for YUV; `imcheck` before `improcess`.
+  the default. The RGA2 core has a 32-bit MMU: what only it can do (colour
+  fill, GRAY8, ratios beyond 8×) needs buffers from `system-dma32`
+  (`DmaBuf::Heap::SystemDma32`, `VideoDecConfig::pool_heap`). RK356x (RGA2
+  only) needs low memory throughout.
+- **RGA**: RGA3 (RK3588) handles NV12 ↔ RGB888, scaling 1/8–8× (1/16–16× is
+  RGA2's), min 68×2 for scaled ops, 16-byte stride alignment for YUV; `imcheck`
+  before `improcess`. RCDL pins the core per op — the driver load-balances and
+  the two generations resample differently. See `docs/RGA.md` §3.
   `improcess(src, dst, pat, srect, drect, prect, usage)` does crop + scale +
   cvtcolor + fill in one pass — that is the letterbox.
 - **MPP**: decoder with an external buffer group so output frames live in our

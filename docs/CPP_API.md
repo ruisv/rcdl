@@ -59,7 +59,7 @@ aligned up, and `strideAlign()` aligns what RCDL allocates — assuming
 | `preproc/image.h` | `PixelFormat`, `ImageView`, `Image`, `engineInputView`, `strideAlign` |
 | `preproc/geometry.h` | `LetterboxInfo`, `computeLetterbox`, `YuvRange`, `YuvMatrix`, `YuvColorSpace` |
 | `preproc/letterbox.h` | `letterbox` / `resize` / `cvtColor` + `PreprocBackend` |
-| `preproc/rga.h`, `preproc/letterbox_cpu.h` | the two backends, if you want one specifically |
+| `preproc/rga.h`, `preproc/letterbox_cpu.h` | the two backends, if you want one specifically; `rgaDrawRects()` is the box overlay (CPU by default, RGA2 on a dma32 frame) |
 | `media/video_codec.h`, `media/video_frame.h`, `media/jpeg_codec.h` | VPU codecs |
 | `tasks/*.h` | detection, classification, pose, instance seg, semantic seg, OBB, depth, OCR, embedding |
 | `tracks/byte_tracker.h`, `tracks/reid.h` | ByteTrack + appearance |

@@ -119,12 +119,21 @@ so **each is only valid until the next iteration** — hand it to
 
 | | |
 |---|---|
-| `VideoDecoder(codec="h264", format="nv12", external_buffers=True)` | `.feed(bytes)` / `.receive(timeout_ms)` / `.flush()` |
-| `VideoFrame` | `.width .height .width_stride .height_stride .fd .format .pts_us`, `.to_numpy()`, `.letterbox(w, h)`, `.release()` |
+| `VideoDecoder(codec="h264", format="nv12", external_buffers=True, pool_heap="system")` | `.feed(bytes)` / `.receive(timeout_ms)` / `.flush()`, `.pool_heap` |
+| `VideoFrame` | `.width .height .width_stride .height_stride .fd .format .pts_us .below_4g`, `.to_numpy()`, `.letterbox(w, h)`, `.draw_rects(boxes, color, thickness=2, backend="auto")`, `.release()` |
 | `VideoEncoder(width, height, codec="h264", bitrate_kbps=4000, rc="cbr")` | `.feed_frame(frame)` (zero copy) / `.feed(array, w, h)` / `.receive()` / `.flush()` / `.extra_data` |
 | `JpegEncoder(w, h, quality=80)` / `JpegDecoder()` | `.encode(array)` / `.encode_frame(frame)` / `.decode(bytes)` |
 
 `feed()` returning `False` is **back-pressure, not an error**: drain and retry.
+
+`frame.draw_rects(boxes, colors)` paints box outlines **in place** on the
+decoded frame — `boxes` are `(x1, y1, x2, y2)` in frame pixels, `colors` one
+`(r, g, b)` or one per box — so the annotated frame can go straight to
+`VideoEncoder.feed_frame()` without a copy. The default backend is the CPU
+(one map and one cache sync per frame, measured faster than the hardware);
+`backend="rga"` draws on the RGA2 core and needs the frames below 4 GB, i.e.
+`VideoDecoder(pool_heap="system-dma32")`. Either way the bytes are the same;
+see `docs/RGA.md` §3.
 
 ```python
 dec = rcdl.VideoDecoder(codec="h264")

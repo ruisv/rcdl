@@ -7,6 +7,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **RGA core pinning.** Every RGA op now pins the core it runs on — the RGA3
+  cores for resize / convert / letterbox / copy, RGA2 for colour fill, GRAY8
+  and scale ratios beyond 8× — instead of leaving the choice to the driver's
+  load balancer. The two generations resample differently (78% of bytes, up to
+  147 LSB, on a 1080p → 640×360 blit), so a frame that could land on either was
+  not reproducible; and on a stock kernel a job the balancer put on RGA2 failed
+  at map time on any buffer above 4 GB. `imconfig`'s scheduler setting is
+  thread-local, so pipeline workers do not interfere. Boards with one family
+  (RK356x) get the one they have.
+- **Memory below 4 GB for the RGA2 core.** `DmaBuf::Heap::SystemDma32` /
+  `SystemUncachedDma32` (the `system-dma32` dma-heaps), `DmaBuf::below4G()`,
+  `ImageView::below4g` (set by `Image::alloc` and the video decoder), and
+  `VideoDecConfig::pool_heap` (Python: `VideoDecoder(pool_heap=
+  "system-dma32")`, `VideoDecoder.pool_heap`, `VideoFrame.below_4g`). An
+  RGA2-only op — colour fill, GRAY8, a wide ratio — runs on the hardware only
+  when both buffers are flagged; `rgaCanHandle()` says no otherwise, up front,
+  and `rgaHwFillUsable(dst)` answers per buffer. The ordinary heap is no longer
+  probed on a board with more than 4 GB, so the one-time failed job and its
+  page of kernel log are gone.
+- **Batched box overlay.** `rgaDrawRects(dst, rects, n, backend, &used)` with
+  `RectSpec {x, y, w, h, abgr, thickness}`, and `VideoFrame.draw_rects(boxes,
+  color, thickness, backend)` in Python. The CPU path maps the frame once and
+  syncs the cache once for all boxes (0.3 ms for 20 boxes on 1080p, where the
+  old per-band map + sync cost milliseconds); `PreprocBackend::Rga` submits
+  `imrectangleArray` runs on RGA2 (measured slower — about 0.5 ms per box —
+  and needing a dma32 pool). Both backends produce identical bytes: clipped
+  first, even-snapped on 4:2:0, solid when too small for an outline, painted in
+  order, colour in BT.601 studio range with the hardware's integer matrix.
+  `tests/test_rga_overlay_py.py` pins this against a numpy reference.
+- `rga_probe` example: which heap the fill reaches, whether the core mask is
+  honoured and per thread, fill colour on NV12, `imrectangleArray` cost by
+  count, RGA3 vs RGA2 resampling, GRAY8 and 12× scaling on dma32 buffers.
+- `video_det_demo --overlay cpu|rga`, and its report names the pool heap and
+  the overlay backend that ran.
+
+### Changed
+- The CPU colour fill on 4:2:0 destinations now writes BT.601 **studio**-range
+  values with the classic 8-bit integer coefficients (pure red → Y=82 Cb=90
+  Cr=240), matching the hardware fill byte for byte; it wrote full-range before.
+  `rgaDrawRect()` closes an outline at the frame edge instead of dropping the
+  band that ran off it, and gains a `backend` parameter.
+- `rgaCanHandle()` accepts GRAY8 and ratios in 1/16..1/8 and 8..16 when both
+  buffers are below 4 GB; rejected outright before.
+
+### Fixed
+- Box overlays spent milliseconds per frame mapping the frame and syncing the
+  whole buffer once per band. Also documented (docs/RGA.md §3.5): under the
+  `schedutil` governor the CPU stages that follow an NPU wait run at a low
+  clock, which on this board made postproc + overlay read 15 ms instead of 1.7.
+
 - **BT.709 colour matrix** for YUV conversions. `YuvMatrix { kBt601, kBt709 }`
   and `YuvColorSpace { range, matrix }` (in `preproc/geometry.h`) replace the
   bare `YuvRange` parameter of `letterbox` / `resize` / `cvtColor` and their

@@ -114,6 +114,7 @@ struct FramePool {
   int count = 0;
   bool external = false;
   MppBufferType type = MPP_BUFFER_TYPE_DMA_HEAP;
+  DmaBuf::Heap heap = DmaBuf::Heap::System;  ///< where the slots came from
 };
 
 }  // namespace
@@ -159,6 +160,7 @@ struct VideoDecoder::Impl {
   int hor_stride = 0;
   int ver_stride = 0;
   bool info_ready = false;
+  DmaBuf::Heap pool_heap = DmaBuf::Heap::System;
   bool external = false;
   bool eos_fed = false;
   bool eos_seen = false;
@@ -470,26 +472,34 @@ struct VideoDecoder::Impl {
     ver_stride = vs;
     info_ready = true;
     external = ext;
+    pool_heap = ext && pool_ ? pool_->heap : DmaBuf::Heap::System;
   }
 
   // Try every buffer type in turn; each attempt is all-or-nothing (group +
   // every commit + handover), because a half-committed group is worse than no
   // group at all.
   bool buildExternalPool(MppBufferType first, int count, std::size_t bytes) {
-    if (tryExternalPool(first, count, bytes)) return true;
-    for (MppBufferType t : kBufferTypes) {
-      if (t == first) continue;
-      if (tryExternalPool(t, count, bytes)) return true;
+    // The requested heap first; if it is missing on this image (or refuses the
+    // allocation), the ordinary heap, so a pipeline still runs — its frames
+    // then just do not carry `below4g`, and RGA2-only ops stay off them.
+    for (DmaBuf::Heap heap : {cfg.pool_heap, DmaBuf::Heap::System}) {
+      if (tryExternalPool(first, count, bytes, heap)) return true;
+      for (MppBufferType t : kBufferTypes) {
+        if (t == first) continue;
+        if (tryExternalPool(t, count, bytes, heap)) return true;
+      }
+      if (heap == DmaBuf::Heap::System) break;
     }
     return false;
   }
 
-  bool tryExternalPool(MppBufferType type, int count, std::size_t bytes) {
+  bool tryExternalPool(MppBufferType type, int count, std::size_t bytes, DmaBuf::Heap heap) {
     auto pool = std::unique_ptr<FramePool>(new FramePool());
     pool->slot_bytes = bytes;
     pool->count = count;
     pool->external = true;
     pool->type = type;
+    pool->heap = heap;
 
     if (mpp_buffer_group_get_external(&pool->group, type) != MPP_OK ||
         pool->group == nullptr) {
@@ -502,7 +512,8 @@ struct VideoDecoder::Impl {
         // The system dma-heap is the one every unit on this SoC can import:
         // NPU, RGA and VPU all sit behind an IOMMU, so physical contiguity is
         // not required and the cached heap keeps CPU inspection affordable.
-        DmaBuf b = DmaBuf::alloc(bytes, DmaBuf::Heap::System);
+        // The dma32 variant is for frames the RGA2 core must write.
+        DmaBuf b = DmaBuf::alloc(bytes, heap);
         MppBufferInfo info;
         info.type = type;
         info.size = bytes;
@@ -630,6 +641,9 @@ struct VideoDecoder::Impl {
       }
 
       ImageView view = mpp::viewOfFrame(frame);
+      // Every slot of an external pool came from one heap, so the frame knows
+      // whether RGA2 can reach it. MPP's own pool: unknown, hence false.
+      if (pool_ && pool_->external) view.below4g = DmaBuf::heapBelow4G(pool_->heap);
       const std::uint64_t pts = static_cast<std::uint64_t>(mpp_frame_get_pts(frame));
       std::uint64_t index = 0;
       {
@@ -722,6 +736,11 @@ bool VideoDecoder::usingExternalBuffers() const noexcept {
   return impl_->external;
 }
 
+DmaBuf::Heap VideoDecoder::poolHeap() const noexcept {
+  std::lock_guard<std::mutex> lock(impl_->mu_);
+  return impl_->pool_heap;
+}
+
 #else  // !RCDL_HAVE_MPP
 
 // No MPP in this build: the class still exists and still links, but every entry
@@ -749,6 +768,8 @@ VideoCodec VideoDecoder::codec() const noexcept { return VideoCodec::H264; }
 std::uint64_t VideoDecoder::framesDecoded() const noexcept { return 0; }
 bool VideoDecoder::endOfStream() const noexcept { return false; }
 bool VideoDecoder::usingExternalBuffers() const noexcept { return false; }
+
+DmaBuf::Heap VideoDecoder::poolHeap() const noexcept { return DmaBuf::Heap::System; }
 
 #endif  // RCDL_HAVE_MPP
 
