@@ -113,7 +113,19 @@ std::vector<float> logits = e.outputAsFloat(0);
 
 基准测试（板端实测，可重跑）：[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md)。
 
-## 快速上手
+## 安装（conda）
+
+板上（linux-aarch64）一条命令，Python 绑定、C++ 库和 Rockchip 用户态库
+（`librknnrt` / `librga` / `rockchip-mpp`）一起装好；内核驱动仍来自板子镜像：
+
+```bash
+conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
+conda install -c https://mirrors.ruis.ai/conda -c conda-forge librcdl   # 只要 C++：librcdl.so + 头文件 + find_package(rcdl)
+```
+
+Python 3.9–3.14。`python -c "import rcdl; print(rcdl.rga_version())"` 能打印出 RGA 版本即装好。
+
+## 快速上手（源码构建）
 
 在板上（aarch64，已带 `librknnrt` / `librga` / `librockchip_mpp`）：
 

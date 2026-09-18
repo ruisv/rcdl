@@ -6,7 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-18
+
+First release.
+
 ### Added
+- **conda packages** on `https://mirrors.ruis.ai/conda` (linux-aarch64): `rcdl`
+  (Python bindings, 3.9–3.14) and `librcdl` (`librcdl.so`, headers,
+  `find_package(rcdl)`), plus the Rockchip userspace libraries they link —
+  `librknnrt` 2.3.2, `librga` 1.10.6 and `rockchip-mpp` 1.1.0 — so an
+  environment needs nothing from the board image but the kernel drivers. The
+  full board test suite passes against the installed packages exactly as it
+  does against a source build.
 - **RGA core pinning.** Every RGA op now pins the core it runs on — the RGA3
   cores for resize / convert / letterbox / copy, RGA2 for colour fill, GRAY8
   and scale ratios beyond 8× — instead of leaving the choice to the driver's

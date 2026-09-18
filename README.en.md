@@ -117,7 +117,21 @@ std::vector<float> logits = e.outputAsFloat(0);
 
 Benchmarks (measured on the board, regenerable): [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
-## Quick start
+## Install (conda)
+
+On the board (linux-aarch64), one command brings the Python bindings, the C++
+library and the Rockchip userspace libraries (`librknnrt` / `librga` /
+`rockchip-mpp`); the kernel drivers still come from the board image:
+
+```bash
+conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
+conda install -c https://mirrors.ruis.ai/conda -c conda-forge librcdl   # C++ only: librcdl.so + headers + find_package(rcdl)
+```
+
+Python 3.9–3.14. `python -c "import rcdl; print(rcdl.rga_version())"` printing
+the RGA version means it works.
+
+## Quick start (from source)
 
 On the board (aarch64 with `librknnrt` / `librga` / `librockchip_mpp`):
 
@@ -127,6 +141,7 @@ scripts/build.sh                     # cmake + ninja → build/
 ./build/model_info models/resnet18_rk3588.rknn        # I/O signature, runtime/driver versions, latency
 ./build/npu_bench  models/resnet18_rk3588.rknn 5 0,1,2   # three-core throughput
 ./build/dma_buf_probe                                   # is dma-heap usable by this user?
+./build/rga_probe                                       # which RGA core reaches which heap (run on a new board/kernel)
 PYTHONPATH=build:python python -m pytest tests/ --model models/resnet18_rk3588.rknn
 ```
 
