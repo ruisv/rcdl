@@ -52,6 +52,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffers are below 4 GB; rejected outright before.
 
 ### Fixed
+- `core/dma_buf.cc` did not compile against a sysroot without
+  `<linux/dma-heap.h>` — the conda-forge one, with 4.18 kernel headers: the
+  fallback definitions used `__u64` / `__u32` without including
+  `<linux/types.h>`. Found by building the conda package, which is the first
+  build that ever took that branch.
 - Box overlays spent milliseconds per frame mapping the frame and syncing the
   whole buffer once per band. Also documented (docs/RGA.md §3.5): under the
   `schedutil` governor the CPU stages that follow an NPU wait run at a low

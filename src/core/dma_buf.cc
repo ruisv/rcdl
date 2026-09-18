@@ -14,7 +14,12 @@
 
 // The dma-heap / dma-buf UAPI. Present in linux-libc-dev on any distro with a
 // 5.6+ kernel; the fallbacks below only exist so the file also compiles against
-// an older sysroot (the ioctl numbers are ABI and will not change).
+// an older sysroot (the ioctl numbers are ABI and will not change). That older
+// sysroot is a real target — the conda-forge one carries 4.18 kernel headers —
+// so the fallbacks bring their own __u32 / __u64 rather than lean on a header
+// that, by definition, was not there to include them.
+#include <linux/types.h>
+
 #if __has_include(<linux/dma-heap.h>)
 #include <linux/dma-heap.h>
 #else
