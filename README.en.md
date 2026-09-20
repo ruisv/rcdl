@@ -32,7 +32,7 @@ weeks of work. RCDL is that work, done:
 - **Each block does its own job.** The model runs on the NPU, scaling and colour conversion on RGA, codecs on the VPU. The CPU does post-processing, and the fallback when the hardware cannot.
 - **Actually zero-copy.** The decoded frame, RGA, the NPU input tensor and the encoder share one dma-buf. There is no `memcpy` between them.
 - **All three NPU cores.** The async pipeline takes detection from 99 fps to 481 fps, with results identical to the synchronous one and in order.
-- **Reproducible.** Every decoder has a numpy reference test, and 584 board tests cover the full hardware path. The things RK3588's documentation does not tell you — RGA's 4 GB line, two RGA generations that resample differently — are already handled, and written up in [`docs/RGA.md`](docs/RGA.md).
+- **Reproducible.** Every decoder has a numpy reference test, and 587 board tests cover the full hardware path. The things RK3588's documentation does not tell you — RGA's 4 GB line, two RGA generations that resample differently — are already handled, and written up in [`docs/RGA.md`](docs/RGA.md).
 
 RCDL is built on Rockchip's official runtimes. It does not replace them.
 

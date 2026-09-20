@@ -12,7 +12,9 @@ drivers, so there is nothing to install on an x86 workstation except an editor.
 | Kernel drivers | RKNPU ≥ 0.9.x (a `/dev/dri/renderD*` node), RGA (`/dev/rga`), MPP (`/dev/mpp_service`) |
 | dma-heap | `/dev/dma_heap/system` readable and writable by your user |
 
-Verified stack: kernel 6.1, RKNPU driver 0.9.8, librknnrt 2.3.2, Ubuntu 24.04.
+Verified stack: kernel 6.1, RKNPU driver 0.9.8, librknnrt 2.3.2, librga 1.10.6 —
+on Ubuntu 24.04 and on a source-built 6.1.141 image, so the suite is not tied to
+one distribution. The full board suite is 587 tests.
 
 Everything in userspace — `librknnrt`, `librga`, `librockchip_mpp`, OpenCV — comes
 with the conda packages. A vendor image that already ships them in `/usr/lib` is
