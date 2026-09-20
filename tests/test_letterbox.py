@@ -252,6 +252,49 @@ def test_rga_prefilters_on_downscale_unlike_bilinear(rga, scene):
     assert abs(hw.mean() - sw.mean()) < 3.0
 
 
+@pytest.mark.parametrize("dst_w,dst_h,bordered", [(640, 360, False), (640, 640, True)])
+@pytest.mark.parametrize("studio", [True, False])
+def test_rga_letterbox_into_nv12(rga, smooth_scene, dst_w, dst_h, bordered, studio):
+    """Regression: an RGA letterbox whose DESTINATION is YUV must reach the
+    hardware.
+
+    The legacy colour-space mode travels on the rga_buffer_t, and librga 1.10.6
+    validates the SOURCE buffer's field against a whitelist that the
+    IM_RGB_TO_YUV_* values are not on. Setting it on both buffers — which is
+    what the library did — got every RGB -> NV12 job refused with "src
+    unsupported color space mode" before a core was picked: `backend="rga"`
+    raised, and `backend="auto"` fell back to the CPU without saying so. The
+    suite missed it because cvt_color is the one entry point that does NOT carry
+    the mode on the buffers (imcvtcolor takes it as an argument), and every
+    RGB -> NV12 test went through cvt_color on the CPU backend. See
+    docs/RGA.md §5.
+
+    Both halves matter, so both are asserted: that "rga" does not raise, and
+    that "auto" actually picks RGA rather than quietly degrading.
+    """
+    kw = dict(src_fmt="bgr888", dst_fmt="nv12", pad=114, studio_range=studio, matrix="bt601")
+    hw, lb, used = rga.letterbox(smooth_scene, dst_w, dst_h, backend="rga", **kw)
+    assert used == "rga"
+    _, _, auto = rga.letterbox(smooth_scene, dst_w, dst_h, backend="auto", **kw)
+    assert auto == "rga", "Auto silently degraded to the CPU on an RGB -> NV12 letterbox"
+
+    scale, _, pad_y = lb[0], lb[1], lb[2]
+    assert hw.shape == (dst_h * 3 // 2, dst_w)
+    assert (pad_y > 0) == bordered
+
+    sw, _, _ = rga.letterbox(smooth_scene, dst_w, dst_h, backend="cpu", **kw)
+    # Compare only the image rectangle: the border is grey in the destination's
+    # own format and says nothing about the colour matrix.
+    y0, y1 = int(pad_y), int(pad_y) + int(round(smooth_scene.shape[0] * scale))
+    d = np.abs(hw[y0:y1].astype(np.int16) - sw[y0:y1].astype(np.int16))
+    print(f"\n{dst_w}x{dst_h} studio={studio}: RGA vs CPU on the NV12 luma "
+          f"max={d.max()} mean={d.mean():.3f}")
+    # Measured on this board: max 2, mean 0.82 — the resample's own ~0.35 plus
+    # the colour conversion's rounding on top of it.
+    assert d.max() <= 4, f"max |diff| = {d.max()}"
+    assert d.mean() < 1.5
+
+
 def test_rga_borders_are_pad_colour(rga, scene):
     got, _, _ = rga.letterbox(scene, 640, 640, src_fmt="bgr888", dst_fmt="rgb888",
                               pad=114, backend="rga")

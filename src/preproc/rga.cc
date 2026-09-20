@@ -144,14 +144,20 @@ constexpr int kCscUnsupported = -1;
 // IM_COLOR_SPACE_DEFAULT when both sides live in the same space and no matrix
 // is applied at all, or kCscUnsupported.
 //
-// What is supported is measured, not read off im2d_type.h (librga 1.10.4,
-// RK3588, against float references):
-//   YUV -> RGB  BT.601 limited / full, BT.709 limited   all within ±1 LSB
-//   YUV -> RGB  BT.709 full    librga refuses: "Not support full csc mode"
-//   RGB -> YUV  BT.601 limited / full                   within ±1 LSB
-//   RGB -> YUV  BT.709 (either range)  "no core match" from the driver whether
-//               the job is pinned to RGA3 or left to the scheduler; RGA2 with
-//               low buffers is untested
+// What is supported is measured, not read off im2d_type.h (librga 1.10.6,
+// RK3588, against float references over the full component cube — see
+// docs/RGA.md §5 for the method and the per-cell figures):
+//   YUV -> RGB  BT.601 limited / full, BT.709 limited   within ~1 LSB (1.05 at
+//               worst, on BT.601 limited; RGA2 is looser than RGA3 on BT.709)
+//   YUV -> RGB  BT.709 full    no such mode in the legacy enum, and the
+//               full-CSC form is refused by the hardware ("coef ... integer
+//               parts greater than 0 are not supported")
+//   RGB -> YUV  BT.601 limited / full                   within 1 LSB
+//   RGB -> YUV  BT.709 limited  RGA2 with both buffers in dma32 DOES perform
+//               it (RGA3 and the default scheduler do not), but lands 3 LSB
+//               from the reference, so it stays on the CPU
+//   RGB -> YUV  BT.709 full    no legacy mode; the full-CSC form runs it on
+//               RGA2/dma32 within 0.56 LSB, measured but not wired up
 int cscMode(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) noexcept {
   const bool src_yuv = isYuvSide(src.format);
   const bool dst_yuv = isYuvSide(dst.format);
@@ -195,12 +201,22 @@ int requireCsc(const ImageView& src, const ImageView& dst, YuvColorSpace yuv) {
 }
 
 // The mode is carried on the buffers rather than as a call argument for
-// improcess(). Which channel librga reads it from depends on the direction, and
-// the two fields are combined, so writing the same value on both is both safe
-// and direction-independent.
-void applyCsc(rga_buffer_t* s, rga_buffer_t* d, int mode) {
+// improcess(), and it goes on the DESTINATION only.
+//
+// Writing it on both — which this did until the table in docs/RGA.md §5 was
+// re-measured on librga 1.10.6 — breaks every RGB -> YUV job: the library
+// validates the SOURCE buffer's colour-space field against a whitelist that the
+// IM_RGB_TO_YUV_* values are not on, and refuses with "src unsupported color
+// space mode" before a core is picked, on any heap and with any core mask. That
+// took out rgaLetterbox / rgaResize / rgaCropResize into a YUV destination
+// (PreprocBackend::Auto fell back to the CPU without saying so; ::Rga threw).
+// Destination-only is pixel-identical for YUV -> RGB, so this is not a
+// direction-dependent rule — measured in both directions, see docs/RGA.md §5.
+//
+// rgaCvtColor does not come through here at all: imcvtcolor() takes the mode as
+// a call argument.
+void applyCsc(rga_buffer_t* d, int mode) {
   if (mode == IM_COLOR_SPACE_DEFAULT) return;
-  imsetColorSpace(s, static_cast<IM_COLOR_SPACE_MODE>(mode));
   imsetColorSpace(d, static_cast<IM_COLOR_SPACE_MODE>(mode));
 }
 
@@ -830,7 +846,7 @@ LetterboxInfo rgaLetterbox(const ImageView& dst, const ImageView& src, std::uint
 
   // 2. Crop, scale and colour-convert into the centred rectangle in one pass,
   //    on top of the grey the step above laid down.
-  applyCsc(&s, &d, csc);
+  applyCsc(&d, csc);
   process(s, d, srect, drect, src, dst, "letterbox blit", core);
 
   // 3. Border, the fallback: the CPU paints only the bands the blit did not
@@ -865,7 +881,7 @@ LetterboxInfo rgaResize(const ImageView& dst, const ImageView& src, YuvColorSpac
   const im_rect srect{0, 0, src.width, src.height};
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "resize");
-  applyCsc(&s, &d, requireCsc(src, dst, yuv));
+  applyCsc(&d, requireCsc(src, dst, yuv));
   process(s, d, srect, drect, src, dst, "resize", requireCore(src, dst));
 
   LetterboxInfo lb;
@@ -913,7 +929,7 @@ void rgaCropResize(const ImageView& dst, const ImageView& src, int x, int y, int
   const im_rect srect{x, y, w, h};
   const im_rect drect{0, 0, dst.width, dst.height};
   checkPair(s, d, srect, drect, src, dst, "cropResize");
-  applyCsc(&s, &d, requireCsc(src, dst, yuv));
+  applyCsc(&d, requireCsc(src, dst, yuv));
   // The ratio is that of the crop, not of the whole source.
   ImageView crop = src;
   crop.width = w;

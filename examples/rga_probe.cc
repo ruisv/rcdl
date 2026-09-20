@@ -13,7 +13,9 @@
 //   5. fill colour on an NV12 destination        (does the driver convert RGB -> YUV?)
 //   6. imrectangleArray with many boxes          (one submit per frame; task-count limit)
 //   7. NV12 -> RGB888 letterbox on RGA3 vs RGA2  (do the two cores resample identically?)
-//   8. RGB -> YUV BT.709 pinned to RGA3          (the driver advertises it; librga routes it to RGA2)
+//   8. RGB -> YUV BT.709                         (must FAIL on RGA3: docs/RGA.md §5 keeps this cell
+//                                                 on the CPU. Only RGA2 with dma32 buffers performs
+//                                                 it, and only when the mode is on the dst buffer.)
 //   9. GRAY8 and >8x scaling on RGA2 with dma32 buffers
 
 #include <chrono>
@@ -82,11 +84,17 @@ IM_STATUS fill(Buf& d, int x, int y, int w, int h, uint32_t abgr) {
   return imfill_t(d.r, r, static_cast<int>(abgr), 1);
 }
 
+// `csc_on_src` mirrors applyCsc() in preproc/rga.cc, which writes the legacy
+// mode on both buffers. librga 1.10.6 validates the SOURCE field against a
+// whitelist that the IM_RGB_TO_YUV_* values are not on, so an RGB -> YUV job
+// carrying the mode on the source is refused before any core sees it; the same
+// job with the mode on the destination alone runs. Passing this explicitly is
+// what lets case 8 tell the two apart.
 IM_STATUS blit(Buf& s, Buf& d, int mask, int csc = IM_COLOR_SPACE_DEFAULT,
-               im_rect drect = im_rect{}) {
+               im_rect drect = im_rect{}, bool csc_on_src = true) {
   rga_buffer_t src = s.r, dst = d.r, pat{};
   if (csc != IM_COLOR_SPACE_DEFAULT) {
-    imsetColorSpace(&src, static_cast<IM_COLOR_SPACE_MODE>(csc));
+    if (csc_on_src) imsetColorSpace(&src, static_cast<IM_COLOR_SPACE_MODE>(csc));
     imsetColorSpace(&dst, static_cast<IM_COLOR_SPACE_MODE>(csc));
   }
   const im_rect srect{0, 0, s.w, s.h};
@@ -229,14 +237,24 @@ int run() {
         blit(frame, outsys, kRga2, IM_YUV_TO_RGB_BT601_LIMIT), false);
   }
 
-  std::printf("8. RGB888 -> NV12 in BT.709, pinned to RGA3\n");
+  std::printf("8. RGB888 -> NV12 in BT.709 (the cell docs/RGA.md §5 keeps on the CPU)\n");
   {
     Buf src = rgb(DmaBuf::Heap::System, 640, 360);
     Buf dst = nv12(DmaBuf::Heap::System, 640, 360);
     say("RGB -> YUV BT.709 limited on RGA3", blit(src, dst, kRga3, IM_RGB_TO_YUV_BT709_LIMIT),
-        true);
+        false);
     say("RGB -> YUV BT.709 limited, default scheduling",
-        blit(src, dst, IM_SCHEDULER_DEFAULT, IM_RGB_TO_YUV_BT709_LIMIT), true);
+        blit(src, dst, IM_SCHEDULER_DEFAULT, IM_RGB_TO_YUV_BT709_LIMIT), false);
+    // Same job, mode on the destination only: now librga lets it through, and
+    // RGA2 with dma32 buffers is the one core that performs it. Still not good
+    // enough to enable — measured max |diff| 3 LSB against the float reference,
+    // where every cell the library does use stays within ~1. See docs/RGA.md §5.
+    Buf src2 = rgb(DmaBuf::Heap::SystemDma32, 640, 360);
+    Buf dst2 = nv12(DmaBuf::Heap::SystemDma32, 640, 360);
+    say("RGB -> YUV BT.709, mode on src+dst (what applyCsc does)",
+        blit(src2, dst2, kRga2, IM_RGB_TO_YUV_BT709_LIMIT, im_rect{}, true), false);
+    say("RGB -> YUV BT.709 on RGA2/dma32, mode on dst only",
+        blit(src2, dst2, kRga2, IM_RGB_TO_YUV_BT709_LIMIT, im_rect{}, false), true);
   }
 
   std::printf("9. RGA2-only formats and ratios, on dma32 buffers\n");

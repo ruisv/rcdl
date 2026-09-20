@@ -339,19 +339,67 @@ it and means BT.601, so existing code is unchanged. The task configs carry a
 `yuv_matrix` field next to `yuv_range`; in Python it is
 `matrix="bt601" | "bt709"` next to `studio_range=`.
 
-RGA does not cover every combination. Measured on RK3588 (librga 1.10.4), each
-supported mode within ±1 LSB of the float reference:
+RGA does not cover every combination. Measured on RK3588 (librga 1.10.6)
+against a float reference, over a test image that walks the whole 16×16×16
+component cube and is constant within every 2×2 block so that 4:2:0
+subsampling contributes no error of its own:
 
 | | BT.601 limited | BT.601 full | BT.709 limited | BT.709 full |
 |---|---|---|---|---|
-| YUV → RGB | RGA | RGA | RGA | CPU — librga has no mode |
-| RGB → YUV | RGA | RGA | CPU — no core accepts the job | CPU |
+| YUV → RGB | RGA, ±1.1 | RGA, ±0.8 | RGA, ±1.0 | CPU — no mode in im2d |
+| RGB → YUV | RGA, ±1.0 | RGA, ±0.9 | CPU — RGA2 only, ±3 | CPU — no mode in im2d |
 
 `rgaCanHandle()` answers no for the CPU cells, so `PreprocBackend::Auto` takes
 the CPU path up front instead of paying a failed ioctl; `PreprocBackend::Rga`
 throws. The CPU path implements all four in both directions. For the
 detection hot path (decoded HD NV12 → RGB888 at studio swing) BT.709 stays on
 the hardware.
+
+Four things behind that table are worth knowing before changing it:
+
+- **The legacy enum has no BT.709 full-range entry in either direction.**
+  `IM_YUV_TO_RGB_*` and `IM_RGB_TO_YUV_*` each stop at `BT709_LIMIT`, which is
+  what puts those two cells on the CPU — not a core or a memory problem.
+- **The newer full-CSC form does not rescue them.** Setting per-buffer
+  `IM_YUV_BT709_FULL_RANGE` / `IM_RGB_FULL` spaces instead of a legacy mode,
+  YUV → RGB BT.709 full is refused by the hardware itself (`coef[0x400] with
+  integer parts greater than 0 are not supported`). RGB → YUV BT.709 full *does*
+  run that way, on RGA2 with dma32 buffers, within 0.56 LSB — accurate enough to
+  enable, but it needs the full-CSC form, so it is measured and not wired up.
+- **RGB → YUV BT.709 limited is not "no core accepts the job"** (what an
+  earlier measurement recorded). RGA2 with both buffers in dma32 performs it;
+  it is kept on the CPU because it lands 3 LSB from the reference, where every
+  cell the library does use stays within ~1.
+- **The two cores do not agree on YUV → RGB BT.709 limited.** RGA3 is within
+  0.99 LSB, RGA2 within 1.38 (165 of 12288 samples past 1 LSB). Pin BT.709
+  conversions to RGA3 where the buffers allow it.
+
+The ±1 LSB in the table is a rounding bound, not an exact one: BT.601 limited
+YUV → RGB peaks at 1.05, so a test asserting `max <= 1` on hardware output will
+flake. Assert `<= 2`.
+
+### Which buffer carries the mode
+
+The legacy mode travels on the `rga_buffer_t`, and librga 1.10.6 validates the
+**source** buffer's `color_space_mode` against a whitelist that the
+`IM_RGB_TO_YUV_*` values are not on. An RGB → YUV job that carries the mode on
+the source is therefore refused with `src unsupported color space mode` before
+any core sees it, whatever the heap and whatever the core mask. The same job
+with the mode on the **destination alone** runs, and YUV → RGB is indifferent —
+destination-only produces pixel-identical output to writing it on both. So:
+write the legacy CSC mode on the destination buffer only.
+
+`rgaCvtColor()` sidesteps all of this because `imcvtcolor()` takes the mode as
+a call argument rather than off the buffers.
+
+On an **older librga** (1.10.4 was the previous measurement here) the source
+field was not validated and writing the mode on both buffers worked. Writing it
+on the destination alone is the safe choice for both: the YUV → RGB and
+RGB → YUV bits sit at different positions in the one `color_space_mode` word
+and librga combines the two buffers' values, so destination-only presents the
+same combined mode that writing on both used to — it just has nothing on the
+source for a newer library to reject. Measured on 1.10.6; on 1.10.4 this
+follows from the combining behaviour rather than from a fresh measurement.
 
 ## 6. Strides are in pixels, and they are not the width
 

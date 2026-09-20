@@ -6,7 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **RGA-backed `letterbox` / `resize` / `cropResize` into a YUV destination did
+  not reach the hardware.** librga 1.10.6 validates the *source* buffer's
+  colour-space field against a whitelist that the `IM_RGB_TO_YUV_*` values are
+  not on, and the library wrote the legacy mode on both buffers, so every
+  RGB → NV12 job was refused with `src unsupported color space mode` before a
+  core was picked: `PreprocBackend::Rga` threw and `::Auto` fell back to the CPU
+  without saying so. The mode now goes on the destination buffer only, which is
+  pixel-identical for YUV → RGB. `cvtColor` was never affected —
+  `imcvtcolor()` takes the mode as a call argument — which is why the existing
+  RGB → NV12 coverage, all of it on the CPU backend through `cvt_color`, missed
+  this. Covered now by `test_rga_letterbox_into_nv12`, which asserts both that
+  `backend="rga"` runs and that `backend="auto"` does not quietly degrade.
+- `rga_probe` case 8 asserted that RGB → YUV BT.709 succeeds on RGA3, which
+  contradicted the colour-matrix table in `docs/RGA.md` and made every run
+  report a spurious `<-- unexpected`. The expectation now matches the measured
+  behaviour, and the case additionally covers the one configuration that does
+  perform the conversion (RGA2 with dma32 buffers, colour-space mode on the
+  destination buffer only).
+
 ### Changed
+- **The RGA colour-matrix table in `docs/RGA.md` §5 is re-measured on librga
+  1.10.6**, against a float reference over the full component cube, with
+  per-cell error figures instead of a blanket "±1 LSB" (BT.601 limited
+  YUV → RGB actually peaks at 1.05, so a `max <= 1` assertion on hardware
+  output flakes). Three corrections: BT.709 full range is missing from the
+  legacy `IM_*` enum in *both* directions rather than being a core or memory
+  limitation; RGB → YUV BT.709 limited is performed by RGA2 with dma32 buffers,
+  and is kept on the CPU because it lands 3 LSB out, not because no core
+  accepts it; and RGA2 and RGA3 disagree on YUV → RGB BT.709 limited, with RGA3
+  the accurate one. The section also now records which buffer may carry the
+  colour-space mode, and that `imcheck` and `improcess` do not agree about it.
 - **README rewritten for users**: install first, runnable quick starts (image
   detection, video in / annotated video out, C++ with `find_package`), a task
   table with entry points and verified models, where to get models, and a
