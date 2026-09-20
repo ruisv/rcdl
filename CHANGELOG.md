@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-20
+
 ### Fixed
 - **RGA-backed `letterbox` / `resize` / `cropResize` into a YUV destination did
   not reach the hardware.** librga 1.10.6 validates the *source* buffer's
@@ -19,6 +21,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RGB → NV12 coverage, all of it on the CPU backend through `cvt_color`, missed
   this. Covered now by `test_rga_letterbox_into_nv12`, which asserts both that
   `backend="rga"` runs and that `backend="auto"` does not quietly degrade.
+
+  **This affects the published 0.1.0 packages**, and not only on a board whose
+  image carries librga 1.10.6: the conda packages bring that librga with them,
+  so a 0.1.0 install hits it whatever the board image ships. Upgrade if you
+  letterbox, resize or crop-resize into an NV12 (or any YUV) destination —
+  under the default `auto` backend the symptom is silent: correct pixels at CPU
+  speed. `cvtColor` / `cvt_color` was never affected.
 - `rga_probe` case 8 asserted that RGB → YUV BT.709 succeeds on RGA3, which
   contradicted the colour-matrix table in `docs/RGA.md` and made every run
   report a spurious `<-- unexpected`. The expectation now matches the measured
