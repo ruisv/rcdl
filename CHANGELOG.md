@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
 ### Added
 - **Speech: a whole voice pipeline on the NPU.** Wake word (`KeywordSpotter`,
   sherpa-onnx's open-vocabulary zipformer transducer, so a new wake word is a

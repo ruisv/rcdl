@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "rcdl"
-version = "0.1.1"
+version = "0.2.0"
 description = "RKNPU inference & media library for Rockchip RK3588 / RK3576 / RK356x, with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"

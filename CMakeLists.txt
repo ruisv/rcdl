@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(rcdl LANGUAGES CXX VERSION 0.1.1)
+project(rcdl LANGUAGES CXX VERSION 0.2.0)
 
 # --- Guard: this project only builds on an aarch64 Rockchip board -------------
 # The RKNPU2 runtime, RGA and MPP are aarch64 userspace libraries that talk to
