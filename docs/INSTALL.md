@@ -39,6 +39,17 @@ sudo udevadm control --reload && sudo udevadm trigger
 
 ## conda (recommended)
 
+No conda on the board yet? Install [Miniforge](https://github.com/conda-forge/miniforge)
+once:
+
+```bash
+curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh
+bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init && exec "$SHELL"
+```
+
+Then, in a new environment (or `conda install` the same channels into one you
+already have):
+
 ```bash
 conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
 conda activate rcdl
@@ -50,6 +61,13 @@ python -c "import rcdl; print(rcdl.__version__); print(rcdl.rga_version())"
 | `rcdl` | Python bindings (3.9–3.14); depends on `librcdl` |
 | `librcdl` | `librcdl.so`, headers, `find_package(rcdl)` CMake config |
 | `librknnrt` · `librga` · `rockchip-mpp` | Rockchip's userspace libraries and headers, pulled in automatically |
+
+Then fetch a model. The prebuilt ones are on Hugging Face (see
+[`model_zoo/README.md`](../model_zoo/README.md)):
+
+```bash
+curl -LO https://huggingface.co/ruisv/rcdl-yolo/resolve/main/yolov8n_rk3588.rknn
+```
 
 To make the channel permanent for an environment:
 
@@ -101,7 +119,9 @@ Then:
 PYTHONPATH=build:python python -m pytest tests/ --model model.rknn
 ```
 
-Tests that need a model or a video stream skip cleanly when it is not there.
+`scripts/fetch_models.sh` puts every published model into `models/`, where the
+tests, examples and benchmarks look first. Tests that need a model or a video
+stream skip cleanly when it is not there.
 
 ## Troubleshooting
 

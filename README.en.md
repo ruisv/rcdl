@@ -8,9 +8,12 @@ One C++ / Python API over VPU codecs → RGA preprocessing → NPU inference →
 <img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg" alt="C++17">
 <img src="https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg" alt="python">
 <img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20linux--aarch64-0A7BBB.svg" alt="platform">
+<a href="model_zoo/README.md"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-FFD21E.svg" alt="models on Hugging Face"></a>
 </p>
 
 <p align="center"><b>English</b> | <a href="README.md">简体中文</a></p>
+
+<p align="center"><a href="#install">Install</a> · <a href="#quick-start">Quick start</a> · <a href="#tasks">Tasks</a> · <a href="#performance">Performance</a> · <a href="#models">Models</a> · <a href="#documentation">Documentation</a> · <a href="#community">Community</a></p>
 
 | | | |
 |:--:|:--:|:--:|
@@ -38,7 +41,7 @@ RCDL is built on Rockchip's official runtimes. It does not replace them.
 
 ## Install
 
-On the board (linux-aarch64), one command:
+On the board (linux-aarch64), one command from our conda channel:
 
 ```bash
 conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
@@ -48,7 +51,15 @@ python -c "import rcdl; print(rcdl.__version__, rcdl.rga_version())"
 
 That brings the Python bindings, the C++ library and the Rockchip userspace
 libraries (`librknnrt` 2.3.2, `librga`, `rockchip-mpp`). The board image only
-has to provide the kernel drivers. For C++ only, install `librcdl`.
+has to provide the kernel drivers. To add RCDL to an environment you already
+have, replace `create -n rcdl` with `install`. For C++ only, install `librcdl`.
+
+No conda on the board yet? Install [Miniforge](https://github.com/conda-forge/miniforge) once:
+
+```bash
+curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh
+bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init && exec "$SHELL"
+```
 
 **Requirements:** an RK3588 / RK3588S board, Linux aarch64, RKNPU driver ≥ 0.9.x,
 and your user in the `video` and `render` groups. RK3576 / RK356x are not yet verified.
@@ -57,7 +68,12 @@ Building from source, permissions and troubleshooting are in
 
 ## Quick start
 
-You need a `.rknn` compiled for your SoC — see [Models](#models).
+First download a compiled model (YOLOv8n, 4 MB) and a test image. The other models are listed under [Models](#models):
+
+```bash
+curl -LO https://huggingface.co/ruisv/rcdl-yolo/resolve/main/yolov8n_rk3588.rknn
+curl -LO https://raw.githubusercontent.com/ruisv/rcdl/main/data/images/bus.jpg
+```
 
 **Find objects in an image (Python)**
 
@@ -157,10 +173,25 @@ rerun it are in [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
 ## Models
 
-RCDL consumes compiled `.rknn` files. This repository does not distribute model weights.
+Compiled `.rknn` files, verified on the board, are published on Hugging Face and
+load as downloaded. Each repo's model card gives the measured speed and accuracy,
+a working snippet, and what to know before deploying:
 
-- **Ready-made:** Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) has download scripts and conversion examples for the YOLO family, RetinaFace, PP-OCR, PP-LiteSeg, ResNet and more, and its YOLO export layout is the one RCDL's decoders read.
-- **Your own:** convert from ONNX with [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) on an x86 host. A `.rknn` is tied to one SoC, and the toolkit version must not be newer than the runtime on the board.
+| repo | what is in it | licence |
+|---|---|---|
+| [`ruisv/rcdl-yolo`](https://huggingface.co/ruisv/rcdl-yolo) | YOLOv8n · YOLO11n · YOLO26n: detection, instance segmentation, pose, oriented boxes, classification | **AGPL-3.0** |
+| [`ruisv/rcdl-ppocr`](https://huggingface.co/ruisv/rcdl-ppocr) | PP-OCR v4 · v5 · v6: text detection, direction and recognition, with dictionaries | Apache-2.0 |
+| [`ruisv/rcdl-depth-anything-v2-small`](https://huggingface.co/ruisv/rcdl-depth-anything-v2-small) | monocular relative depth | Apache-2.0 |
+| [`ruisv/rcdl-siglip-b16`](https://huggingface.co/ruisv/rcdl-siglip-b16) | image embeddings, zero-shot classification | Apache-2.0 |
+| [`ruisv/rcdl-xfeat`](https://huggingface.co/ruisv/rcdl-xfeat) | sparse features and matching | Apache-2.0 |
+| [`ruisv/rcdl-superres`](https://huggingface.co/ruisv/rcdl-superres) | ×4 super-resolution | BSD-3-Clause |
+
+From a checkout, `scripts/fetch_models.sh` fetches all of them into `models/` and
+checks each against its SHA-256. `HF_ENDPOINT` points it at a mirror.
+
+- **The YOLO family is Ultralytics' AGPL-3.0.** Software that ships these models or serves them over a network falls under AGPL-3.0 too; closed-source or commercial use needs an Ultralytics Enterprise licence.
+- **Why the other verified models are not published** (non-commercial terms inherited from pretrained weights or training data, or no licence stated upstream) is set out model by model in [`model_zoo/README.md`](model_zoo/README.md).
+- **For those and for your own models,** convert from ONNX with [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) on an x86 host. A `.rknn` is tied to one SoC, and the toolkit version must not be newer than the runtime on the board. Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) has download scripts and conversion examples, and its YOLO export layout is the one RCDL's decoders read.
 - [`docs/MODELS.md`](docs/MODELS.md) lists, for every verified model, the input format, channel order, whether the activation is inside the graph, and the conversion traps actually hit. Channel order and activation placement cannot be read from a `.rknn`, and getting them wrong only costs accuracy silently.
 
 ## How it works
@@ -192,6 +223,7 @@ only when the CPU touches a buffer, and never on the pure hardware path.
 | [`docs/API.md`](docs/API.md) | Python API |
 | [`docs/CPP_API.md`](docs/CPP_API.md) | C++ API |
 | [`docs/MODELS.md`](docs/MODELS.md) | verified models, each model's input contract, conversion notes |
+| [`model_zoo/README.md`](model_zoo/README.md) | prebuilt models on Hugging Face, and what each model's licence allows |
 | [`docs/RGA.md`](docs/RGA.md) | what RGA on RK3588 will and will not do, all of it measured |
 | [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) | per-task latency and results, rerunnable on your board |
 | [`CHANGELOG.md`](CHANGELOG.md) | release notes |
@@ -228,6 +260,20 @@ other Rockchip SoCs are all valuable. Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
 first. For a bug report, include the SoC, the output of `model_info`, and a
 minimal reproduction.
 
+## Community
+
+Join the **RCDL tech chat group** to discuss NPU / RGA / VPU deployment on
+Rockchip RK3588 and using this project.
+
+<img src="https://ruisv.oss-cn-beijing.aliyuncs.com/public/rdk/images/rcdl-qrcode.jpg" alt="RCDL chat group QR" width="240">
+
+> WeChat group QR codes expire; the image above is refreshed in place at the same
+> link. If scanning still fails, open an [Issue](../../issues) — you're also
+> welcome to just discuss there.
+
+Sister projects on D-Robotics RDK boards: [**BCDL**](https://github.com/ruisv/bcdl)
+(vision) and [**BLLM**](https://github.com/ruisv/bllm) (on-device LLMs).
+
 ## Acknowledgements
 
 - **Rockchip** — the RK3588 platform, the RKNPU2 runtime and rknn-toolkit2, RGA, MPP.
@@ -237,4 +283,5 @@ minimal reproduction.
 ## License
 
 [Apache License 2.0](LICENSE). Rockchip's runtime libraries carry their own
-licenses, and model weights carry those of their upstreams.
+licenses, and model weights carry those of their upstreams; see
+[`model_zoo/README.md`](model_zoo/README.md).

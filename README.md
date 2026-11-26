@@ -8,9 +8,12 @@
 <img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg" alt="C++17">
 <img src="https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg" alt="python">
 <img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20linux--aarch64-0A7BBB.svg" alt="platform">
+<a href="model_zoo/README.md"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-FFD21E.svg" alt="models on Hugging Face"></a>
 </p>
 
 <p align="center"><a href="README.en.md">English</a> | <b>简体中文</b></p>
+
+<p align="center"><a href="#安装">安装</a> · <a href="#快速上手">快速上手</a> · <a href="#支持的任务">支持的任务</a> · <a href="#性能">性能</a> · <a href="#模型">模型</a> · <a href="#文档">文档</a> · <a href="#社区交流">社区交流</a></p>
 
 | | | |
 |:--:|:--:|:--:|
@@ -37,7 +40,7 @@ RCDL 构建在 Rockchip 官方运行时之上，不是取代它。
 
 ## 安装
 
-在板子上（linux-aarch64）一条命令：
+在板子上（linux-aarch64），从我们的 conda 源一条命令装好：
 
 ```bash
 conda create -n rcdl -c https://mirrors.ruis.ai/conda -c conda-forge rcdl
@@ -46,14 +49,27 @@ python -c "import rcdl; print(rcdl.__version__, rcdl.rga_version())"
 ```
 
 Python 绑定、C++ 库和 Rockchip 用户态库（`librknnrt` 2.3.2、`librga`、`rockchip-mpp`）一起装好，
-板子镜像只需要提供内核驱动。只用 C++ 的话装 `librcdl`。
+板子镜像只需要提供内核驱动。已经有 conda 环境的话，把 `create -n rcdl` 换成 `install` 装进当前环境；
+只用 C++ 的话装 `librcdl`。
+
+板子上还没有 conda，就先装一次 [Miniforge](https://github.com/conda-forge/miniforge)：
+
+```bash
+curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh
+bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init && exec "$SHELL"
+```
 
 **要求：** RK3588 / RK3588S 开发板，Linux aarch64，RKNPU 驱动 ≥ 0.9.x，当前用户在 `video` 和 `render` 组里。
 RK3576 / RK356x 尚未验证。源码构建、权限设置和常见问题见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ## 快速上手
 
-需要一个为你的芯片编译好的 `.rknn` 模型，获取方式见[模型](#模型)一节。
+先下载一个编译好的模型（YOLOv8n，4 MB）和一张测试图。其他模型见[模型](#模型)一节：
+
+```bash
+curl -LO https://huggingface.co/ruisv/rcdl-yolo/resolve/main/yolov8n_rk3588.rknn
+curl -LO https://raw.githubusercontent.com/ruisv/rcdl/main/data/images/bus.jpg
+```
 
 **一张图片里找目标（Python）**
 
@@ -146,10 +162,22 @@ RK3588S 实测（librknnrt 2.3.2，驱动 0.9.8），完整表格和复现方法
 
 ## 模型
 
-RCDL 只消费编译好的 `.rknn`，本仓库不分发模型权重。
+编译好、在板上验证过的 `.rknn` 发布在 Hugging Face，下载即可加载。每个仓库的 model card 写明了实测速度和精度、可运行的示例，以及部署前要知道的事：
 
-- **现成的：** Rockchip 的 [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) 为 YOLO 系列、RetinaFace、PP-OCR、PP-LiteSeg、ResNet 等提供下载脚本和转换示例，它的 YOLO 导出布局正是 RCDL 解码器读的那种。
-- **自己转：** 用 [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) 在 x86 主机上从 ONNX 转换。`.rknn` 和芯片型号绑定，转换用的 toolkit 版本不能高于板上运行时的版本。
+| 仓库 | 内容 | 许可证 |
+|---|---|---|
+| [`ruisv/rcdl-yolo`](https://huggingface.co/ruisv/rcdl-yolo) | YOLOv8n · YOLO11n · YOLO26n：检测、实例分割、姿态、旋转框、分类 | **AGPL-3.0** |
+| [`ruisv/rcdl-ppocr`](https://huggingface.co/ruisv/rcdl-ppocr) | PP-OCR v4 · v5 · v6：文字检测、方向、识别，附字典 | Apache-2.0 |
+| [`ruisv/rcdl-depth-anything-v2-small`](https://huggingface.co/ruisv/rcdl-depth-anything-v2-small) | 单目相对深度 | Apache-2.0 |
+| [`ruisv/rcdl-siglip-b16`](https://huggingface.co/ruisv/rcdl-siglip-b16) | 图像向量、零样本分类 | Apache-2.0 |
+| [`ruisv/rcdl-xfeat`](https://huggingface.co/ruisv/rcdl-xfeat) | 稀疏特征与匹配 | Apache-2.0 |
+| [`ruisv/rcdl-superres`](https://huggingface.co/ruisv/rcdl-superres) | ×4 超分 | BSD-3-Clause |
+
+在源码仓库里，`scripts/fetch_models.sh` 一条命令把它们全部拉到 `models/`，并逐个校验 SHA-256。国内网络可以先 `export HF_ENDPOINT=https://hf-mirror.com`。
+
+- **YOLO 系列是 Ultralytics 的 AGPL-3.0 模型。** 随软件分发或通过网络提供服务，你的软件也要遵守 AGPL-3.0；闭源或商用需要 Ultralytics 的企业授权。
+- **其余已验证的模型为什么没有发布**（预训练权重或训练数据带来的非商用限制、上游没有写许可证）逐个写在 [`model_zoo/README.md`](model_zoo/README.md)。
+- **这些模型和你自己的模型，** 用 [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) 在 x86 主机上从 ONNX 转换。`.rknn` 和芯片型号绑定，转换用的 toolkit 版本不能高于板上运行时的版本。Rockchip 的 [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) 有下载脚本和转换示例，它的 YOLO 导出布局正是 RCDL 解码器读的那种。
 - [`docs/MODELS.md`](docs/MODELS.md) 列出了每个已验证模型的输入格式、通道顺序、激活函数在图内还是图外，以及转换时实际踩过的坑。通道顺序和激活位置这两项从 `.rknn` 文件里读不出来，填错只会悄悄掉精度。
 
 ## 工作原理
@@ -179,6 +207,7 @@ CPU 需要碰缓冲区时才做 cache 同步，纯硬件路径上一次都不做
 | [`docs/API.md`](docs/API.md) | Python API |
 | [`docs/CPP_API.md`](docs/CPP_API.md) | C++ API |
 | [`docs/MODELS.md`](docs/MODELS.md) | 已验证模型、各模型的输入约定、转换注意事项 |
+| [`model_zoo/README.md`](model_zoo/README.md) | Hugging Face 上的预编译模型，以及每个模型的许可证能允许什么 |
 | [`docs/RGA.md`](docs/RGA.md) | RK3588 上 RGA 能做什么、不能做什么，全部带实测数据 |
 | [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) | 各任务延迟与结果，可在你的板子上重跑 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本记录 |
@@ -213,6 +242,18 @@ CPU 需要碰缓冲区时才做 cache 同步，纯硬件路径上一次都不做
 欢迎提 issue 和 PR：bug、新的任务解码器、其他 Rockchip 芯片上的验证结果都很有价值。
 动手前请看 [`CONTRIBUTING.md`](CONTRIBUTING.md)。报 bug 时请附上芯片型号、`model_info` 的输出和最小复现。
 
+## 社区交流
+
+欢迎加入 **RCDL 技术交流群**，一起讨论 Rockchip RK3588 上的 NPU / RGA / VPU 部署与本项目的使用。
+
+<img src="https://ruisv.oss-cn-beijing.aliyuncs.com/public/rdk/images/rcdl-qrcode.jpg" alt="RCDL 交流群二维码" width="240">
+
+> 微信群二维码有有效期，上面这张会在同一链接上原地更新；若扫码仍失效，
+> 请在 [Issues](../../issues) 留言，也欢迎直接在 Issues 交流。
+
+D-Robotics RDK 板子上的姊妹项目：[**BCDL**](https://github.com/ruisv/bcdl)（视觉）和
+[**BLLM**](https://github.com/ruisv/bllm)（端侧大模型）。
+
 ## 致谢
 
 - **Rockchip**：RK3588 平台、RKNPU2 运行时与 rknn-toolkit2、RGA、MPP。
@@ -221,4 +262,4 @@ CPU 需要碰缓冲区时才做 cache 同步，纯硬件路径上一次都不做
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)。Rockchip 的运行时库遵循其各自的许可证；模型权重遵循各自上游的许可证。
+[Apache License 2.0](LICENSE)。Rockchip 的运行时库遵循其各自的许可证；模型权重遵循各自上游的许可证，见 [`model_zoo/README.md`](model_zoo/README.md)。

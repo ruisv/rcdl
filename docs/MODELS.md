@@ -1,12 +1,16 @@
 # Models
 
-RCDL consumes finished `.rknn` files and does not distribute model weights.
-Conversion from ONNX (rknn-toolkit2: PTQ, `accuracy_analysis`, hybrid
-quantization) runs on an **x86 host** — the toolkit is x86-only, and the board
-carries only the runtime.
+RCDL consumes finished `.rknn` files. The verified builds whose licences allow
+it are published on Hugging Face, ready to load. The list, the download
+commands, and the reason each other model is not published are in
+[`model_zoo/README.md`](../model_zoo/README.md). Conversion from ONNX
+(rknn-toolkit2: PTQ, `accuracy_analysis`, hybrid quantization) runs on an **x86
+host** — the toolkit is x86-only, and the board carries only the runtime.
 
 Where to get a model:
 
+- The prebuilt builds above: `scripts/fetch_models.sh` fetches them into
+  `models/` and checks each against its SHA-256.
 - Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo)
   ships download scripts and conversion examples for the YOLO family,
   RetinaFace, PP-OCR, PP-LiteSeg, ResNet and others. Its YOLO export — three

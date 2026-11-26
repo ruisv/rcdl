@@ -6,11 +6,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Prebuilt models on Hugging Face.** The verified builds whose licences
+  allow redistribution are published ready to load, each repo with a model
+  card that gives the measured speed and accuracy on the board, a working
+  snippet, and the decoder settings that cannot be read from the file:
+  `ruisv/rcdl-yolo` (YOLOv8n, YOLO11n and YOLO26n detection, segmentation,
+  pose, oriented boxes and classification; AGPL-3.0), `ruisv/rcdl-ppocr`
+  (PP-OCR v4/v5/v6 with their dictionaries), `ruisv/rcdl-depth-anything-v2-small`,
+  `ruisv/rcdl-siglip-b16`, `ruisv/rcdl-xfeat` and `ruisv/rcdl-superres`.
+- **`model_zoo/`**: which models are published, what each verified model's
+  licence allows and why the rest are not published (pretrained weights or
+  training data with non-commercial terms, or no licence stated upstream), and
+  the model-card sources. `model_zoo/publish_hf.py` uploads a repo file by file
+  and reads back every size and SHA-256.
+
 ### Fixed
 - **`examples/xfeat_demo` did not build against OpenCV 5.1**, which removed the
   `cv::Mat_ << a, b, ...` comma initialiser that 5.0 only deprecated. The demo's
   synthetic warp is now written element by element and builds on 4.x, 5.0 and
   5.1.
+
+### Changed
+- **`scripts/fetch_models.sh` downloads the published builds from Hugging Face**
+  and checks each against the SHA-256 in its registry, so it now works without
+  a conversion host. It takes file names to fetch only those, honours
+  `HF_ENDPOINT` (a mirror) and `RCDL_MODELS`, and reports a local file that
+  differs from the published build.
+- The quick start downloads its model and test image first, and the README,
+  `docs/INSTALL.md`, `docs/MODELS.md` and `models/README.md` point at the
+  published models instead of saying the repository distributes no weights.
+- The README gains a section index, the install steps for a board without
+  conda (Miniforge) and for an existing environment, and a community section
+  with the RCDL chat group.
 
 ## [0.1.1] - 2026-09-20
 
