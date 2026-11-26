@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`examples/xfeat_demo` did not build against OpenCV 5.1**, which removed the
+  `cv::Mat_ << a, b, ...` comma initialiser that 5.0 only deprecated. The demo's
+  synthetic warp is now written element by element and builds on 4.x, 5.0 and
+  5.1.
+
 ## [0.1.1] - 2026-09-20
 
 ### Fixed

@@ -103,9 +103,12 @@ int main(int argc, char** argv) {
     const double theta = 12.0 * CV_PI / 180.0, scale = 0.85;
     const double alpha = scale * std::cos(theta), beta = scale * std::sin(theta);
     const double cx = a.cols / 2.0, cy = a.rows / 2.0;
-    warp = (cv::Mat_<double>(2, 3) << alpha, beta,
-            (1 - alpha) * cx - beta * cy + 25.0, -beta, alpha,
-            beta * cx + (1 - alpha) * cy - 15.0);
+    // Filled element by element: OpenCV 5.1 removed the `Mat_ << a, b, ...`
+    // comma initialiser that 5.0 only deprecated.
+    const double m[6] = {alpha, beta, (1 - alpha) * cx - beta * cy + 25.0,
+                         -beta, alpha, beta * cx + (1 - alpha) * cy - 15.0};
+    warp.create(2, 3, CV_64F);
+    std::copy(m, m + 6, warp.ptr<double>());
     cv::warpAffine(a, b, warp, a.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT);
     std::printf("second frame: synthesized (rotate 12 deg, scale 0.85, shift +25/-15)\n");
   }
