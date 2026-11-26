@@ -1,13 +1,15 @@
-<h1 align="center">RCDL</h1>
-<p align="center"><b>A vision application on Rockchip RK3588 in minutes, with every hardware block doing its job.</b><br>
-One C++ / Python API over VPU codecs → RGA preprocessing → NPU inference → post-processing, zero-copy end to end.</p>
+<h1 align="center">RCDL — a general AI framework for the RK3588 NPU: vision + speech</h1>
+<p align="center"><b>A vision or speech application on Rockchip RK3588 in minutes, with every hardware block doing its job.</b><br>
+One C++ / Python API over VPU codecs → RGA preprocessing → NPU inference → post-processing, zero-copy end to end.<br>
+<b>Built on Rockchip's official runtimes, not a replacement for them.</b></p>
 
 <p align="center">
 <a href="https://github.com/ruisv/rcdl/releases"><img src="https://img.shields.io/github/v/release/ruisv/rcdl?color=2ea44f" alt="release"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
 <img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg" alt="C++17">
 <img src="https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg" alt="python">
-<img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20linux--aarch64-0A7BBB.svg" alt="platform">
+<img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20RK3576%20%C2%B7%20RK356x-0A7BBB.svg" alt="platform">
+<img src="https://img.shields.io/badge/tested%20on-RK3588-2ea44f.svg" alt="tested on RK3588">
 <a href="model_zoo/README.md"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-FFD21E.svg" alt="models on Hugging Face"></a>
 </p>
 
@@ -31,13 +33,12 @@ acceleration) and `MPP` (video codecs). Wiring them into one pipeline that never
 copies a frame, and then getting each model's post-processing right, is usually
 weeks of work. RCDL is that work, done:
 
-- **Ten lines to a result.** An `Engine` plus a task class. Detection, segmentation, pose, OCR, faces, depth, tracking — 18 tasks work out of the box.
+- **Ten lines to a result.** An `Engine` plus a task class. Detection, segmentation, pose, OCR, faces, depth, tracking — 18 vision tasks work out of the box.
+- **The whole voice chain is on the board too.** Wake word, voice activity, speech recognition, command matching and speech synthesis use the same `Engine` + task-class model as the vision tasks. The networks run on the NPU; feature extraction, search, decoding and the text front end run on the CPU, with no third-party library.
 - **Each block does its own job.** The model runs on the NPU, scaling and colour conversion on RGA, codecs on the VPU. The CPU does post-processing, and the fallback when the hardware cannot.
 - **Actually zero-copy.** The decoded frame, RGA, the NPU input tensor and the encoder share one dma-buf. There is no `memcpy` between them.
 - **All three NPU cores.** The async pipeline takes detection from 99 fps to 481 fps, with results identical to the synchronous one and in order.
-- **Reproducible.** Every decoder has a numpy reference test, and 587 board tests cover the full hardware path. The things RK3588's documentation does not tell you — RGA's 4 GB line, two RGA generations that resample differently — are already handled, and written up in [`docs/RGA.md`](docs/RGA.md).
-
-RCDL is built on Rockchip's official runtimes. It does not replace them.
+- **Reproducible.** Every decoder has a numpy reference test, and 754 board tests cover the full hardware path. The things RK3588's documentation does not tell you — RGA's 4 GB line, two RGA generations that resample differently — are already handled, and written up in [`docs/RGA.md`](docs/RGA.md).
 
 ## Install
 
@@ -61,8 +62,13 @@ curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Minif
 bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init && exec "$SHELL"
 ```
 
-**Requirements:** an RK3588 / RK3588S board, Linux aarch64, RKNPU driver ≥ 0.9.x,
-and your user in the `video` and `render` groups. RK3576 / RK356x are not yet verified.
+**Supported SoCs:** RK3588 / RK3588S, RK3576 and RK356x, the platforms Rockchip's
+RKNPU2 runtime supports. **Tested so far on RK3588 / RK3588S only.** On another SoC,
+use a `.rknn` compiled for it (a different `target_platform`); the prebuilt models
+on Hugging Face are RK3588 builds.
+
+**Requirements:** Linux aarch64, RKNPU driver ≥ 0.9.x,
+and your user in the `video` and `render` groups.
 Building from source, permissions and troubleshooting are in
 [`docs/INSTALL.md`](docs/INSTALL.md).
 
@@ -154,6 +160,11 @@ video pipelines.
 | ×4 super-resolution | `engine.upscaler()` | Real-ESRGAN Compact |
 | Panoptic driving (detection + drivable area + lanes) | `engine.anchor_detector()` · `engine.segmenter()` | YOLOP |
 | Multi-object tracking | `engine.tracker()` | ByteTrack + BoT-SORT appearance association |
+| Wake word | `rcdl.KeywordSpotter` | sherpa-onnx zipformer KWS (zh-en) |
+| Voice activity detection | `rcdl.SileroVad` · `rcdl.VadSegmenter` | Silero VAD v6 |
+| Speech recognition | `rcdl.ParaformerAsr` | Paraformer-large (Chinese) |
+| Voice commands | `rcdl.CommandMatcher` | pinyin edit distance, CPU only |
+| Speech synthesis | `rcdl.TextToSpeech` | Matcha-TTS zh-en + Vocos |
 
 Every task is an engine-free pure decoder, a numpy test and a board test. The
 C++ classes mirror these one to one; see [`docs/CPP_API.md`](docs/CPP_API.md).
@@ -170,6 +181,7 @@ rerun it are in [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 | 1080p H.264 decode / 4K H.265 decode | **324 fps** · **244 fps**, every frame a dma-buf |
 | 1080p H.264 encode, reading decoded frames directly | **197 fps** |
 | Compressed video → detections (1080p, YOLOv8n) | **72–97 fps** |
+| Speech: wake word / one utterance recognised / one sentence synthesised | real-time factor 0.21 · 0.76 s · real-time factor 0.27, all on the board |
 
 ## Models
 
@@ -185,11 +197,16 @@ a working snippet, and what to know before deploying:
 | [`ruisv/rcdl-siglip-b16`](https://huggingface.co/ruisv/rcdl-siglip-b16) | image embeddings, zero-shot classification | Apache-2.0 |
 | [`ruisv/rcdl-xfeat`](https://huggingface.co/ruisv/rcdl-xfeat) | sparse features and matching | Apache-2.0 |
 | [`ruisv/rcdl-superres`](https://huggingface.co/ruisv/rcdl-superres) | ×4 super-resolution | BSD-3-Clause |
+| [`ruisv/rcdl-silero-vad`](https://huggingface.co/ruisv/rcdl-silero-vad) | voice activity detection | MIT |
+| [`ruisv/rcdl-paraformer`](https://huggingface.co/ruisv/rcdl-paraformer) | Chinese speech recognition (three stages + vocabulary + CMVN) | FunASR Model License (keep the attribution) |
+| [`ruisv/rcdl-matcha-tts`](https://huggingface.co/ruisv/rcdl-matcha-tts) | zh-en speech synthesis (acoustic model + front-end files) | Apache-2.0 (training data undisclosed) |
+| [`ruisv/rcdl-vocos`](https://huggingface.co/ruisv/rcdl-vocos) | vocoder, paired with Matcha | Apache-2.0 |
 
 From a checkout, `scripts/fetch_models.sh` fetches all of them into `models/` and
 checks each against its SHA-256. `HF_ENDPOINT` points it at a mirror.
 
 - **The YOLO family is Ultralytics' AGPL-3.0.** Software that ships these models or serves them over a network falls under AGPL-3.0 too; closed-source or commercial use needs an Ultralytics Enterprise licence.
+- **The wake-word model is not published**: upstream states neither a model licence nor its training data. How to build every speech graph for RK3588, and the rewrites they need there, is in [`model_zoo/speech/`](model_zoo/speech/).
 - **Why the other verified models are not published** (non-commercial terms inherited from pretrained weights or training data, or no licence stated upstream) is set out model by model in [`model_zoo/README.md`](model_zoo/README.md).
 - **For those and for your own models,** convert from ONNX with [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) on an x86 host. A `.rknn` is tied to one SoC, and the toolkit version must not be newer than the runtime on the board. Rockchip's [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) has download scripts and conversion examples, and its YOLO export layout is the one RCDL's decoders read.
 - [`docs/MODELS.md`](docs/MODELS.md) lists, for every verified model, the input format, channel order, whether the activation is inside the graph, and the conversion traps actually hit. Channel order and activation placement cannot be read from a `.rknn`, and getting them wrong only costs accuracy silently.

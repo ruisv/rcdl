@@ -83,6 +83,15 @@ add_library(rcdl SHARED
   src/tasks/wholebody.cc
   src/tasks/open_vocab.cc
   src/tasks/panoptic_drive.cc
+  src/preproc/fbank.cc
+  src/preproc/istft.cc
+  src/tasks/float_io.cc
+  src/tasks/vad.cc
+  src/tasks/kws.cc
+  src/tasks/asr.cc
+  src/tasks/command.cc
+  src/tasks/vocoder.cc
+  src/tasks/tts.cc
   src/media/mpp_common.cc
   src/media/video_frame.cc
   src/media/video_decoder.cc
@@ -170,6 +179,8 @@ if(RCDL_BUILD_EXAMPLES)
   rcdl_example(wholebody_demo)
   rcdl_example(yolop_demo)
   rcdl_example(async_check)
+  # Voice assistant: wake word -> VAD -> recognition -> command -> spoken reply.
+  rcdl_example(voice_assistant)
 endif()
 
 # --- python module -----------------------------------------------------------

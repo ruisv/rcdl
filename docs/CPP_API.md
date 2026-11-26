@@ -60,8 +60,9 @@ aligned up, and `strideAlign()` aligns what RCDL allocates — assuming
 | `preproc/geometry.h` | `LetterboxInfo`, `computeLetterbox`, `YuvRange`, `YuvMatrix`, `YuvColorSpace` |
 | `preproc/letterbox.h` | `letterbox` / `resize` / `cvtColor` + `PreprocBackend` |
 | `preproc/rga.h`, `preproc/letterbox_cpu.h` | the two backends, if you want one specifically; `rgaDrawRects()` is the box overlay (CPU by default, RGA2 on a dma32 frame) |
+| `preproc/fbank.h`, `preproc/istft.h` | speech front ends: Kaldi `Fbank` + `lfrStack` + `Cmvn`, and `Istft` |
 | `media/video_codec.h`, `media/video_frame.h`, `media/jpeg_codec.h` | VPU codecs |
-| `tasks/*.h` | detection, classification, pose, instance seg, semantic seg, OBB, depth, OCR, embedding |
+| `tasks/*.h` | detection, classification, pose, instance seg, semantic seg, OBB, depth, OCR, embedding; speech: `vad.h`, `kws.h`, `asr.h`, `command.h`, `vocoder.h`, `tts.h` |
 | `tracks/byte_tracker.h`, `tracks/reid.h` | ByteTrack + appearance |
 | `pipeline/detection_pipeline.h`, `pipeline/async_detection_pipeline.h` | streaming |
 
@@ -275,6 +276,181 @@ frame.endCpuRead();
 `DmaBuf::syncStart/syncEnd` and the free `dmaBufSyncStart/End(fd, ...)` do it.
 The RKNN runtime flushes its own I/O tensors around `rknn_run`, and the preproc
 wrappers leave fd-backed buffers alone for exactly this reason.
+
+---
+
+## Voice pipeline
+
+Wake word → VAD → recognition → command → spoken reply, every network on the
+NPU: [`examples/voice_assistant.cc`](../examples/voice_assistant.cc) is the
+whole loop in C++ (WAV in, WAV replies out; with no input it synthesises a
+demo session). Audio format, wake-word tokens and tuning are in the
+[voice pipeline overview](API.md#voice-pipeline); the classes are below.
+
+## Speech recognition (Paraformer)
+
+`rcdl/preproc/fbank.h` — Kaldi-compatible front end; `rcdl/tasks/asr.h` — CIF,
+token decoding and the three-stage `ParaformerAsr`. One 16 kHz mono utterance
+(at most `maxSeconds()`, 24 s for the registered build) in, text out.
+
+```cpp
+rcdl::Engine enc("models/paraformer_encoder_fp16_rk3588.rknn");
+rcdl::Engine pred("models/paraformer_predictor_fp16_rk3588.rknn");
+rcdl::Engine dec("models/paraformer_decoder_fp16_rk3588.rknn");
+rcdl::ParaformerAsr asr(enc, pred, dec,
+                        rcdl::loadTokenList("models/paraformer_tokens_8404.json"),
+                        rcdl::loadKaldiCmvn("models/paraformer_am.mvn"));
+rcdl::AsrResult r = asr.transcribe(pcm, num_samples);   // float in [-1, 1]
+// r.text, r.token_ids, r.feature_frames, r.truncated
+
+rcdl::Fbank fbank;                                         // FbankConfig{} = 16 kHz, 80 mel
+std::vector<float> feats;
+int frames = fbank.compute(pcm, num_samples, feats);       // [frames, 80]
+// pure: lfrStack(feats, frames, dim, lfr_m, lfr_n, out) · parseKaldiCmvn(text)
+// pure: cifIntegrate(alphas, hidden, frames, dim, valid_frames, cfg, embeds)
+// pure: argmaxTokens(logits, rows, vocab) · tokensToText(ids, vocab)
+```
+
+| member | notes |
+|---|---|
+| `transcribe(pcm, samples)` | front end + 3 NPU stages + CIF. Longer than the window → truncated, `truncated` set |
+| `transcribeFeatures(feats, frames)` | start from `[frames, featureDim()]` LFR+CMVN features |
+| `features(pcm, samples, out)` | front end only |
+| `maxFrames()` · `maxSeconds()` · `featureDim()` · `maxTokens()` · `vocabSize()` | geometry read from the Engines |
+
+`ParaformerAsr` matches the stages by tensor shape rather than index, and refuses
+a token list whose size differs from the decoder's class count. `cifIntegrate`
+puts `CifConfig::tail_threshold` at frame `valid_frames` — the true end of
+speech. A fixed-shape predictor graph can only add it at the end of its padding,
+where masking the padding removes it, and any utterance whose last token
+needed the tail then loses it.
+
+
+### Voice activity detection — `rcdl/tasks/vad.h`
+
+```cpp
+rcdl::Engine eng("models/silero_vad_16k_fp16_rk3588.rknn");
+rcdl::SileroVad vad(eng);                     // stateful: one stream per object
+float p = vad.probability(chunk);             // 512 samples (32 ms) -> speech probability
+rcdl::VadSegmenter seg(vad);                  // VadConfig{}: 0.5, 250 ms on, 300 ms off
+for (auto& s : seg.feed(pcm, n))              // any length; returns the utterances that closed
+  asr.transcribe(s.pcm.data(), s.pcm.size()); // s.start / s.end: samples since reset()
+for (auto& s : seg.flush()) { /* end of stream */ }
+```
+
+| member | notes |
+|---|---|
+| `SileroVad::probability(chunk)` · `reset()` | `kChunk` = 512 samples; carries LSTM state and the last 64 samples |
+| `VadSegmenter::feed(pcm, n)` · `flush()` · `segments(pcm, n)` | `VadSegment{start, end, pcm}`; `segments` = reset + feed + flush |
+| `inSpeech()` · `lastProbability()` · `config()` | |
+| `VadConfig` | `threshold`, `neg_threshold` (< 0: = threshold), `min_speech_ms`, `min_silence_ms`, `speech_pad_ms`, `max_speech_s` |
+
+The model's STFT (4 Hann frames of 256, hop 128) runs on the CPU and the NPU
+takes the magnitude spectrum: squared inside the graph, the power spans ~5000
+and a quantized build loses every quiet bin. A segment opens after `min_speech_ms` at or above
+`threshold` and closes after `min_silence_ms` below `neg_threshold`; a segment
+reaching `max_speech_s` is cut there and a new one starts.
+
+
+### Keyword spotting (wake word) — `rcdl/tasks/kws.h`
+
+```cpp
+rcdl::Engine enc("models/kws_zipformer_zh_en_3m_c16_fp16_rk3588.rknn");
+rcdl::KeywordSpotter kws(enc, "models/kws_zipformer_zh_en_3m_decoder_joiner.npy",
+                         "models/kws_zipformer_zh_en_3m_tokens.txt");   // KwsConfig{}
+kws.setKeywords("n ǐ h ǎo x iǎo ch ē @你好小车\n"
+                "x iǎo ch ē x iǎo ch ē :1.5 #0.3 @小车小车\n");    // or loadKeywords(path)
+for (const rcdl::KwsDetection& d : kws.feed(pcm, n))     // any length, float in [-1, 1]
+  printf("%s at %.2f s\n", d.keyword.c_str(), d.end);
+```
+
+| member | notes |
+|---|---|
+| `setKeywords(text)` · `loadKeywords(path)` · `keywords()` | one line per keyword: model tokens, optional `:boost` and `#threshold`, `@phrase`; resets the stream |
+| `feed(pcm, n)` | `KwsDetection{keyword, index, start, end, tokens}`, seconds since `reset()` |
+| `flush()` | end of stream: pushes the last partial chunk through with silence, returns what fires, resets |
+| `reset()` · `encode(pcm, n, frames)` · `tokenId(tok)` · `vocabSize()` | `encode` returns the encoder output of a whole recording (tests) |
+| `KwsConfig` | `keywords_score` (1.0), `keywords_threshold` (0.25), `num_trailing_blanks` (1), `max_active_paths` (4) — sherpa-onnx's defaults |
+
+The encoder runs on the NPU one 160 ms chunk at a time and carries 37 cache
+tensors between calls; the decoder, joiner and keyword search (a beam search
+over an Aho-Corasick graph of the keywords) run on the CPU and follow
+sherpa-onnx's KeywordSpotter step for step — a float transcription of the same
+search gave sherpa-onnx's detections on all 87 clips it was checked on. Features are Kaldi fbank
+with the Povey window on samples in [-1, 1] (`FbankConfig::window`,
+`input_scale`).
+
+
+### Voice commands — `rcdl/tasks/command.h`
+
+```cpp
+rcdl::CommandMatcher m({"前进", "后退", "左转", "右转", "打开灯", "关灯"});  // max_distance 0.5
+rcdl::CommandMatch c = m.match(r.text);   // "大开灯" -> index 4, distance 0
+if (c.index >= 0) { /* c.command */ }
+// pure: toPinyin(text) -> std::vector<std::string>, one toneless syllable per CJK char
+```
+
+| member | notes |
+|---|---|
+| `match(text)` | `CommandMatch{index (-1 = rejected), nearest, distance, command}` |
+| `distances(text)` | normalised syllable edit distance to every command |
+| `commands()` · `size()` · `maxDistance()` | |
+
+Distance is the syllable edit distance over the command's syllable count; ties
+go to the closer length, then the earlier command. Latin words compare only
+with Latin words. The pinyin table (U+3400..U+9FFF) is compiled in and generated
+by `scripts/gen_pinyin_table.py`.
+
+
+### Speech synthesis back end — `rcdl/preproc/istft.h`, `rcdl/tasks/vocoder.h`
+
+```cpp
+rcdl::Engine eng("models/vocos_16k_t256_fp16_rk3588.rknn");
+rcdl::VocosVocoder voc(eng);                       // VocosConfig{}: context 32, pad -16
+std::vector<float> pcm;
+int n = voc.synthesize(mel, frames, pcm);          // mel [80, frames] row-major -> 16 kHz PCM
+// pure: Istft(IstftConfig{}).compute(real, imag, frames, out)        // [frames, 513] each
+// pure: Istft::computePolar(mag, cos, sin, frames, out)               // [513, frames] each
+```
+
+| member | notes |
+|---|---|
+| `synthesize(mel, frames, pcm)` | chunks of `chunkFrames()` overlapping by `context`; returns `(frames - 1) * hop` |
+| `numMels()` · `chunkFrames()` · `bodyFrames()` · `sampleRate()` | geometry read from the Engine |
+
+The Engine must output `log_mag` and `phase` (`[1, 513, T]`, in that order);
+`exp`, the magnitude clip, `cos`, `sin` and the iSTFT run on the CPU. Chunk
+seams are exact for `context >= 27`; only the utterance's two ends see
+`pad_value` instead of the network's zero padding.
+
+
+### Speech synthesis — `rcdl/tasks/tts.h`
+
+```cpp
+rcdl::Engine enc("models/matcha_zh_en_enc_l128_fp16_rk3588.rknn");
+rcdl::Engine dec("models/matcha_zh_en_dec_t512_fp16_rk3588.rknn");
+rcdl::Engine voc_eng("models/vocos_16k_t256_fp16_rk3588.rknn");
+rcdl::MatchaAcoustic am(enc, dec, "models/matcha_zh_en_embedding.npy");  // MatchaConfig{}
+rcdl::VocosVocoder voc(voc_eng);
+rcdl::TextToSpeech tts(rcdl::MatchaFrontend("models/matcha_zh_en_tokens.txt",
+                                            "models/matcha_zh_en_lexicon.txt"),
+                       am, voc);
+rcdl::TtsResult r = tts.synthesize("好的，马上出发。");   // r.pcm, 16 kHz
+```
+
+| member | notes |
+|---|---|
+| `MatchaFrontend::encode(text)` | one id vector per sentence; matches sherpa-onnx's front end |
+| `MatchaFrontend::readNumbers(text)` | digits read out as characters (static) |
+| `MatchaAcoustic::synthesize(ids, n)` | `MatchaResult{mel [80, frames], frames, durations, truncated}` |
+| `MatchaAcoustic::seed(s)` · `maxTokens()` · `maxFrames()` · `numMels()` · `vocabSize()` | |
+| `TextToSpeech::synthesize(text)` | `TtsResult{pcm, sample_rate, sentences, truncated}`; pauses shortened per `TextToSpeechConfig::silence_scale` (0.2) |
+| `scaleSilence(pcm, sample_rate, scale, min_pause_s, level)` | pure; pauses ≥ `min_pause_s` keep `scale` of their length (sherpa-onnx's rule) |
+
+The encoder takes embeddings, not ids: the lookup runs on the CPU from the
+`.npy` table (`[vocab, D]`, pre-scaled). Durations are `ceil(exp(logw)) *
+length_scale`, regulated on the CPU exactly as Matcha's `generate_path`; the
+decoder noise comes from a seeded `std::mt19937`.
 
 ---
 

@@ -7,6 +7,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Speech: a whole voice pipeline on the NPU.** Wake word (`KeywordSpotter`,
+  sherpa-onnx's open-vocabulary zipformer transducer, so a new wake word is a
+  line of text), voice activity detection (`SileroVad` + `VadSegmenter`),
+  Chinese speech recognition (`ParaformerAsr`, three stages with CIF on the
+  CPU), closed-set voice commands matched in pinyin (`CommandMatcher`), and
+  speech synthesis (`TextToSpeech`: Matcha-TTS + the `VocosVocoder`), in C++
+  and Python. The networks are fp16 builds on the NPU; the Kaldi fbank / LFR /
+  CMVN front end, the inverse STFT, the keyword search, CIF and the TTS text
+  front end run on the CPU with no third-party dependency, and each is pinned
+  against a numpy or sherpa-onnx reference by a test that needs no model.
+  `examples/voice_assistant.{py,cc}` runs wake word → listen → recognise →
+  command → spoken reply on a recording, or on a session it synthesises itself.
+  Ported from BCDL with the same tests; the model registry, inputs and
+  outputs are in `docs/MODELS.md`. Measured on an RK3588S board: wake word at a
+  real-time factor of 0.21, one utterance recognised in 0.76 s, one sentence
+  synthesised at a real-time factor of 0.27. The reference clips transcribe
+  exactly as FunASR does, and a synthesised sentence transcribes back to its
+  own text.
+- **`model_zoo/speech/`: how the eight speech graphs are built for RK3588**, as
+  fp16 with rknn-toolkit2. It includes a fixed-shape three-stage Paraformer
+  export with CIF left to the CPU, and the rewrites RK3588 needs on top:
+  - Matcha's `sin²` folded onto an NPU polynomial. `Sin` has no NPU kernel, and
+    18 CPU round trips were half of the decoder's time: 955 ms became 253 ms.
+  - The wake-word encoder's `Max(constant, x)` rewritten as `Relu`.
+  - Paraformer's residual stream carried at 1/32. At full scale it passes fp16's
+    range, and the encoder returns NaN and empty transcripts without an error.
+
+  `find_overflow.py` finds that last kind of problem before conversion.
 - **Prebuilt models on Hugging Face.** The verified builds whose licences
   allow redistribution are published ready to load, each repo with a model
   card that gives the measured speed and accuracy on the board, a working
@@ -14,7 +42,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ruisv/rcdl-yolo` (YOLOv8n, YOLO11n and YOLO26n detection, segmentation,
   pose, oriented boxes and classification; AGPL-3.0), `ruisv/rcdl-ppocr`
   (PP-OCR v4/v5/v6 with their dictionaries), `ruisv/rcdl-depth-anything-v2-small`,
-  `ruisv/rcdl-siglip-b16`, `ruisv/rcdl-xfeat` and `ruisv/rcdl-superres`.
+  `ruisv/rcdl-siglip-b16`, `ruisv/rcdl-xfeat` and `ruisv/rcdl-superres`; and
+  for speech `ruisv/rcdl-silero-vad`, `ruisv/rcdl-paraformer`,
+  `ruisv/rcdl-matcha-tts` and `ruisv/rcdl-vocos`. The wake-word model is the
+  one speech network not published: upstream states no licence for it.
 - **`model_zoo/`**: which models are published, what each verified model's
   licence allows and why the rest are not published (pretrained weights or
   training data with non-commercial terms, or no licence stated upstream), and
@@ -36,9 +67,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The quick start downloads its model and test image first, and the README,
   `docs/INSTALL.md`, `docs/MODELS.md` and `models/README.md` point at the
   published models instead of saying the repository distributes no weights.
-- The README gains a section index, the install steps for a board without
-  conda (Miniforge) and for an existing environment, and a community section
-  with the RCDL chat group.
+- **Supported SoCs are stated as RK3588 / RK3588S, RK3576 and RK356x**, the
+  RKNPU2 runtime's platforms, with testing so far on RK3588 / RK3588S only. The
+  prebuilt models are RK3588 builds; another SoC needs `.rknn` files compiled
+  for it.
+- The README describes RCDL as what it now is, a general AI framework for the
+  RK3588 NPU covering vision and speech, with the speech tasks in the task and
+  performance tables. It also gains a section index, the install steps for a
+  board without conda (Miniforge) and for an existing environment, and a
+  community section with the RCDL chat group.
 
 ## [0.1.1] - 2026-09-20
 

@@ -7,6 +7,7 @@ small and numpy-shaped.
 
 from __future__ import annotations
 
+import os
 from typing import Sequence
 
 import numpy as np
@@ -347,6 +348,44 @@ __all__ = [
     "AnchorDetector",
     "decode_yolov5_anchor",
     "__version__",
+    # speech
+    "FbankConfig",
+    "Fbank",
+    "lfr_stack",
+    "Cmvn",
+    "parse_kaldi_cmvn",
+    "load_kaldi_cmvn",
+    "CifConfig",
+    "cif_integrate",
+    "load_token_list",
+    "argmax_tokens",
+    "tokens_to_text",
+    "AsrResult",
+    "ParaformerConfig",
+    "ParaformerAsr",
+    "to_pinyin",
+    "CommandMatch",
+    "CommandMatcher",
+    "SileroVad",
+    "VadConfig",
+    "VadSegment",
+    "VadSegmenter",
+    "KwsConfig",
+    "KwsDetection",
+    "KeywordSpotter",
+    "IstftConfig",
+    "Istft",
+    "VocosConfig",
+    "VocosVocoder",
+    "MatchaFrontendConfig",
+    "MatchaFrontend",
+    "MatchaConfig",
+    "MatchaResult",
+    "MatchaAcoustic",
+    "TtsResult",
+    "TextToSpeech",
+    "TextToSpeechConfig",
+    "scale_silence",
 ]
 
 
@@ -1047,3 +1086,332 @@ def decode_video(path: str, codec: str | None = None, max_frames: int | None = N
         n += 1
         if max_frames is not None and n >= max_frames:
             return
+
+
+# --- speech: Kaldi fbank front end + Paraformer ASR --------------------------
+# The front end is the C++ one, bound, rather than a numpy re-implementation:
+# a model trained on kaldi.fbank features transcribes worse — silently — on
+# features that are merely similar, so there is exactly one definition of them.
+FbankConfig = rcdl_py.FbankConfig
+Fbank = rcdl_py.Fbank
+lfr_stack = rcdl_py.lfr_stack
+Cmvn = rcdl_py.Cmvn
+parse_kaldi_cmvn = rcdl_py.parse_kaldi_cmvn
+load_kaldi_cmvn = rcdl_py.load_kaldi_cmvn
+CifConfig = rcdl_py.CifConfig
+cif_integrate = rcdl_py.cif_integrate
+load_token_list = rcdl_py.load_token_list
+argmax_tokens = rcdl_py.argmax_tokens
+tokens_to_text = rcdl_py.tokens_to_text
+AsrResult = rcdl_py.AsrResult
+ParaformerConfig = rcdl_py.ParaformerConfig
+to_pinyin = rcdl_py.to_pinyin
+CommandMatch = rcdl_py.CommandMatch
+CommandMatcher = rcdl_py.CommandMatcher
+VadConfig = rcdl_py.VadConfig
+KwsConfig = rcdl_py.KwsConfig
+KwsDetection = rcdl_py.KwsDetection
+VadSegment = rcdl_py.VadSegment
+IstftConfig = rcdl_py.IstftConfig
+Istft = rcdl_py.Istft
+VocosConfig = rcdl_py.VocosConfig
+MatchaFrontendConfig = rcdl_py.MatchaFrontendConfig
+MatchaFrontend = rcdl_py.MatchaFrontend
+MatchaConfig = rcdl_py.MatchaConfig
+MatchaResult = rcdl_py.MatchaResult
+TtsResult = rcdl_py.TtsResult
+TextToSpeechConfig = rcdl_py.TextToSpeechConfig
+
+
+def scale_silence(pcm, sample_rate: int, scale: float, min_pause_s: float = 0.2,
+                  level: float = 0.01) -> np.ndarray:
+    """Shorten every pause (``|x| <= level`` for at least ``min_pause_s``) to
+    ``scale`` of its length — sherpa-onnx's silence_scale. float32 PCM in and out."""
+    return rcdl_py.scale_silence(np.ascontiguousarray(pcm, dtype=np.float32).reshape(-1),
+                                 sample_rate, scale, min_pause_s, level)
+
+
+class ParaformerAsr:
+    """Non-autoregressive speech recognition: one 16 kHz utterance in, text out.
+
+    Three compiled stages (encoder, predictor, decoder) with continuous
+    integrate-and-fire on the CPU between the last two. Feed ONE utterance of at
+    most :attr:`max_seconds` — longer audio is truncated and flagged on the
+    result, so segment it with a VAD first. There is no resampler: the PCM must
+    already be 16 kHz mono float in [-1, 1]."""
+
+    def __init__(self, encoder: "Engine", predictor: "Engine", decoder: "Engine",
+                 vocab, cmvn: "Cmvn", config: "ParaformerConfig | None" = None):
+        self.encoder, self.predictor, self.decoder = encoder, predictor, decoder
+        self.config = config if config is not None else ParaformerConfig()
+        self._a = rcdl_py.ParaformerAsr(encoder._e, predictor._e, decoder._e, list(vocab),
+                                        cmvn, self.config)
+
+    @classmethod
+    def from_files(cls, encoder: str, predictor: str, decoder: str, tokens: str,
+                   cmvn: str, config: "ParaformerConfig | None" = None) -> "ParaformerAsr":
+        """Build from the three ``.rknn`` paths, a token list and an ``am.mvn``."""
+        return cls(Engine(encoder), Engine(predictor), Engine(decoder),
+                   load_token_list(tokens), load_kaldi_cmvn(cmvn), config)
+
+    def transcribe(self, pcm: np.ndarray) -> "AsrResult":
+        """Mono 16 kHz PCM (float in [-1, 1], or int16) -> AsrResult."""
+        return self._a.transcribe(_as_float_pcm(pcm))
+
+    def transcribe_features(self, feats: np.ndarray) -> "AsrResult":
+        """(frames, feature_dim) LFR + CMVN features -> AsrResult."""
+        return self._a.transcribe_features(np.ascontiguousarray(feats, dtype=np.float32))
+
+    def features(self, pcm: np.ndarray) -> np.ndarray:
+        """Front end only: PCM (float in [-1, 1], or int16) -> (frames, feature_dim)
+        normalised features."""
+        return self._a.features(_as_float_pcm(pcm))
+
+    @property
+    def max_seconds(self) -> float:
+        return self._a.max_seconds
+
+    @property
+    def max_frames(self) -> int:
+        return self._a.max_frames
+
+    @property
+    def feature_dim(self) -> int:
+        return self._a.feature_dim
+
+    @property
+    def max_tokens(self) -> int:
+        return self._a.max_tokens
+
+    @property
+    def vocab_size(self) -> int:
+        return self._a.vocab_size
+
+
+def _as_float_pcm(pcm) -> np.ndarray:
+    """float in [-1, 1] as is; int16 rescaled to it (not just cast)."""
+    pcm = np.asarray(pcm)
+    if pcm.dtype == np.int16:
+        pcm = pcm.astype(np.float32) / 32768.0
+    return np.ascontiguousarray(pcm, dtype=np.float32).reshape(-1)
+
+
+class SileroVad:
+    """Silero VAD v6 on the NPU: speech probability per 512-sample (32 ms)
+    chunk of 16 kHz audio. Streaming: the network's state and the previous
+    chunk's tail carry over between calls, so feed one stream in order and
+    :meth:`reset` between streams."""
+
+    chunk = rcdl_py.SileroVad.chunk
+    sample_rate = rcdl_py.SileroVad.sample_rate
+
+    def __init__(self, engine: "Engine | str"):
+        self.engine = Engine(engine) if isinstance(engine, str) else engine
+        self._v = rcdl_py.SileroVad(self.engine._e)
+
+    def probability(self, chunk) -> float:
+        """512 samples (float in [-1, 1], or int16) -> speech probability."""
+        return self._v.probability(_as_float_pcm(chunk))
+
+    def probabilities(self, pcm) -> np.ndarray:
+        """A whole recording from a reset -> one probability per full chunk."""
+        pcm = _as_float_pcm(pcm)
+        self.reset()
+        n = len(pcm) // self.chunk
+        return np.array([self._v.probability(pcm[i * self.chunk:(i + 1) * self.chunk])
+                         for i in range(n)], dtype=np.float32)
+
+    def reset(self) -> None:
+        self._v.reset()
+
+
+class VadSegmenter:
+    """Cuts a 16 kHz stream into utterances with a :class:`SileroVad`.
+
+    ``feed(pcm)`` takes audio of any length and returns the :class:`VadSegment`
+    s that closed during it (``start``/``end`` in samples since the last reset,
+    ``pcm`` ready for :meth:`ParaformerAsr.transcribe`); ``flush()`` ends the
+    stream. ``segments(pcm)`` does a whole recording at once."""
+
+    def __init__(self, vad: "SileroVad | Engine | str", config: "VadConfig | None" = None):
+        self.vad = vad if isinstance(vad, SileroVad) else SileroVad(vad)
+        self.config = config if config is not None else VadConfig()
+        self._s = rcdl_py.VadSegmenter(self.vad._v, self.config)
+
+    def feed(self, pcm) -> "list[VadSegment]":
+        return self._s.feed(_as_float_pcm(pcm))
+
+    def flush(self) -> "list[VadSegment]":
+        return self._s.flush()
+
+    def segments(self, pcm) -> "list[VadSegment]":
+        return self._s.segments(_as_float_pcm(pcm))
+
+    def reset(self) -> None:
+        self._s.reset()
+
+    @property
+    def in_speech(self) -> bool:
+        return self._s.in_speech
+
+    @property
+    def last_probability(self) -> float:
+        return self._s.last_probability
+
+
+class KeywordSpotter:
+    """Wake words on the NPU: a streaming zipformer transducer (sherpa-onnx's
+    KWS model) whose encoder runs one 160 ms chunk per call, with the decoder,
+    joiner and keyword search on the CPU. Keywords are token lines in
+    sherpa-onnx's format (``"n ǐ h ǎo x iǎo ch ē @你好小车"``), so a new wake
+    word needs no new model. Streaming: feed one stream in order."""
+
+    def __init__(self, encoder: "Engine | str", decoder_joiner: str, tokens: str,
+                 keywords: "str | None" = None, config: "KwsConfig | None" = None):
+        self.engine = Engine(encoder) if isinstance(encoder, str) else encoder
+        self.config = config if config is not None else KwsConfig()
+        self._k = rcdl_py.KeywordSpotter(self.engine._e, decoder_joiner, tokens, self.config)
+        if keywords is not None:
+            if "\n" not in keywords and os.path.isfile(keywords):
+                self._k.load_keywords(keywords)
+            else:
+                self._k.set_keywords(keywords)
+
+    def set_keywords(self, text: str) -> None:
+        """Keyword lines (``tokens [:boost] [#threshold] @phrase``); resets the stream."""
+        self._k.set_keywords(text)
+
+    def load_keywords(self, path: str) -> None:
+        self._k.load_keywords(path)
+
+    @property
+    def keywords(self) -> "list[str]":
+        return self._k.keywords
+
+    def feed(self, pcm) -> "list[KwsDetection]":
+        """16 kHz PCM (float in [-1, 1], or int16), any length -> what fired."""
+        return self._k.feed(_as_float_pcm(pcm))
+
+    def flush(self) -> "list[KwsDetection]":
+        """End of stream: pushes the last partial chunk through with silence,
+        returns what fires, then resets. Call it when a recording ends."""
+        return self._k.flush()
+
+    def encode(self, pcm) -> np.ndarray:
+        """Encoder output ``(frames, D)`` for a whole recording, from a reset."""
+        return self._k.encode(_as_float_pcm(pcm))
+
+    def reset(self) -> None:
+        self._k.reset()
+
+    def token_id(self, token: str) -> int:
+        return self._k.token_id(token)
+
+    @property
+    def vocab_size(self) -> int:
+        return self._k.vocab_size
+
+
+class VocosVocoder:
+    """Mel spectrogram -> waveform: Vocos on the NPU, inverse STFT on the CPU.
+
+    The compiled model takes a fixed number of mel frames (:attr:`chunk_frames`);
+    longer input is cut into overlapping chunks whose seams are exact. Feed the
+    ``(num_mels, frames)`` log-mel an acoustic model such as Matcha-TTS emits;
+    the result is float PCM at :attr:`sample_rate`, ``(frames - 1) * hop``
+    samples long."""
+
+    def __init__(self, engine: "Engine | str", config: "VocosConfig | None" = None):
+        self.engine = Engine(engine) if isinstance(engine, str) else engine
+        self.config = config if config is not None else VocosConfig()
+        self._v = rcdl_py.VocosVocoder(self.engine._e, self.config)
+
+    def synthesize(self, mel: np.ndarray) -> np.ndarray:
+        """``(num_mels, frames)`` log-mel (a leading batch of 1 is accepted) -> float32 PCM."""
+        mel = np.asarray(mel, dtype=np.float32)
+        if mel.ndim == 3 and mel.shape[0] == 1:
+            mel = mel[0]
+        return self._v.synthesize(np.ascontiguousarray(mel))
+
+    @property
+    def num_mels(self) -> int:
+        return self._v.num_mels
+
+    @property
+    def chunk_frames(self) -> int:
+        return self._v.chunk_frames
+
+    @property
+    def body_frames(self) -> int:
+        return self._v.body_frames
+
+    @property
+    def sample_rate(self) -> int:
+        return self._v.sample_rate
+
+
+class MatchaAcoustic:
+    """Matcha-TTS acoustic model: one sentence's token ids -> log-mel.
+
+    Two compiled graphs (encoder with the duration predictor; decoder with three
+    flow-matching steps), length regulation on the CPU between them."""
+
+    def __init__(self, encoder: "Engine | str", decoder: "Engine | str", embedding: str,
+                 config: "MatchaConfig | None" = None):
+        self.encoder = Engine(encoder) if isinstance(encoder, str) else encoder
+        self.decoder = Engine(decoder) if isinstance(decoder, str) else decoder
+        self.config = config if config is not None else MatchaConfig()
+        self._a = rcdl_py.MatchaAcoustic(self.encoder._e, self.decoder._e, embedding,
+                                         self.config)
+
+    def synthesize(self, ids) -> "MatchaResult":
+        return self._a.synthesize([int(i) for i in ids])
+
+    def seed(self, seed: int) -> None:
+        self._a.seed(seed)
+
+    @property
+    def max_tokens(self) -> int:
+        return self._a.max_tokens
+
+    @property
+    def max_frames(self) -> int:
+        return self._a.max_frames
+
+    @property
+    def num_mels(self) -> int:
+        return self._a.num_mels
+
+    @property
+    def vocab_size(self) -> int:
+        return self._a.vocab_size
+
+
+class TextToSpeech:
+    """Chinese text in, 16 kHz float PCM out — Matcha-TTS + Vocos, all on the board.
+
+    ``TextToSpeech.from_files(encoder, decoder, embedding, vocoder, tokens, lexicon)``; then
+    ``.synthesize(text).pcm``. Each sentence is synthesised on its own, the
+    audio concatenated, and pauses longer than 0.2 s shortened to
+    ``tts_config.silence_scale`` (0.2, as sherpa-onnx; 1 keeps them)."""
+
+    def __init__(self, frontend: "MatchaFrontend", acoustic: "MatchaAcoustic",
+                 vocoder: "VocosVocoder", tts_config: "TextToSpeechConfig | None" = None):
+        self.frontend, self.acoustic, self.vocoder = frontend, acoustic, vocoder
+        self.tts_config = tts_config if tts_config is not None else TextToSpeechConfig()
+        self._t = rcdl_py.TextToSpeech(frontend, acoustic._a, vocoder._v, self.tts_config)
+
+    @classmethod
+    def from_files(cls, encoder: str, decoder: str, embedding: str, vocoder: str, tokens: str,
+                   lexicon: str, config: "MatchaConfig | None" = None,
+                   tts_config: "TextToSpeechConfig | None" = None) -> "TextToSpeech":
+        return cls(MatchaFrontend(tokens, lexicon),
+                   MatchaAcoustic(encoder, decoder, embedding, config), VocosVocoder(vocoder),
+                   tts_config)
+
+    def synthesize(self, text: str) -> "TtsResult":
+        return self._t.synthesize(text)
+
+    @property
+    def sample_rate(self) -> int:
+        return self.vocoder.sample_rate

@@ -903,6 +903,97 @@ The v6 recogniser in the registry predates this route and works as it is, so it
 stays; the published ONNX is the place to start from for both halves next time —
 note that it, too, ends in the softmax that has to come out of the graph.
 
+## Speech
+
+The voice pipeline's networks, as registered in `scripts/fetch_models.sh`. Every
+one is a fixed-shape, batch-1 **fp16** build. RK3588's NPU offers int8 or fp16
+and no int16, and on another integer NPU int8 was measured to lose the
+vocoder's phase, the VAD's quiet frequency bins and the TTS decoder's mel; fp16
+needs no calibration set either. On the NPU each build reproduces its float
+ONNX to a cosine of 0.9998 or better per output, except the wake-word
+encoder's single step at 0.9935 at worst, whose streaming accuracy the board
+test checks instead. Every input is a computed tensor rather than image bytes,
+so all of them are fed as float32. The task classes bind inputs
+and outputs by tensor name or shape, never by position alone, and check the
+shapes at construction. Everything around the networks — feature extraction,
+decoding, search, CIF, the text front end, the iSTFT — runs on the CPU, with no
+third-party dependency. How each class is used is in
+[`API.md`](API.md#voice-pipeline).
+
+| Model | Task | NPU graph | CPU around it |
+|---|---|---|---|
+| `silero_vad_16k_fp16_rk3588.rknn` | voice activity (Silero VAD v6.2.3) | `mag [1,129,4]` + LSTM `h`, `c` `[1,128]` → `prob [1,1]`, `h_out`, `c_out`; one 32 ms chunk per call | 64-sample context + 512 + 64 reflected, 4 periodic-Hann frames of 256 (hop 128), \|FFT\|; segmenting |
+| `kws_zipformer_zh_en_3m_c16_fp16_rk3588.rknn` | wake word (sherpa-onnx zipformer2 KWS, zh-en 3M) | `x [1,29,80]` fbank + `pad_mask [1,72]` + 37 caches (`cached_*`, `embed_states`) → `encoder_out [1,4,320]` + `new_<cache>` for each; 160 ms per call | Kaldi fbank (Povey window, samples in [-1,1]); decoder + joiner from `kws_zipformer_zh_en_3m_decoder_joiner.npy`; modified beam search over the keyword graph; tokens from `kws_zipformer_zh_en_3m_tokens.txt` |
+| `paraformer_encoder_fp16_rk3588.rknn` | speech recognition, encoder (Paraformer-large, zh) | `[1,400,560]` LFR features → `[1,400,512]`; one utterance of up to 24 s | fbank (Hamming, ×32768) → LFR 7/6 → CMVN from `paraformer_am.mvn` |
+| `paraformer_predictor_fp16_rk3588.rknn` | speech recognition, CIF predictor | `[1,400,512]` → alphas `[1,401]` + hidden `[1,401,512]` | continuous integrate-and-fire, tail weight at the true end of speech |
+| `paraformer_decoder_fp16_rk3588.rknn` | speech recognition, decoder (8404 tokens) | context `[1,400,512]`, token count `[1]`, bias `[1,1,512]` (zeros), acoustic embeddings `[1,100,512]` → logits `[1,100,8404]` | argmax; `paraformer_tokens_8404.json` |
+| `matcha_zh_en_enc_l128_fp16_rk3588.rknn` | speech synthesis, text encoder + duration predictor (Matcha-TTS zh-en) | `x_emb [1,192,128]`, `x_mask [1,1,128]` → `mu_x [1,80,128]`, `logw [1,1,128]` | text front end (`matcha_zh_en_tokens.txt`, `matcha_zh_en_lexicon.txt`), embedding lookup from `matcha_zh_en_embedding.npy`, durations and length regulation, decoder noise |
+| `matcha_zh_en_dec_t512_fp16_rk3588.rknn` | speech synthesis, decoder (three flow-matching steps compiled in) | `mu_y`, `y_mask [1,1,512]`, `z` → `mel [1,80,512]` (8.2 s) | pause shortening (`scale_silence`) |
+| `vocos_16k_t256_fp16_rk3588.rknn` | vocoder (Vocos 16 kHz) | `mels [1,80,256]` → `log_mag`, raw `phase`, each `[1,513,256]` | exp + clip, cos/sin, centred iSTFT (n_fft 1024, hop 256); 32-frame overlap per side makes the chunk seams exact |
+
+Three choices in these graphs are not about speed and carry over to any
+rebuild:
+
+- **The STFT, the vocoder's cos/sin and Matcha's token lookup sit outside the
+  graph.** Each is a range a reduced-precision graph cannot hold: power spectra
+  span ~5000, raw phase spans ±42 rad, and token ids run to 2190, which fp16
+  cannot even represent exactly above 2048 (a quantized build squeezes them
+  into 256 levels).
+- **Matcha's decoder needs its masked GroupNorm and an attention bias past the
+  valid frames.** Exported as published, a fixed 512-frame graph lets the
+  padding leak into the speech: the padded output is off by up to ~10 log-mel.
+- **The KWS encoder's int64 `processed_lens` becomes a float `pad_mask`**, and
+  its softplus is rewritten as `relu(s) + log(1 + exp(−|s|))`; the cache length
+  advances 8 per chunk at the embedding rate.
+
+The VAD, Paraformer, Matcha and Vocos builds are published on Hugging Face
+(`ruisv/rcdl-silero-vad`, `rcdl-paraformer`, `rcdl-matcha-tts`, `rcdl-vocos`) and
+`scripts/fetch_models.sh` downloads them; the wake-word build is not, for the
+licence reason in the table below. [`model_zoo/speech/`](../model_zoo/speech/)
+builds all of them.
+
+### What RK3588 needs on top: four things a clean conversion gets wrong
+
+Each of these converts without a warning, and three of them run correctly, so
+only a profile or a transcript shows them:
+
+- **An NPU-less operator puts a graph on the CPU 18 times over.** RK3588's NPU
+  has no `Sin`, and Matcha's decoder applies `sin²(αx)` (its SnakeBeta
+  activation) in every feed-forward block of all three flow-matching steps:
+  18 CPU round trips took 515 ms of the 955 ms decoder. `sin²` has period π, so
+  the shipped graph folds the input onto [0, π/2] with nested `Abs`, which is
+  exact and needs no rounding, and evaluates a degree-9 polynomial there. The
+  decoder drops to 253 ms on the NPU and its mel is unchanged (cosine 0.99977
+  against the float ONNX either way). The measured input range is ±5.8, and the
+  fold covers ±4π.
+- **`Max(constant, x)` is a CPU operator; `Relu` is not.** The wake-word
+  encoder's front-end activations were four of them, 9 ms of CPU per 160 ms
+  chunk. They are rewritten exactly as `Relu(x − c) + c`.
+- **Paraformer's encoder overflows fp16 and returns empty transcripts.** Its 49
+  SANM blocks add into one residual stream that passes 500 000 in the last third
+  of the encoder, and one feed-forward output reaches 89 000 on its own; fp16
+  stops at 65 504, so the encoder output is NaN and CIF counts zero tokens.
+  Every block reads the stream through a LayerNorm, which does not care about
+  scale, so the shipped encoder carries the stream at 1/32: one multiply where
+  it enters, one on every attention branch, and each feed-forward's last weight
+  and bias scaled. A power of two is exact, the float output is unchanged
+  bit for bit, and the four reference clips transcribe exactly as FunASR does.
+- **Four-dimensional float inputs are presented NHWC.** The wake-word encoder's
+  `embed_states [1,128,3,19]` and its six `cached_nonlin_attn` caches arrive as
+  `[N,H,W,C]` at the runtime, while the graph's outputs come back NCHW. The task
+  classes transpose on the way in, so a cache fed back unchanged stays
+  consistent; code driving the Engine by hand has to do the same.
+
+Licences, which decide what may be redistributed:
+
+| Model | Terms |
+|---|---|
+| Paraformer-large contextual (FunASR) | The model card declares **Apache-2.0**; FunASR's model licence adds that redistributions keep the attribution and the model name. Trained on undisclosed in-house audio |
+| sherpa-onnx KWS zipformer zh-en 3M | Released by the k2-fsa project as an archive with no model-specific licence, and nothing says what the zh-en model was trained on. **Unresolved** — check the data terms before redistributing |
+| Silero VAD v6.2.3 | **MIT** for the code and the published weights. Training data undisclosed |
+| Matcha-TTS zh-en | The model card declares **Apache-2.0**; the Matcha-TTS code is MIT. The training data is not disclosed, and the author's earlier zh-en model was trained with a recipe built on the Baker corpus (BZNSYP, non-commercial); whether it is in this one is not stated. Check before a commercial build |
+| Vocos 16 kHz (published with Matcha-TTS zh-en) | The model card declares **Apache-2.0**; the Vocos code is MIT. Training data undisclosed |
+
 ## Measured performance
 
 RK3588S, single-frame latency unless stated:
@@ -937,6 +1028,11 @@ RK3588S, single-frame latency unless stated:
 | PP-OCRv6 medium det 480×480, frame → 16 regions | 62 ms NPU against v4's 42 — 17.8 MB against 2.4, and the same regions on this page |
 | YOLOE-11s 640 open-vocab, frame → detections | 62 ms (49 ms NPU) — the vocabulary size does not change it |
 | YOLOP 640, one inference → 18 boxes + two full-frame masks | 160 ms preprocess+infer (126 ms NPU) + 20 ms for the anchor decode and the second mask |
+| Silero VAD, one 32 ms chunk | 0.83 ms (real-time factor 0.026) |
+| Wake word (zipformer KWS), one 160 ms chunk | 34 ms, 25 ms of it NPU (real-time factor 0.21) |
+| Paraformer-large, one 2.7–3.9 s utterance → text | 0.76 s, 0.50 s of it the encoder; the cost is the fixed 24 s window's, not the utterance's |
+| Matcha-TTS zh-en + Vocos, one sentence → 3.3 s of 16 kHz audio | 0.90 s (real-time factor 0.27); the 512-frame decoder is 0.23 s of NPU per call |
+| Vocos alone, 3 s of mel → waveform | 53 ms (26 ms NPU) |
 
 ## Bringing your own model
 

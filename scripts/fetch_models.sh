@@ -172,6 +172,36 @@ REGISTRY=(
   "siglip_b16_224_fp16_rk3588.rknn|hf|ruisv/rcdl-siglip-b16|65440e89b95db838e124ebb10005519bd77b4c2ba7727f7e72ba9056ae67022a"
   "siglip_b16_224_text_coco80.npy|hf|ruisv/rcdl-siglip-b16|0cf7d3aeed35708dd0140f824ac6432ce51dd0a622daadd6eff787ed10bf48e8"
   "siglip_b16_224_labels.txt|hf|ruisv/rcdl-siglip-b16|bd17f1ee35d5f3c862a4894605855abbb9dda4b0621fdb0ac4c2c8c7bb7e730a"
+  # --- speech: every graph is an fp16 build (int8 breaks these networks), and
+  # every input is a computed tensor, so they all present as float32.
+  # Silero VAD v6.2.3: one 32 ms chunk per call, LSTM state carried between
+  # calls. The graph starts at the magnitude spectrum; the STFT runs on the CPU.
+  "silero_vad_16k_fp16_rk3588.rknn|hf|ruisv/rcdl-silero-vad|72e0ec28a1e2f129cec0412331b072dce103a8e58d2c74ea950d9ba6932bd403"
+  # Wake word (zipformer2 KWS, zh-en 3M): the streaming encoder, one 160 ms
+  # chunk per call with 37 cache tensors fed back; the decoder + joiner are a
+  # CPU table, and the token list is sherpa-onnx's.
+  "kws_zipformer_zh_en_3m_c16_fp16_rk3588.rknn|convert|kws_zipformer_zh_en_3m_c16_fp16_rk3588.rknn"
+  "kws_zipformer_zh_en_3m_decoder_joiner.npy|convert|kws_zipformer_zh_en_3m_decoder_joiner.npy"
+  "kws_zipformer_zh_en_3m_tokens.txt|convert|kws_zipformer_zh_en_3m_tokens.txt"
+  # Paraformer-large (zh) ASR: encoder, predictor and decoder as three graphs
+  # with CIF on the CPU between the last two; up to 24 s per utterance. The
+  # token list and am.mvn (the CMVN statistics) come from the same release.
+  "paraformer_encoder_fp16_rk3588.rknn|hf|ruisv/rcdl-paraformer|fa24193d3440021643fec49045286054bb1b90430f38de095a31bb74be738a87"
+  "paraformer_predictor_fp16_rk3588.rknn|hf|ruisv/rcdl-paraformer|eed1c2c99cbf70085875145cbb6242afb005e23eed2f3214a2f0d14302c5a9ef"
+  "paraformer_decoder_fp16_rk3588.rknn|hf|ruisv/rcdl-paraformer|a7a62c578a7f8468c830863e20ff7d23bb478a602474b59cad5372e3ae44e50e"
+  "paraformer_tokens_8404.json|hf|ruisv/rcdl-paraformer|2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127"
+  "paraformer_am.mvn|hf|ruisv/rcdl-paraformer|29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5"
+  # Matcha-TTS (zh-en) acoustic model: encoder + duration predictor (128
+  # tokens) and the flow-matching decoder (512 frames). The embedding lookup is
+  # a CPU table; tokens.txt and lexicon.txt are sherpa-onnx's, unchanged.
+  "matcha_zh_en_enc_l128_fp16_rk3588.rknn|hf|ruisv/rcdl-matcha-tts|4f5c54ddb072fe75eb31f2e353f9cdc7fb1b2d39cd2f90c793b4545937da6428"
+  "matcha_zh_en_dec_t512_fp16_rk3588.rknn|hf|ruisv/rcdl-matcha-tts|61ccf0521a39c080ffae1dcc5c9a8615b263e1395db95f6a249b531445ecad25"
+  "matcha_zh_en_embedding.npy|hf|ruisv/rcdl-matcha-tts|9182b7072805adf33d8b4b893f16e196ff746f3c77b09d229849f3ce66c73ed0"
+  "matcha_zh_en_tokens.txt|hf|ruisv/rcdl-matcha-tts|77fee8e5e5dd96b3547119e6159292c648e99e065c54c97777722e3ce710b9a4"
+  "matcha_zh_en_lexicon.txt|hf|ruisv/rcdl-matcha-tts|599efdcdaff4df2a123ce988c2cb90abcd59b919ef609ce36eb587d68b7ca2c0"
+  # Vocos 16 kHz vocoder: 256 mel frames in, log-magnitude + raw phase out;
+  # exp/cos/sin and the inverse STFT run on the CPU.
+  "vocos_16k_t256_fp16_rk3588.rknn|hf|ruisv/rcdl-vocos|c59eb3d008514ccfab1d05b303095fa322795977694766cd7bd0965c3e512a98"
 )
 
 if [ "${1:-}" = "--list" ]; then

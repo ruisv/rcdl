@@ -1,13 +1,15 @@
-<h1 align="center">RCDL</h1>
-<p align="center"><b>在 Rockchip RK3588 上，几分钟做出一个跑满硬件的视觉应用。</b><br>
-统一的 C++ / Python API：VPU 硬件编解码 → RGA 硬件预处理 → NPU 推理 → 后处理，整条链路零拷贝。</p>
+<h1 align="center">RCDL — RK3588 NPU 通用 AI 开发框架：视觉 + 语音</h1>
+<p align="center"><b>在 Rockchip RK3588 上，几分钟做出一个跑满硬件的视觉或语音应用。</b><br>
+统一的 C++ / Python API：VPU 硬件编解码 → RGA 硬件预处理 → NPU 推理 → 后处理，整条链路零拷贝。<br>
+<b>构建在 Rockchip 官方运行时之上，不是取代它。</b></p>
 
 <p align="center">
 <a href="https://github.com/ruisv/rcdl/releases"><img src="https://img.shields.io/github/v/release/ruisv/rcdl?color=2ea44f" alt="release"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
 <img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg" alt="C++17">
 <img src="https://img.shields.io/badge/python-3.9%E2%80%933.14-3776AB.svg" alt="python">
-<img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20linux--aarch64-0A7BBB.svg" alt="platform">
+<img src="https://img.shields.io/badge/platform-RK3588%20%C2%B7%20RK3576%20%C2%B7%20RK356x-0A7BBB.svg" alt="platform">
+<img src="https://img.shields.io/badge/tested%20on-RK3588-2ea44f.svg" alt="tested on RK3588">
 <a href="model_zoo/README.md"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-FFD21E.svg" alt="models on Hugging Face"></a>
 </p>
 
@@ -30,13 +32,12 @@ Rockchip 官方给的是三套互不相干的 C 库：`librknnrt`（NPU）、`li
 `MPP`（视频编解码）。把它们拼成一条不拷贝内存的流水线，再写对每个模型的后处理，
 通常要几周。RCDL 把这件事做完了：
 
-- **十行代码出结果。** `Engine` 加一个任务类，检测、分割、姿态、OCR、人脸、深度、跟踪等 18 类任务开箱即用。
+- **十行代码出结果。** `Engine` 加一个任务类，检测、分割、姿态、OCR、人脸、深度、跟踪等 18 类视觉任务开箱即用。
+- **整条语音链也在板上。** 唤醒词、端点检测、语音识别、指令匹配、语音合成，和视觉任务共用同一套 `Engine` + 任务类写法；网络在 NPU，特征提取、搜索、解码和文本前端在 CPU，不引入任何第三方库。
 - **硬件各司其职。** 模型在 NPU，缩放和色彩转换在 RGA，编解码在 VPU。CPU 只做后处理，以及硬件做不了时的回退。
 - **真正的零拷贝。** 解码帧、RGA、NPU 输入张量、编码器共用同一块 dma-buf，中间没有 `memcpy`。
 - **三个 NPU 核都用上。** 异步流水线让检测吞吐从 99 fps 到 481 fps，结果与同步版逐帧一致且保序。
-- **结果可复现。** 每个解码器都有 numpy 参考测试，板上 587 个测试覆盖完整硬件路径。RK3588 上那些文档没写的坑（RGA 的 4 GB 限制、两代 RGA 核缩放结果不一致等）已经替你踩过，见 [`docs/RGA.md`](docs/RGA.md)。
-
-RCDL 构建在 Rockchip 官方运行时之上，不是取代它。
+- **结果可复现。** 每个解码器都有 numpy 参考测试，板上 754 个测试覆盖完整硬件路径。RK3588 上那些文档没写的坑（RGA 的 4 GB 限制、两代 RGA 核缩放结果不一致等）已经替你踩过，见 [`docs/RGA.md`](docs/RGA.md)。
 
 ## 安装
 
@@ -59,8 +60,10 @@ curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Minif
 bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init && exec "$SHELL"
 ```
 
-**要求：** RK3588 / RK3588S 开发板，Linux aarch64，RKNPU 驱动 ≥ 0.9.x，当前用户在 `video` 和 `render` 组里。
-RK3576 / RK356x 尚未验证。源码构建、权限设置和常见问题见 [`docs/INSTALL.md`](docs/INSTALL.md)。
+**支持的芯片：** RK3588 / RK3588S、RK3576、RK356x，即 Rockchip RKNPU2 运行时支持的平台。**目前只在 RK3588 / RK3588S 上做过测试**；
+在其他芯片上要用为该芯片编译的 `.rknn`（`target_platform` 不同），Hugging Face 上的预编译模型都是 RK3588 版本。
+
+**要求：** Linux aarch64，RKNPU 驱动 ≥ 0.9.x，当前用户在 `video` 和 `render` 组里。源码构建、权限设置和常见问题见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ## 快速上手
 
@@ -145,6 +148,11 @@ target_link_libraries(app PRIVATE rcdl::rcdl)
 | ×4 超分 | `engine.upscaler()` | Real-ESRGAN Compact |
 | 全景驾驶（检测 + 可行驶区域 + 车道线） | `engine.anchor_detector()` · `engine.segmenter()` | YOLOP |
 | 多目标跟踪 | `engine.tracker()` | ByteTrack + BoT-SORT 外观关联 |
+| 唤醒词 | `rcdl.KeywordSpotter` | sherpa-onnx zipformer KWS（中英） |
+| 语音端点检测 | `rcdl.SileroVad` · `rcdl.VadSegmenter` | Silero VAD v6 |
+| 语音识别 | `rcdl.ParaformerAsr` | Paraformer-large（中文） |
+| 语音指令匹配 | `rcdl.CommandMatcher` | 拼音编辑距离，纯 CPU |
+| 语音合成 | `rcdl.TextToSpeech` | Matcha-TTS 中英 + Vocos |
 
 每个任务都是「与引擎无关的纯函数解码器 + numpy 测试 + 板上测试」。C++ 里有一一对应的类，见 [`docs/CPP_API.md`](docs/CPP_API.md)。
 
@@ -159,6 +167,7 @@ RK3588S 实测（librknnrt 2.3.2，驱动 0.9.8），完整表格和复现方法
 | 1080p H.264 解码 / 4K H.265 解码 | **324 fps** · **244 fps**，每帧都是 dma-buf |
 | 1080p H.264 编码（直接读解码帧） | **197 fps** |
 | 压缩视频 → 检测结果（1080p，YOLOv8n） | **72–97 fps** |
+| 语音：唤醒词 / 一句识别 / 一句合成 | 实时率 0.21 · 0.76 s · 实时率 0.27，全部在板上 |
 
 ## 模型
 
@@ -172,10 +181,15 @@ RK3588S 实测（librknnrt 2.3.2，驱动 0.9.8），完整表格和复现方法
 | [`ruisv/rcdl-siglip-b16`](https://huggingface.co/ruisv/rcdl-siglip-b16) | 图像向量、零样本分类 | Apache-2.0 |
 | [`ruisv/rcdl-xfeat`](https://huggingface.co/ruisv/rcdl-xfeat) | 稀疏特征与匹配 | Apache-2.0 |
 | [`ruisv/rcdl-superres`](https://huggingface.co/ruisv/rcdl-superres) | ×4 超分 | BSD-3-Clause |
+| [`ruisv/rcdl-silero-vad`](https://huggingface.co/ruisv/rcdl-silero-vad) | 语音端点检测 | MIT |
+| [`ruisv/rcdl-paraformer`](https://huggingface.co/ruisv/rcdl-paraformer) | 中文语音识别（三段 + 词表 + CMVN） | FunASR 模型协议（保留署名） |
+| [`ruisv/rcdl-matcha-tts`](https://huggingface.co/ruisv/rcdl-matcha-tts) | 中英语音合成（声学模型 + 文本前端文件） | Apache-2.0（训练数据未公开） |
+| [`ruisv/rcdl-vocos`](https://huggingface.co/ruisv/rcdl-vocos) | 声码器，和 Matcha 配套 | Apache-2.0 |
 
 在源码仓库里，`scripts/fetch_models.sh` 一条命令把它们全部拉到 `models/`，并逐个校验 SHA-256。国内网络可以先 `export HF_ENDPOINT=https://hf-mirror.com`。
 
 - **YOLO 系列是 Ultralytics 的 AGPL-3.0 模型。** 随软件分发或通过网络提供服务，你的软件也要遵守 AGPL-3.0；闭源或商用需要 Ultralytics 的企业授权。
+- **唤醒词模型暂不发布**：上游没有给出模型许可证，也没说训练数据。所有语音网络在 RK3588 上的构建方法和需要的改图见 [`model_zoo/speech/`](model_zoo/speech/)。
 - **其余已验证的模型为什么没有发布**（预训练权重或训练数据带来的非商用限制、上游没有写许可证）逐个写在 [`model_zoo/README.md`](model_zoo/README.md)。
 - **这些模型和你自己的模型，** 用 [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) 在 x86 主机上从 ONNX 转换。`.rknn` 和芯片型号绑定，转换用的 toolkit 版本不能高于板上运行时的版本。Rockchip 的 [rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo) 有下载脚本和转换示例，它的 YOLO 导出布局正是 RCDL 解码器读的那种。
 - [`docs/MODELS.md`](docs/MODELS.md) 列出了每个已验证模型的输入格式、通道顺序、激活函数在图内还是图外，以及转换时实际踩过的坑。通道顺序和激活位置这两项从 `.rknn` 文件里读不出来，填错只会悄悄掉精度。

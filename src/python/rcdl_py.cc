@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -52,6 +53,14 @@
 #include "rcdl/tasks/ocr.h"
 #include "rcdl/tasks/pose.h"
 #include "rcdl/tasks/segmentation.h"
+#include "rcdl/preproc/fbank.h"
+#include "rcdl/preproc/istft.h"
+#include "rcdl/tasks/asr.h"
+#include "rcdl/tasks/command.h"
+#include "rcdl/tasks/kws.h"
+#include "rcdl/tasks/tts.h"
+#include "rcdl/tasks/vad.h"
+#include "rcdl/tasks/vocoder.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"
 #include "rcdl/version.h"
@@ -336,6 +345,17 @@ const std::int32_t* int32Data(const Contig& a, const char* what) {
     throw std::invalid_argument(std::string(what) + ": expected an int32 array");
   }
   return static_cast<const std::int32_t*>(a.data());
+}
+
+// Move a std::vector into a numpy array that owns it (freed by a capsule when
+// the array is collected): no copy of the payload. The speech bindings return
+// their PCM, features and embeddings this way.
+template <typename T>
+nb::ndarray<nb::numpy, T> toNumpy(std::vector<T> vec, std::initializer_list<std::size_t> shape) {
+  auto* held = new std::vector<T>(std::move(vec));
+  nb::capsule owner(held, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+  std::vector<std::size_t> dims(shape);
+  return nb::ndarray<nb::numpy, T>(held->data(), dims.size(), dims.data(), owner);
 }
 
 // Masks, label maps and depth maps go out as numpy arrays of the map's own
@@ -4247,4 +4267,478 @@ NB_MODULE(rcdl_py, m) {
           },
           "letterbox"_a, "Decode the bound Engine's raw anchor heads into Detections")
       .def_prop_ro("config", &rcdl::AnchorDetector::config, nb::rv_policy::copy);
+
+  // ===========================================================================
+  // Speech: Kaldi fbank front end + Paraformer ASR
+  // ===========================================================================
+  nb::class_<rcdl::FbankConfig>(m, "FbankConfig")
+      .def(nb::init<>())
+      .def_rw("sample_rate", &rcdl::FbankConfig::sample_rate)
+      .def_rw("num_mel_bins", &rcdl::FbankConfig::num_mel_bins)
+      .def_rw("frame_length_ms", &rcdl::FbankConfig::frame_length_ms)
+      .def_rw("frame_shift_ms", &rcdl::FbankConfig::frame_shift_ms)
+      .def_rw("preemphasis", &rcdl::FbankConfig::preemphasis)
+      .def_rw("remove_dc_offset", &rcdl::FbankConfig::remove_dc_offset)
+      .def_rw("low_freq", &rcdl::FbankConfig::low_freq)
+      .def_rw("high_freq", &rcdl::FbankConfig::high_freq)
+      .def_rw("input_scale", &rcdl::FbankConfig::input_scale)
+      .def_rw("window", &rcdl::FbankConfig::window);
+
+  nb::class_<rcdl::Fbank>(m, "Fbank")
+      .def(nb::init<const rcdl::FbankConfig&>(), "config"_a = rcdl::FbankConfig{})
+      .def(
+          "compute",
+          [](rcdl::Fbank& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            std::vector<float> out;
+            int frames;
+            {
+              nb::gil_scoped_release rel;
+              frames = self.compute(pcm.data(), pcm.shape(0), out);
+            }
+            return toNumpy(std::move(out), {static_cast<size_t>(frames),
+                                            static_cast<size_t>(self.config().num_mel_bins)});
+          },
+          "pcm"_a, "Mono float PCM -> (frames, num_mel_bins) log-mel features.")
+      .def("num_frames", &rcdl::Fbank::numFrames, "samples"_a)
+      .def_prop_ro("frame_length", &rcdl::Fbank::frameLength)
+      .def_prop_ro("frame_shift", &rcdl::Fbank::frameShift)
+      .def_prop_ro("fft_size", &rcdl::Fbank::fftSize)
+      .def_prop_ro("config", &rcdl::Fbank::config);
+
+  m.def(
+      "lfr_stack",
+      [](nb::ndarray<const float, nb::ndim<2>, nb::c_contig> feats, int lfr_m, int lfr_n) {
+        std::vector<float> out;
+        const int dim = static_cast<int>(feats.shape(1));
+        const int n = rcdl::lfrStack(feats.data(), static_cast<int>(feats.shape(0)), dim,
+                                     lfr_m, lfr_n, out);
+        return toNumpy(std::move(out),
+                       {static_cast<size_t>(n), static_cast<size_t>(lfr_m) * dim});
+      },
+      "feats"_a, "lfr_m"_a = 7, "lfr_n"_a = 6,
+      "Low-frame-rate stacking: (T, D) -> (ceil(T / lfr_n), lfr_m * D), as FunASR.");
+
+  nb::class_<rcdl::Cmvn>(m, "Cmvn")
+      .def(nb::init<>())
+      .def_prop_ro("dim", &rcdl::Cmvn::dim)
+      .def_prop_ro(
+          "shift", [](const rcdl::Cmvn& c) { return toNumpy(std::vector<float>(c.shift), {c.shift.size()}); },
+          nb::rv_policy::reference)
+      .def_prop_ro(
+          "scale", [](const rcdl::Cmvn& c) { return toNumpy(std::vector<float>(c.scale), {c.scale.size()}); },
+          nb::rv_policy::reference)
+      .def(
+          "apply",
+          [](const rcdl::Cmvn& c, nb::ndarray<const float, nb::ndim<2>, nb::c_contig> feats) {
+            if (static_cast<int>(feats.shape(1)) != c.dim())
+              throw std::invalid_argument("Cmvn.apply: feature dim does not match the CMVN");
+            std::vector<float> out(feats.data(), feats.data() + feats.size());
+            c.apply(out.data(), static_cast<int>(feats.shape(0)));
+            return toNumpy(std::move(out), {feats.shape(0), feats.shape(1)});
+          },
+          "feats"_a, "(x + shift) * scale, per dimension; returns a new array.");
+  m.def("parse_kaldi_cmvn", &rcdl::parseKaldiCmvn, "text"_a,
+        "Parse an am.mvn (<AddShift> / <Rescale>) into a Cmvn.");
+  m.def("load_kaldi_cmvn", &rcdl::loadKaldiCmvn, "path"_a);
+
+  nb::class_<rcdl::CifConfig>(m, "CifConfig")
+      .def(nb::init<>())
+      .def_rw("threshold", &rcdl::CifConfig::threshold)
+      .def_rw("tail_threshold", &rcdl::CifConfig::tail_threshold)
+      .def_rw("max_tokens", &rcdl::CifConfig::max_tokens);
+
+  m.def(
+      "cif_integrate",
+      [](nb::ndarray<const float, nb::ndim<1>, nb::c_contig> alphas,
+         nb::ndarray<const float, nb::ndim<2>, nb::c_contig> hidden, int valid_frames,
+         const rcdl::CifConfig& cfg) {
+        if (hidden.shape(0) != alphas.shape(0))
+          throw std::invalid_argument("cif_integrate: alphas and hidden differ in frame count");
+        std::vector<float> emb;
+        const int dim = static_cast<int>(hidden.shape(1));
+        const int n = rcdl::cifIntegrate(alphas.data(), hidden.data(),
+                                         static_cast<int>(alphas.shape(0)), dim, valid_frames,
+                                         cfg, emb);
+        return nb::make_tuple(
+            toNumpy(std::move(emb), {static_cast<size_t>(cfg.max_tokens), static_cast<size_t>(dim)}),
+            n);
+      },
+      "alphas"_a, "hidden"_a, "valid_frames"_a, "config"_a = rcdl::CifConfig{},
+      "Continuous integrate-and-fire -> ((max_tokens, D) embeddings, token count).");
+
+  m.def("load_token_list", &rcdl::loadTokenList, "path"_a,
+        "Token list from a JSON array (tokens.json) or one token per line.");
+  m.def(
+      "argmax_tokens",
+      [](nb::ndarray<const float, nb::ndim<2>, nb::c_contig> logits) {
+        return rcdl::argmaxTokens(logits.data(), static_cast<int>(logits.shape(0)),
+                                  static_cast<int>(logits.shape(1)));
+      },
+      "logits"_a, "Row-wise argmax of (rows, vocab) logits.");
+  m.def("tokens_to_text", &rcdl::tokensToText, "ids"_a, "vocab"_a,
+        "Join token pieces: drop <specials>, glue '@@' pieces, space Latin words.");
+
+  nb::class_<rcdl::AsrResult>(m, "AsrResult")
+      .def(nb::init<>())
+      .def_ro("text", &rcdl::AsrResult::text)
+      .def_ro("token_ids", &rcdl::AsrResult::token_ids)
+      .def_ro("feature_frames", &rcdl::AsrResult::feature_frames)
+      .def_ro("truncated", &rcdl::AsrResult::truncated)
+      .def("__repr__", [](const rcdl::AsrResult& r) {
+        return "AsrResult(text='" + r.text + "', tokens=" + std::to_string(r.token_ids.size()) +
+               (r.truncated ? ", truncated" : "") + ")";
+      });
+
+  nb::class_<rcdl::ParaformerConfig>(m, "ParaformerConfig")
+      .def(nb::init<>())
+      .def_rw("fbank", &rcdl::ParaformerConfig::fbank)
+      .def_rw("lfr_m", &rcdl::ParaformerConfig::lfr_m)
+      .def_rw("lfr_n", &rcdl::ParaformerConfig::lfr_n)
+      .def_rw("cif", &rcdl::ParaformerConfig::cif);
+
+  nb::class_<rcdl::ParaformerAsr>(m, "ParaformerAsr")
+      .def(nb::init<rcdl::Engine&, rcdl::Engine&, rcdl::Engine&, std::vector<std::string>,
+                    rcdl::Cmvn, rcdl::ParaformerConfig>(),
+           "encoder"_a, "predictor"_a, "decoder"_a, "vocab"_a, "cmvn"_a,
+           "config"_a = rcdl::ParaformerConfig{}, nb::keep_alive<1, 2>(),
+           nb::keep_alive<1, 3>(), nb::keep_alive<1, 4>())
+      .def(
+          "transcribe",
+          [](rcdl::ParaformerAsr& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            nb::gil_scoped_release rel;  // front end + three NPU stages + CIF
+            return self.transcribe(pcm.data(), pcm.shape(0));
+          },
+          "pcm"_a, "One mono 16 kHz float utterance -> AsrResult.")
+      .def(
+          "transcribe_features",
+          [](rcdl::ParaformerAsr& self, nb::ndarray<const float, nb::ndim<2>, nb::c_contig> f) {
+            if (static_cast<int>(f.shape(1)) != self.featureDim())
+              throw std::invalid_argument("transcribe_features: feature dim does not match the encoder");
+            nb::gil_scoped_release rel;
+            return self.transcribeFeatures(f.data(), static_cast<int>(f.shape(0)));
+          },
+          "feats"_a,
+          "(frames, feature_dim) LFR+CMVN features -> AsrResult.")
+      .def(
+          "features",
+          [](rcdl::ParaformerAsr& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            std::vector<float> out;
+            int n;
+            {
+              nb::gil_scoped_release rel;
+              n = self.features(pcm.data(), pcm.shape(0), out);
+            }
+            return toNumpy(std::move(out),
+                           {static_cast<size_t>(n), static_cast<size_t>(self.featureDim())});
+          },
+          "pcm"_a, "Front end only: PCM -> (frames, feature_dim) normalised features.")
+      .def_prop_ro("max_frames", &rcdl::ParaformerAsr::maxFrames)
+      .def_prop_ro("max_seconds", &rcdl::ParaformerAsr::maxSeconds)
+      .def_prop_ro("feature_dim", &rcdl::ParaformerAsr::featureDim)
+      .def_prop_ro("max_tokens", &rcdl::ParaformerAsr::maxTokens)
+      .def_prop_ro("vocab_size", &rcdl::ParaformerAsr::vocabSize)
+      .def_prop_ro("config", &rcdl::ParaformerAsr::config);
+
+  m.def("to_pinyin", &rcdl::toPinyin, "text"_a,
+        "Toneless pinyin of a UTF-8 string, one token per syllable.");
+  nb::class_<rcdl::CommandMatch>(m, "CommandMatch")
+      .def(nb::init<>())
+      .def_ro("index", &rcdl::CommandMatch::index)
+      .def_ro("nearest", &rcdl::CommandMatch::nearest)
+      .def_ro("distance", &rcdl::CommandMatch::distance)
+      .def_ro("command", &rcdl::CommandMatch::command)
+      .def("__bool__", [](const rcdl::CommandMatch& r) { return r.index >= 0; })
+      .def("__repr__", [](const rcdl::CommandMatch& r) {
+        return "CommandMatch(index=" + std::to_string(r.index) + ", command='" + r.command +
+               "', nearest=" + std::to_string(r.nearest) +
+               ", distance=" + std::to_string(r.distance) + ")";
+      });
+  nb::class_<rcdl::CommandMatcher>(m, "CommandMatcher")
+      .def(nb::init<std::vector<std::string>, float>(), "commands"_a, "max_distance"_a = 0.5f)
+      .def("match", &rcdl::CommandMatcher::match, "text"_a,
+           "Recogniser text -> CommandMatch (index -1 = not a command).")
+      .def("distances", &rcdl::CommandMatcher::distances, "text"_a,
+           "Normalised pinyin edit distance to every command, in list order.")
+      .def_prop_ro("commands", &rcdl::CommandMatcher::commands)
+      .def_prop_ro("max_distance", &rcdl::CommandMatcher::maxDistance)
+      .def("__len__", &rcdl::CommandMatcher::size);
+
+  // Speech synthesis back end: iSTFT + Vocos
+  nb::class_<rcdl::IstftConfig>(m, "IstftConfig")
+      .def(nb::init<>())
+      .def_rw("n_fft", &rcdl::IstftConfig::n_fft)
+      .def_rw("hop_length", &rcdl::IstftConfig::hop_length)
+      .def_rw("center", &rcdl::IstftConfig::center);
+  nb::class_<rcdl::Istft>(m, "Istft")
+      .def(nb::init<const rcdl::IstftConfig&>(), "config"_a = rcdl::IstftConfig{})
+      .def(
+          "compute",
+          [](rcdl::Istft& self, nb::ndarray<const float, nb::ndim<2>, nb::c_contig> real,
+             nb::ndarray<const float, nb::ndim<2>, nb::c_contig> imag) {
+            if (real.shape(0) != imag.shape(0) || real.shape(1) != imag.shape(1) ||
+                static_cast<int>(real.shape(1)) != self.bins())
+              throw std::invalid_argument("Istft.compute: real and imag must both be (frames, " +
+                                          std::to_string(self.bins()) + ")");
+            std::vector<float> out;
+            {
+              nb::gil_scoped_release rel;
+              self.compute(real.data(), imag.data(), static_cast<int>(real.shape(0)), out);
+            }
+            const size_t n = out.size();
+            return toNumpy(std::move(out), {n});
+          },
+          "real"_a, "imag"_a, "(frames, n_fft/2+1) real and imaginary parts -> waveform.")
+      .def(
+          "compute_polar",
+          [](rcdl::Istft& self, nb::ndarray<const float, nb::ndim<2>, nb::c_contig> mag,
+             nb::ndarray<const float, nb::ndim<2>, nb::c_contig> cos,
+             nb::ndarray<const float, nb::ndim<2>, nb::c_contig> sin) {
+            const auto ok = [&](const auto& a) {
+              return a.shape(0) == mag.shape(0) && a.shape(1) == mag.shape(1);
+            };
+            if (static_cast<int>(mag.shape(0)) != self.bins() || !ok(cos) || !ok(sin))
+              throw std::invalid_argument("Istft.compute_polar: mag, cos, sin must all be (" +
+                                          std::to_string(self.bins()) + ", frames)");
+            std::vector<float> out;
+            {
+              nb::gil_scoped_release rel;
+              self.computePolar(mag.data(), cos.data(), sin.data(),
+                                static_cast<int>(mag.shape(1)), out);
+            }
+            const size_t n = out.size();
+            return toNumpy(std::move(out), {n});
+          },
+          "mag"_a, "cos"_a, "sin"_a,
+          "(n_fft/2+1, frames) magnitude and phase cos/sin (Vocos layout) -> waveform.")
+      .def("num_samples", &rcdl::Istft::numSamples, "frames"_a)
+      .def_prop_ro("bins", &rcdl::Istft::bins)
+      .def_prop_ro("config", &rcdl::Istft::config);
+  nb::class_<rcdl::VocosConfig>(m, "VocosConfig")
+      .def(nb::init<>())
+      .def_rw("stft", &rcdl::VocosConfig::stft)
+      .def_rw("context", &rcdl::VocosConfig::context)
+      .def_rw("pad_value", &rcdl::VocosConfig::pad_value)
+      .def_rw("max_magnitude", &rcdl::VocosConfig::max_magnitude)
+      .def_rw("sample_rate", &rcdl::VocosConfig::sample_rate);
+  nb::class_<rcdl::VocosVocoder>(m, "VocosVocoder")
+      .def(nb::init<rcdl::Engine&, rcdl::VocosConfig>(), "engine"_a,
+           "config"_a = rcdl::VocosConfig{}, nb::keep_alive<1, 2>())
+      .def(
+          "synthesize",
+          [](rcdl::VocosVocoder& self, nb::ndarray<const float, nb::ndim<2>, nb::c_contig> mel) {
+            if (static_cast<int>(mel.shape(0)) != self.numMels())
+              throw std::invalid_argument("VocosVocoder.synthesize: mel must be (" +
+                                          std::to_string(self.numMels()) + ", frames)");
+            std::vector<float> out;
+            {
+              nb::gil_scoped_release rel;
+              self.synthesize(mel.data(), static_cast<int>(mel.shape(1)), out);
+            }
+            const size_t n = out.size();
+            return toNumpy(std::move(out), {n});
+          },
+          "mel"_a, "(num_mels, frames) log-mel -> float waveform.")
+      .def_prop_ro("num_mels", &rcdl::VocosVocoder::numMels)
+      .def_prop_ro("chunk_frames", &rcdl::VocosVocoder::chunkFrames)
+      .def_prop_ro("body_frames", &rcdl::VocosVocoder::bodyFrames)
+      .def_prop_ro("sample_rate", &rcdl::VocosVocoder::sampleRate)
+      .def_prop_ro("config", &rcdl::VocosVocoder::config);
+
+  // Voice activity detection: Silero VAD + streaming segmenter
+  nb::class_<rcdl::SileroVad>(m, "SileroVad")
+      .def(nb::init<rcdl::Engine&>(), "engine"_a, nb::keep_alive<1, 2>())
+      .def(
+          "probability",
+          [](rcdl::SileroVad& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> chunk) {
+            if (chunk.shape(0) != static_cast<size_t>(rcdl::SileroVad::kChunk))
+              throw std::invalid_argument("SileroVad.probability: chunk must be " +
+                                          std::to_string(rcdl::SileroVad::kChunk) +
+                                          " samples");
+            nb::gil_scoped_release rel;
+            return self.probability(chunk.data());
+          },
+          "chunk"_a,
+          "Speech probability of the next 512 samples (16 kHz float PCM); stateful.")
+      .def("reset", &rcdl::SileroVad::reset)
+      .def_prop_ro_static("chunk", [](nb::handle) { return rcdl::SileroVad::kChunk; })
+      .def_prop_ro_static("sample_rate", [](nb::handle) { return rcdl::SileroVad::kSampleRate; });
+  nb::class_<rcdl::VadConfig>(m, "VadConfig")
+      .def(nb::init<>())
+      .def_rw("threshold", &rcdl::VadConfig::threshold)
+      .def_rw("neg_threshold", &rcdl::VadConfig::neg_threshold)
+      .def_rw("min_speech_ms", &rcdl::VadConfig::min_speech_ms)
+      .def_rw("min_silence_ms", &rcdl::VadConfig::min_silence_ms)
+      .def_rw("speech_pad_ms", &rcdl::VadConfig::speech_pad_ms)
+      .def_rw("max_speech_s", &rcdl::VadConfig::max_speech_s);
+  nb::class_<rcdl::VadSegment>(m, "VadSegment")
+      .def_ro("start", &rcdl::VadSegment::start)
+      .def_ro("end", &rcdl::VadSegment::end)
+      .def_prop_ro("pcm",
+                   [](const rcdl::VadSegment& s) {
+                     return toNumpy(std::vector<float>(s.pcm), {s.pcm.size()});
+                   },
+                   nb::rv_policy::reference);
+  nb::class_<rcdl::VadSegmenter>(m, "VadSegmenter")
+      .def(nb::init<rcdl::SileroVad&, rcdl::VadConfig>(), "vad"_a,
+           "config"_a = rcdl::VadConfig{}, nb::keep_alive<1, 2>())
+      .def(
+          "feed",
+          [](rcdl::VadSegmenter& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            nb::gil_scoped_release rel;
+            return self.feed(pcm.data(), pcm.shape(0));
+          },
+          "pcm"_a, "Float PCM of any length -> utterances that closed.")
+      .def("flush", &rcdl::VadSegmenter::flush)
+      .def(
+          "segments",
+          [](rcdl::VadSegmenter& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            nb::gil_scoped_release rel;
+            return self.segments(pcm.data(), pcm.shape(0));
+          },
+          "pcm"_a, "Whole recording -> its utterances (from a reset).")
+      .def("reset", &rcdl::VadSegmenter::reset)
+      .def_prop_ro("in_speech", &rcdl::VadSegmenter::inSpeech)
+      .def_prop_ro("last_probability", &rcdl::VadSegmenter::lastProbability)
+      .def_prop_ro("config", &rcdl::VadSegmenter::config);
+
+  // Keyword spotting: streaming zipformer transducer
+  nb::class_<rcdl::KwsConfig>(m, "KwsConfig")
+      .def(nb::init<>())
+      .def_rw("keywords_score", &rcdl::KwsConfig::keywords_score)
+      .def_rw("keywords_threshold", &rcdl::KwsConfig::keywords_threshold)
+      .def_rw("num_trailing_blanks", &rcdl::KwsConfig::num_trailing_blanks)
+      .def_rw("max_active_paths", &rcdl::KwsConfig::max_active_paths);
+  nb::class_<rcdl::KwsDetection>(m, "KwsDetection")
+      .def_ro("keyword", &rcdl::KwsDetection::keyword)
+      .def_ro("index", &rcdl::KwsDetection::index)
+      .def_ro("start", &rcdl::KwsDetection::start)
+      .def_ro("end", &rcdl::KwsDetection::end)
+      .def_ro("tokens", &rcdl::KwsDetection::tokens)
+      .def("__repr__", [](const rcdl::KwsDetection& d) {
+        return "KwsDetection('" + d.keyword + "', " + std::to_string(d.start) + "-" +
+               std::to_string(d.end) + " s)";
+      });
+  nb::class_<rcdl::KeywordSpotter>(m, "KeywordSpotter")
+      .def(nb::init<rcdl::Engine&, const std::string&, const std::string&, rcdl::KwsConfig>(),
+           "encoder"_a, "decoder_joiner"_a, "tokens"_a, "config"_a = rcdl::KwsConfig{},
+           nb::keep_alive<1, 2>())
+      .def("set_keywords", &rcdl::KeywordSpotter::setKeywords, "text"_a)
+      .def("load_keywords", &rcdl::KeywordSpotter::loadKeywords, "path"_a)
+      .def_prop_ro("keywords", &rcdl::KeywordSpotter::keywords)
+      .def(
+          "feed",
+          [](rcdl::KeywordSpotter& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            nb::gil_scoped_release rel;
+            return self.feed(pcm.data(), pcm.shape(0));
+          },
+          "pcm"_a, "16 kHz float PCM of any length -> detections.")
+      .def(
+          "encode",
+          [](rcdl::KeywordSpotter& self, nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm) {
+            int frames = 0;
+            std::vector<float> e;
+            {
+              nb::gil_scoped_release rel;
+              e = self.encode(pcm.data(), pcm.shape(0), frames);
+            }
+            const size_t d = frames ? e.size() / frames : 0;
+            return toNumpy(std::move(e), {static_cast<size_t>(frames), d});
+          },
+          "pcm"_a, "Encoder output (frames, D) of a whole recording, from a reset.")
+      .def(
+          "flush",
+          [](rcdl::KeywordSpotter& self) {
+            nb::gil_scoped_release rel;
+            return self.flush();
+          },
+          "End of stream: what still fires, then reset.")
+      .def("reset", &rcdl::KeywordSpotter::reset)
+      .def("token_id", &rcdl::KeywordSpotter::tokenId, "token"_a)
+      .def_prop_ro("vocab_size", &rcdl::KeywordSpotter::vocabSize)
+      .def_prop_ro("config", &rcdl::KeywordSpotter::config);
+
+  // Speech synthesis: Matcha-TTS front end + acoustic model, and the whole chain
+  nb::class_<rcdl::MatchaFrontendConfig>(m, "MatchaFrontendConfig")
+      .def(nb::init<>())
+      .def_rw("min_words", &rcdl::MatchaFrontendConfig::min_words)
+      .def_rw("max_words", &rcdl::MatchaFrontendConfig::max_words);
+  nb::class_<rcdl::MatchaFrontend>(m, "MatchaFrontend")
+      .def(nb::init<const std::string&, const std::string&, rcdl::MatchaFrontendConfig>(),
+           "tokens"_a, "lexicon"_a, "config"_a = rcdl::MatchaFrontendConfig{})
+      .def("encode", &rcdl::MatchaFrontend::encode, "text"_a,
+           "Text -> one token-id list per sentence.")
+      .def("sentences", &rcdl::MatchaFrontend::sentences, "text"_a)
+      .def_static("read_numbers", &rcdl::MatchaFrontend::readNumbers, "text"_a)
+      .def_prop_ro("vocab_size", &rcdl::MatchaFrontend::vocabSize)
+      .def_prop_ro("lexicon_size", &rcdl::MatchaFrontend::lexiconSize);
+  nb::class_<rcdl::MatchaConfig>(m, "MatchaConfig")
+      .def(nb::init<>())
+      .def_rw("noise_scale", &rcdl::MatchaConfig::noise_scale)
+      .def_rw("length_scale", &rcdl::MatchaConfig::length_scale)
+      .def_rw("seed", &rcdl::MatchaConfig::seed);
+  nb::class_<rcdl::MatchaResult>(m, "MatchaResult")
+      .def_prop_ro("mel",
+                   [](const rcdl::MatchaResult& r) {
+                     const size_t mels = r.frames ? r.mel.size() / r.frames : 0;
+                     return toNumpy(std::vector<float>(r.mel),
+                                    {mels, static_cast<size_t>(r.frames)});
+                   },
+                   nb::rv_policy::reference)
+      .def_ro("frames", &rcdl::MatchaResult::frames)
+      .def_ro("durations", &rcdl::MatchaResult::durations)
+      .def_ro("truncated", &rcdl::MatchaResult::truncated);
+  nb::class_<rcdl::MatchaAcoustic>(m, "MatchaAcoustic")
+      .def(nb::init<rcdl::Engine&, rcdl::Engine&, const std::string&, rcdl::MatchaConfig>(),
+           "encoder"_a, "decoder"_a, "embedding"_a, "config"_a = rcdl::MatchaConfig{},
+           nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
+      .def(
+          "synthesize",
+          [](rcdl::MatchaAcoustic& self, const std::vector<int>& ids) {
+            nb::gil_scoped_release rel;
+            return self.synthesize(ids.data(), static_cast<int>(ids.size()));
+          },
+          "ids"_a, "One sentence's token ids -> MatchaResult.")
+      .def("seed", &rcdl::MatchaAcoustic::seed, "seed"_a)
+      .def_prop_ro("max_tokens", &rcdl::MatchaAcoustic::maxTokens)
+      .def_prop_ro("max_frames", &rcdl::MatchaAcoustic::maxFrames)
+      .def_prop_ro("num_mels", &rcdl::MatchaAcoustic::numMels)
+      .def_prop_ro("vocab_size", &rcdl::MatchaAcoustic::vocabSize)
+      .def_prop_ro("config", &rcdl::MatchaAcoustic::config);
+  nb::class_<rcdl::TtsResult>(m, "TtsResult")
+      .def_prop_ro("pcm",
+                   [](const rcdl::TtsResult& r) {
+                     return toNumpy(std::vector<float>(r.pcm), {r.pcm.size()});
+                   },
+                   nb::rv_policy::reference)
+      .def_ro("sample_rate", &rcdl::TtsResult::sample_rate)
+      .def_ro("sentences", &rcdl::TtsResult::sentences)
+      .def_ro("truncated", &rcdl::TtsResult::truncated);
+  m.def(
+      "scale_silence",
+      [](nb::ndarray<const float, nb::ndim<1>, nb::c_contig> pcm, int sample_rate, float scale,
+         float min_pause_s, float level) {
+        std::vector<float> in(pcm.data(), pcm.data() + pcm.shape(0));
+        std::vector<float> out = rcdl::scaleSilence(in, sample_rate, scale, min_pause_s, level);
+        const size_t n = out.size();
+        return toNumpy(std::move(out), {n});
+      },
+      "pcm"_a, "sample_rate"_a, "scale"_a, "min_pause_s"_a = 0.2f, "level"_a = 0.01f,
+      "Shorten every pause (|x| <= level for >= min_pause_s) to scale of its length.");
+  nb::class_<rcdl::TextToSpeechConfig>(m, "TextToSpeechConfig")
+      .def(nb::init<>())
+      .def_rw("silence_scale", &rcdl::TextToSpeechConfig::silence_scale);
+  nb::class_<rcdl::TextToSpeech>(m, "TextToSpeech")
+      .def(nb::init<rcdl::MatchaFrontend, rcdl::MatchaAcoustic&, rcdl::VocosVocoder&,
+                    rcdl::TextToSpeechConfig>(),
+           "frontend"_a, "acoustic"_a, "vocoder"_a, "config"_a = rcdl::TextToSpeechConfig{},
+           nb::keep_alive<1, 3>(), nb::keep_alive<1, 4>())
+      .def(
+          "synthesize",
+          [](rcdl::TextToSpeech& self, const std::string& text) {
+            nb::gil_scoped_release rel;
+            return self.synthesize(text);
+          },
+          "text"_a, "Text -> TtsResult (16 kHz float PCM).")
+      .def_prop_ro("frontend", &rcdl::TextToSpeech::frontend)
+      .def_prop_ro("config", &rcdl::TextToSpeech::config);
 }

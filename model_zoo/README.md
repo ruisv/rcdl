@@ -19,6 +19,10 @@ are in [`docs/MODELS.md`](../docs/MODELS.md).
 | [`ruisv/rcdl-siglip-b16`](https://huggingface.co/ruisv/rcdl-siglip-b16) | SigLIP base/16 image tower, plus a COCO-80 text table for zero-shot classification | Apache-2.0 |
 | [`ruisv/rcdl-xfeat`](https://huggingface.co/ruisv/rcdl-xfeat) | XFeat sparse features, 640×480 | Apache-2.0 |
 | [`ruisv/rcdl-superres`](https://huggingface.co/ruisv/rcdl-superres) | Real-ESRGAN Compact ×4, fp16 and int8 | BSD-3-Clause |
+| [`ruisv/rcdl-silero-vad`](https://huggingface.co/ruisv/rcdl-silero-vad) | Silero VAD v6, 16 kHz voice activity | MIT |
+| [`ruisv/rcdl-paraformer`](https://huggingface.co/ruisv/rcdl-paraformer) | Paraformer-large Chinese speech recognition: encoder, predictor, decoder, vocabulary, CMVN | FunASR Model License (attribution) |
+| [`ruisv/rcdl-matcha-tts`](https://huggingface.co/ruisv/rcdl-matcha-tts) | Matcha-TTS zh-en acoustic model, with its embedding table, tokens and lexicon | Apache-2.0, data undisclosed |
+| [`ruisv/rcdl-vocos`](https://huggingface.co/ruisv/rcdl-vocos) | Vocos 16 kHz vocoder, paired with Matcha | Apache-2.0 |
 
 Each repo's model card lists its files, the measured speed and accuracy on the
 board, a working snippet and what to know before deploying. The card sources are
@@ -58,11 +62,12 @@ published: silence is not permission.
 
 | what you may do with the `.rknn` | models | published |
 |---|---|---|
-| **Redistribute, including commercially** | PP-OCR v4/v5/v6 (Apache-2.0 on code and every model card) · Depth-Anything-V2 **Small** (Apache-2.0 on code and weights) · SigLIP base/16 (Apache-2.0) · XFeat (weights committed in the Apache-2.0 repo) · Real-ESRGAN Compact (BSD-3-Clause, weights released by the copyright holder) | yes |
+| **Redistribute, including commercially** | PP-OCR v4/v5/v6 (Apache-2.0 on code and every model card) · Depth-Anything-V2 **Small** (Apache-2.0 on code and weights) · SigLIP base/16 (Apache-2.0) · XFeat (weights committed in the Apache-2.0 repo) · Real-ESRGAN Compact (BSD-3-Clause, weights released by the copyright holder) · Silero VAD v6.2.3 (MIT on code and weights) · Paraformer-large (FunASR Model License: use, modify and share, keeping the source, authors and model name) | yes |
+| **Redistributable, with one thing worth checking** | Matcha-TTS zh-en and its Vocos vocoder: the cards declare Apache-2.0, but the training data is undisclosed, and the author's earlier zh-en model was trained with a recipe built on the Baker corpus (BZNSYP, non-commercial). Check before a commercial build | yes |
 | **Redistribute under copyleft** | YOLOv8n, YOLO11n, YOLO26n and their seg / pose / obb / cls variants (Ultralytics, **AGPL-3.0**): software that ships them falls under AGPL-3.0; a closed or commercial product needs Ultralytics' Enterprise licence | yes |
 | **Not yet checked to the end** | RTMW-s (Apache-2.0, trained on a mix of datasets) · RetinaFace (MIT code, trained on WIDER FACE) · ResNet-18 (ImageNet) | not yet |
 | **Non-commercial** | PP-LiteSeg and YOLO26n-sem (trained on **Cityscapes**, which bars commercial use of models trained on it; YOLO26n-sem is also AGPL-3.0) · YOLOP (MIT code, but **BDD100K** limits commercial use) · ArcFace R50 (InsightFace weights are non-commercial research only) · YOLOE-11s (AGPL-3.0, and its vocabulary is embedded with Apple's MobileCLIP text encoder, whose weights are licensed for **non-commercial research only**) | no |
-| **Unresolved** | NeuFlow v2 (Apache-2.0 code; trained on FlyingThings3D, whose terms are research-only and silent about trained models) · OSNet (MIT code; every ReID-useful checkpoint is trained on MSMT17 or Market-1501 under academic-only terms) · EdgeSAM (the upstream repository states no licence at all) | no |
+| **Unresolved** | sherpa-onnx KWS zipformer zh-en 3M (the wake word; released with no model licence and no word on its training data) · NeuFlow v2 (Apache-2.0 code; trained on FlyingThings3D, whose terms are research-only and silent about trained models) · OSNet (MIT code; every ReID-useful checkpoint is trained on MSMT17 or Market-1501 under academic-only terms) · EdgeSAM (the upstream repository states no licence at all) | no |
 
 Unpublished models stay convertible: the input contract and the conversion notes
 for each one are in [`docs/MODELS.md`](../docs/MODELS.md).
@@ -71,6 +76,13 @@ for each one are in [`docs/MODELS.md`](../docs/MODELS.md).
 general-purpose runtime that loads any `.rknn`; the terms in this table apply to
 the weights and the compiled files.
 
+## Speech models
+
+Voice activity, Paraformer recognition and Matcha + Vocos synthesis are
+published above. The wake-word model is not: its licence is unresolved. How to
+build every speech graph for RK3588, the wake word included, and the four things
+a clean conversion gets wrong there, is in [`speech/`](speech/).
+
 ## Layout
 
 ```
@@ -78,6 +90,7 @@ model_zoo/
   README.md          this page
   hf/<repo>/README.md  the model card published as that Hugging Face repo's README
   publish_hf.py      uploads a repo's files and card, then checks every byte arrived
+  speech/            fp16 RK3588 builds of the speech models, and the rewrites they need
 ```
 
 The list of published files and their SHA-256 sums lives in one place, the

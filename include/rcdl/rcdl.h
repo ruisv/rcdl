@@ -5,9 +5,11 @@
 // Layers (see docs/CPP_API.md for the full map):
 //   core/     Status · DmaBuf                    (Linux dma-heap / dma-buf)
 //   backend/  Engine · output readers            (librknnrt -> rknn_*)
-//   preproc/  Image · RGA letterbox / resize / cvtColor + CPU fallback (librga im2d)
+//   preproc/  Image · RGA letterbox / resize / cvtColor + CPU fallback (librga im2d) ·
+//             fbank · iSTFT (speech front ends)
 //   media/    VideoDecoder · VideoEncoder · Jpeg (librockchip_mpp)
-//   tasks/    det · cls · pose · seg · obb · ocr · depth ...
+//   tasks/    det · cls · pose · seg · obb · ocr · depth ... · VAD · wake word ·
+//             ASR · voice commands · TTS · vocoder
 //   tracks/   ByteTrack · ReID
 //   pipeline/ sync / async detection · async video detection · tracking
 
@@ -42,6 +44,14 @@
 #include "rcdl/tasks/wholebody.h"
 #include "rcdl/tasks/open_vocab.h"
 #include "rcdl/tasks/panoptic_drive.h"
+#include "rcdl/preproc/fbank.h"
+#include "rcdl/preproc/istft.h"
+#include "rcdl/tasks/vad.h"
+#include "rcdl/tasks/kws.h"
+#include "rcdl/tasks/asr.h"
+#include "rcdl/tasks/command.h"
+#include "rcdl/tasks/vocoder.h"
+#include "rcdl/tasks/tts.h"
 #include "rcdl/tracks/byte_tracker.h"
 #include "rcdl/tracks/reid.h"
 #include "rcdl/backend/engine_pool.h"
