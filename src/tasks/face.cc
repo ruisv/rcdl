@@ -571,7 +571,7 @@ void FaceRecognizer::feed(const ImageView& src, const float m[6]) {
       cfg_.model_input == PixelFormat::BGR888 || cfg_.model_input == PixelFormat::BGRA8888;
   const bool swap = src_bgr != want_bgr;
 
-  float inv[6];
+  float inv[6] = {};  // filled by invertAffine, or RCDL_REQUIRE throws
   RCDL_REQUIRE(invertAffine(m, inv),
                "FaceRecognizer: the alignment transform is degenerate (are the five landmarks "
                "distinct?)");
